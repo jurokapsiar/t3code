@@ -1993,7 +1993,6 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         thread.deletedAt !== null ||
         thread.archivedAt !== null ||
         (thread.session?.activeTurnId !== null && thread.session?.activeTurnId !== undefined) ||
-        hasQueuedTurnStartForThread(thread, command.createdAt) ||
         openRequests(thread).size > 0
       ) {
         return [];
@@ -2008,6 +2007,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           detail: `Thread '${command.threadId}' cannot replace history while provider session is starting.`,
         });
       }
+      if (hasQueuedTurnStartForThread(thread, command.createdAt)) return [];
       const sameHistory =
         thread.messages.length === command.messages.length &&
         thread.messages.every((message, index) => {
