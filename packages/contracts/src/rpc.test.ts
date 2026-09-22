@@ -2,7 +2,11 @@ import { describe, expect, it } from "vite-plus/test";
 import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
 
-import { WsSubscribeServerConfigRpc } from "./rpc.ts";
+import {
+  WsOpencodeListSessionsRpc,
+  WsOpencodeReconcileThreadRpc,
+  WsSubscribeServerConfigRpc,
+} from "./rpc.ts";
 
 /**
  * The client always sends `environmentThemes`, including to servers built
@@ -27,5 +31,24 @@ describe("subscribeServerConfig payload compatibility", () => {
   it("stays optional, so a client that never sends it still subscribes", () => {
     const decoded = Schema.decodeUnknownSync(WsSubscribeServerConfigRpc.payloadSchema)({});
     expect(decoded).toEqual({});
+  });
+});
+
+describe("opencode.listSessions", () => {
+  it("decodes an instance and directory request", () => {
+    const decoded = Schema.decodeUnknownSync(WsOpencodeListSessionsRpc.payloadSchema)({
+      instanceId: "opencode",
+      cwd: "/repo",
+    });
+    expect(decoded).toEqual({ instanceId: "opencode", cwd: "/repo" });
+  });
+});
+
+describe("opencode.reconcileThread", () => {
+  it("decodes a thread reconcile request", () => {
+    const decoded = Schema.decodeUnknownSync(WsOpencodeReconcileThreadRpc.payloadSchema)({
+      threadId: "thread-1",
+    });
+    expect(decoded).toEqual({ threadId: "thread-1" });
   });
 });

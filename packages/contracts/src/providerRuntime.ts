@@ -16,6 +16,7 @@ import {
 import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
 import { ProviderUsageLimitsUpdate } from "./providerUsageLimits.ts";
 import { ProviderApprovalOption } from "./orchestration.ts";
+import { OpenCodeSessionHistoryMessage } from "./opencode.ts";
 
 const TrimmedNonEmptyStringSchema = TrimmedNonEmptyString;
 const UnknownRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
@@ -154,6 +155,8 @@ const ProviderRuntimeEventType = Schema.Literals([
   "session.state.changed",
   "session.exited",
   "thread.started",
+  "thread.history.imported",
+  "thread.history.reconciled",
   "thread.state.changed",
   "thread.metadata.updated",
   "thread.token-usage.updated",
@@ -206,6 +209,8 @@ const SessionConfiguredType = Schema.Literal("session.configured");
 const SessionStateChangedType = Schema.Literal("session.state.changed");
 const SessionExitedType = Schema.Literal("session.exited");
 const ThreadStartedType = Schema.Literal("thread.started");
+const ThreadHistoryImportedType = Schema.Literal("thread.history.imported");
+const ThreadHistoryReconciledType = Schema.Literal("thread.history.reconciled");
 const ThreadStateChangedType = Schema.Literal("thread.state.changed");
 const ThreadMetadataUpdatedType = Schema.Literal("thread.metadata.updated");
 const ThreadTokenUsageUpdatedType = Schema.Literal("thread.token-usage.updated");
@@ -903,6 +908,39 @@ const ProviderRuntimeThreadStartedEvent = Schema.Struct({
 });
 export type ProviderRuntimeThreadStartedEvent = typeof ProviderRuntimeThreadStartedEvent.Type;
 
+const ThreadHistoryImportedPayload = Schema.Struct({
+  messages: Schema.Array(
+    Schema.Struct({
+      messageId: TrimmedNonEmptyStringSchema,
+      role: Schema.Literals(["user", "assistant"]),
+      text: Schema.String,
+      createdAt: IsoDateTime,
+    }),
+  ).check(Schema.isNonEmpty()),
+});
+export type ThreadHistoryImportedPayload = typeof ThreadHistoryImportedPayload.Type;
+
+const ProviderRuntimeThreadHistoryImportedEvent = Schema.Struct({
+  ...ProviderRuntimeEventBase.fields,
+  type: ThreadHistoryImportedType,
+  payload: ThreadHistoryImportedPayload,
+});
+export type ProviderRuntimeThreadHistoryImportedEvent =
+  typeof ProviderRuntimeThreadHistoryImportedEvent.Type;
+
+const ThreadHistoryReconciledPayload = Schema.Struct({
+  messages: Schema.Array(OpenCodeSessionHistoryMessage),
+});
+export type ThreadHistoryReconciledPayload = typeof ThreadHistoryReconciledPayload.Type;
+
+const ProviderRuntimeThreadHistoryReconciledEvent = Schema.Struct({
+  ...ProviderRuntimeEventBase.fields,
+  type: ThreadHistoryReconciledType,
+  payload: ThreadHistoryReconciledPayload,
+});
+export type ProviderRuntimeThreadHistoryReconciledEvent =
+  typeof ProviderRuntimeThreadHistoryReconciledEvent.Type;
+
 const ProviderRuntimeThreadStateChangedEvent = Schema.Struct({
   ...ProviderRuntimeEventBase.fields,
   type: ThreadStateChangedType,
@@ -1232,6 +1270,8 @@ export const ProviderRuntimeEventV2 = Schema.Union([
   ProviderRuntimeSessionStateChangedEvent,
   ProviderRuntimeSessionExitedEvent,
   ProviderRuntimeThreadStartedEvent,
+  ProviderRuntimeThreadHistoryImportedEvent,
+  ProviderRuntimeThreadHistoryReconciledEvent,
   ProviderRuntimeThreadStateChangedEvent,
   ProviderRuntimeThreadMetadataUpdatedEvent,
   ProviderRuntimeThreadTokenUsageUpdatedEvent,

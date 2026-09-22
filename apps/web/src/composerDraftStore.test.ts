@@ -2239,6 +2239,22 @@ describe("composerDraftStore setModelSelection", () => {
       draftFor(threadId, TEST_ENVIRONMENT_ID)?.modelSelectionByProvider[CODEX_INSTANCE],
     ).toEqual(modelSelection(CODEX_DRIVER, "gpt-5.3-codex"));
   });
+
+  it("persists and clears an OpenCode session source independently of model selection", () => {
+    const store = useComposerDraftStore.getState();
+
+    store.setOpenCodeSessionSource(threadRef, {
+      type: "existing",
+      sessionId: "ses_previous",
+    });
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.openCodeSessionSource).toEqual({
+      type: "existing",
+      sessionId: "ses_previous",
+    });
+
+    store.setOpenCodeSessionSource(threadRef, undefined);
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.openCodeSessionSource).toBeUndefined();
+  });
 });
 
 describe("composerDraftStore sticky composer settings", () => {

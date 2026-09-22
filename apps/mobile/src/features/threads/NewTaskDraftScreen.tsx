@@ -31,6 +31,7 @@ import {
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   resolveEnvironmentMachineKind,
   type EnvironmentId,
+  ProviderInstanceId,
 } from "@t3tools/contracts";
 
 import {
@@ -66,6 +67,7 @@ import { AppText as Text } from "../../components/AppText";
 import { hasProviderUsageLimits, isUsageLimitsCommand } from "@t3tools/shared/usageLimits";
 import { COMPOSER_LAYOUT_TRANSITION, ComposerSurface } from "./ThreadComposer";
 import { ComposerCommandPopover } from "./ComposerCommandPopover";
+import { OpenCodeSessionPicker } from "./OpenCodeSessionPicker";
 import { useComposerCommandMenu } from "./use-composer-command-menu";
 import {
   ComposerDictationCancelAction,
@@ -1582,6 +1584,18 @@ export function NewTaskDraftScreen(props: {
                         onPress={settingsSheetPresentation.open}
                       />
                     </View>
+                    {flow.selectedModelOption?.providerDriver === "opencode" && selectedProject ? (
+                      <OpenCodeSessionPicker
+                        environmentId={selectedProject.environmentId}
+                        instanceId={
+                          flow.selectedModel?.instanceId ?? ProviderInstanceId.make("opencode")
+                        }
+                        cwd={flow.selectedWorktreePath ?? selectedProject.workspaceRoot}
+                        source={flow.openCodeSessionSource}
+                        editable={!isComposerInteractionLocked}
+                        onSourceChange={flow.setOpenCodeSessionSource}
+                      />
+                    ) : null}
                     {flow.planModeEnabled ? (
                       <ComposerInlineControl
                         accessibilityHint={`Switches to ${flow.interactionMode === "plan" ? "Build" : "Plan"} mode`}

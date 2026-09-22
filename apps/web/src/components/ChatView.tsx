@@ -320,6 +320,12 @@ import {
 import { terminalEnvironment } from "../state/terminal";
 import { threadEnvironment, useEnvironmentThread } from "../state/threads";
 import {
+  openCodeEnvironment,
+  openCodeReconcileKey,
+  openCodeReconcileKeyAfterResult,
+  shouldReconcileOpenCodeThread,
+} from "../state/opencode";
+import {
   requestOlderThreadTurns,
   threadHasOlderTurns,
 } from "@t3tools/client-runtime/state/threads";
@@ -440,6 +446,7 @@ import {
   resolveSendEnvMode,
   revokeBlobPreviewUrl,
   revokeUserMessagePreviewUrls,
+  formatFirstTurnFailureMessage,
   shouldWriteThreadErrorToCurrentServerThread,
   startNewThreadForProject,
   codexArtifactTemplatePromptToAppend,
@@ -1470,6 +1477,9 @@ export default function ChatView(props: ChatViewProps) {
     reportFailure: false,
   });
   const startThreadTurn = useAtomCommand(threadEnvironment.startTurn, { reportFailure: false });
+  const reconcileOpenCodeThread = useAtomCommand(openCodeEnvironment.reconcileThread, {
+    reportFailure: false,
+  });
   const createAttachmentAssetUrl = useAtomQueryRunner(assetEnvironment.createUrl, {
     reportFailure: false,
     refresh: true,
@@ -1569,6 +1579,9 @@ export default function ChatView(props: ChatViewProps) {
   const composerActiveProvider = useComposerDraftStore(
     (store) => store.getComposerDraft(composerDraftTarget)?.activeProvider ?? null,
   );
+  const draftOpenCodeSessionSource = useComposerDraftStore(
+    (store) => store.getComposerDraft(composerDraftTarget)?.openCodeSessionSource,
+  );
   const composerHasUnsentContent = useComposerDraftStore((store) =>
     composerDraftHasUserContent(store.getComposerDraft(composerDraftTarget)),
   );
@@ -1592,6 +1605,9 @@ export default function ChatView(props: ChatViewProps) {
   );
   const setComposerDraftReviewComments = useComposerDraftStore((store) => store.setReviewComments);
   const setComposerDraftModelSelection = useComposerDraftStore((store) => store.setModelSelection);
+  const setComposerDraftOpenCodeSessionSource = useComposerDraftStore(
+    (store) => store.setOpenCodeSessionSource,
+  );
   const setComposerDraftRuntimeMode = useComposerDraftStore((store) => store.setRuntimeMode);
   const setComposerDraftInteractionMode = useComposerDraftStore(
     (store) => store.setInteractionMode,
@@ -1817,6 +1833,21 @@ export default function ChatView(props: ChatViewProps) {
       };
     });
   }, [activeServerThread, draftId, localDraftErrorsByDraftId, routeThreadKey]);
+  const openCodeSessionHistoryQuery = useEnvironmentQuery(
+    draftThread &&
+      fallbackDraftProject &&
+      composerActiveProvider !== null &&
+      draftOpenCodeSessionSource?.type === "existing"
+      ? openCodeEnvironment.sessionMessages({
+          environmentId: draftThread.environmentId,
+          input: {
+            instanceId: composerActiveProvider,
+            cwd: draftThread.worktreePath ?? fallbackDraftProject.workspaceRoot,
+            sessionId: draftOpenCodeSessionSource.sessionId,
+          },
+        })
+      : null,
+  );
   const localDraftThread = useMemo(
     () =>
       draftThread
@@ -1828,9 +1859,16 @@ export default function ChatView(props: ChatViewProps) {
               fallbackDraftProject?.id ?? null,
               fallbackDraftProject ?? undefined,
             ).settings.defaultModelSelection ?? NO_PROVIDER_MODEL_SELECTION,
+            openCodeSessionHistoryQuery.data?.messages ?? [],
           )
         : undefined,
-    [draftThread, fallbackDraftProject, settings, threadId],
+    [
+      draftThread,
+      fallbackDraftProject,
+      openCodeSessionHistoryQuery.data?.messages,
+      settings,
+      threadId,
+    ],
   );
   // Promotion is data-driven: the draft route keeps rendering while the
   // server thread (same pre-allocated ref) starts, so live state must not
@@ -1864,6 +1902,48 @@ export default function ChatView(props: ChatViewProps) {
   // Explicit composer choices and existing server threads retain their permissions.
   const runtimeMode = composerRuntimeMode ?? activeServerThread?.runtimeMode ?? defaultRuntimeMode;
   const isLocalDraftThread = !isServerThread && localDraftThread !== undefined;
+  const openCodeReconcileKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!activeThread || activeThread.session === null) {
+      return;
+    }
+    const providerInstanceId =
+      activeThread.session.providerInstanceId ?? activeThread.modelSelection.instanceId;
+    if (
+      !shouldReconcileOpenCodeThread({
+        isServerThread,
+        providerName: activeThread.session.providerName,
+        sessionStatus: activeThread.session.status,
+        activeTurnId: activeThread.session.activeTurnId,
+      })
+    ) {
+      return;
+    }
+    const key = openCodeReconcileKey({
+      isServerThread,
+      providerName: activeThread.session?.providerName,
+      environmentId: activeThread.environmentId,
+      threadId: activeThread.id,
+      providerInstanceId,
+    });
+    if (key === null) {
+      openCodeReconcileKeyRef.current = null;
+      return;
+    }
+    if (openCodeReconcileKeyRef.current === key) return;
+    openCodeReconcileKeyRef.current = key;
+    void reconcileOpenCodeThread({
+      environmentId: activeThread.environmentId,
+      input: { threadId: activeThread.id },
+    }).then((result) => {
+      const status = result._tag === "Success" ? result.value.status : "failed";
+      openCodeReconcileKeyRef.current = openCodeReconcileKeyAfterResult({
+        currentKey: openCodeReconcileKeyRef.current,
+        attemptKey: key,
+        status,
+      });
+    });
+  }, [activeThread, isServerThread, reconcileOpenCodeThread]);
   const canCheckoutPullRequestIntoThread = isLocalDraftThread;
   const activeThreadId = activeThread?.id ?? null;
   const activeThreadEnvironmentId = activeThread?.environmentId ?? null;
@@ -2366,6 +2446,7 @@ export default function ChatView(props: ChatViewProps) {
     null;
   const lockedProvider = deriveLockedProvider({
     thread: activeThread,
+    isDraftThread: isLocalDraftThread,
     selectedProvider: selectedProviderByThreadId,
     threadProvider,
     providers: providerStatuses,
@@ -7359,6 +7440,11 @@ export default function ChatView(props: ChatViewProps) {
       ctxSelectedModel || activeProjectDefaultModelSelection?.model || DEFAULT_MODEL,
       ctxSelectedModelSelection.options,
     );
+    const openCodeSessionSource =
+      isFirstMessage && ctxSelectedProvider === "opencode"
+        ? useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)
+            ?.openCodeSessionSource
+        : undefined;
 
     let failure: AtomCommandResult<unknown, unknown> | null = null;
     // Auto-title from first message
@@ -7482,6 +7568,7 @@ export default function ChatView(props: ChatViewProps) {
           titleSeed: title,
           runtimeMode,
           interactionMode: sendInteractionMode,
+          ...(openCodeSessionSource ? { openCodeSessionSource } : {}),
           ...(bootstrap ? { bootstrap } : {}),
           createdAt: messageCreatedAt,
         },
@@ -7605,7 +7692,11 @@ export default function ChatView(props: ChatViewProps) {
         }
         setThreadError(
           threadIdForSend,
-          error instanceof Error ? error.message : "Failed to send message.",
+          formatFirstTurnFailureMessage({
+            detail: error instanceof Error ? error.message : "Failed to send message.",
+            bootstrapThreadDeleted:
+              isLocalDraftThread && draftId ? wasBootstrapThreadDeleted(error) : false,
+          }),
         );
       }
     }
@@ -8274,6 +8365,12 @@ export default function ChatView(props: ChatViewProps) {
         nextModelSelection,
         { explicit: true },
       );
+      if (resolvedDriverKind !== "opencode" && isLocalDraftThread) {
+        setComposerDraftOpenCodeSessionSource(
+          scopeThreadRef(activeThread.environmentId, activeThread.id),
+          undefined,
+        );
+      }
       setStickyComposerModelSelection(nextModelSelection);
       scheduleComposerFocus();
     },
@@ -8282,6 +8379,7 @@ export default function ChatView(props: ChatViewProps) {
       lockedProvider,
       scheduleComposerFocus,
       setComposerDraftModelSelection,
+      setComposerDraftOpenCodeSessionSource,
       setStickyComposerModelSelection,
       providerStatuses,
       settings,
@@ -8967,6 +9065,9 @@ export default function ChatView(props: ChatViewProps) {
                             keybindings={keybindings}
                             terminalOpen={Boolean(terminalUiState.terminalOpen)}
                             gitCwd={gitCwd}
+                            opencodeCwd={
+                              activeThread?.worktreePath ?? activeProject?.workspaceRoot ?? null
+                            }
                             pullRequestProjectId={
                               supportsPullRequests ? (activeProject?.id ?? null) : null
                             }

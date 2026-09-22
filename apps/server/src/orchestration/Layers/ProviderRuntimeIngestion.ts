@@ -1484,6 +1484,26 @@ const make = Effect.gen(function* () {
       const thread = yield* resolveThreadRuntimeContext(event.threadId);
       if (!thread) return;
 
+      if (event.type === "thread.history.imported") {
+        yield* orchestrationEngine.dispatch({
+          type: "thread.history.import",
+          commandId: yield* providerCommandId(event, "thread-history-import"),
+          threadId: thread.id,
+          messages: event.payload.messages,
+        });
+        return;
+      }
+      if (event.type === "thread.history.reconciled") {
+        yield* orchestrationEngine.dispatch({
+          type: "thread.history.replace",
+          commandId: yield* providerCommandId(event, "thread-history-replace"),
+          threadId: thread.id,
+          messages: event.payload.messages,
+          createdAt: event.createdAt,
+        });
+        return;
+      }
+
       const now = event.createdAt;
       const eventTurnId = toTurnId(event.turnId);
       const activeTurnId = thread.session?.activeTurnId ?? null;

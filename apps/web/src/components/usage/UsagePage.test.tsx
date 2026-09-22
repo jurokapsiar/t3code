@@ -172,6 +172,22 @@ beforeEach(() => {
 });
 
 describe("UsagePage hourly breakdown", () => {
+  it("requests OpenCode exports only for the Cost metric", () => {
+    renderToStaticMarkup(<UsagePage />);
+    expect(testState.useUsage).toHaveBeenLastCalledWith(
+      expect.objectContaining({ includeOpenCode: true }),
+      null,
+    );
+
+    testState.useUsage.mockClear();
+    testState.metric = "tokens";
+    renderToStaticMarkup(<UsagePage />);
+    expect(testState.useUsage).toHaveBeenLastCalledWith(
+      expect.objectContaining({ includeOpenCode: false }),
+      null,
+    );
+  });
+
   it("keeps recent activity visible first without empty hourly rows", () => {
     const markup = renderToStaticMarkup(<UsagePage />);
     const body = markup.match(/<tbody>(.*?)<\/tbody>/)?.[1] ?? "";

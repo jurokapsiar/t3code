@@ -1,6 +1,11 @@
 import * as NodeURL from "node:url";
 
-import type { ChatAttachment, ProviderApprovalDecision, RuntimeMode } from "@t3tools/contracts";
+import type {
+  ChatAttachment,
+  OpenCodeSessionHistoryMessage,
+  ProviderApprovalDecision,
+  RuntimeMode,
+} from "@t3tools/contracts";
 import {
   createOpencodeClient,
   type Agent,
@@ -12,15 +17,20 @@ import {
   type QuestionAnswer,
   type QuestionRequest,
 } from "@opencode-ai/sdk/v2";
+import type { OpenCodeSessionListEntry } from "@t3tools/contracts";
+import type { UsageRecord } from "../usage/usageTranscripts.ts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Data from "effect/Data";
+import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as P from "effect/Predicate";
 import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
@@ -36,7 +46,6 @@ import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { compareSemverVersions, parseSemver } from "@t3tools/shared/semver";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
-const OPENCODE_EMPTY_CONFIG_CONTENT = "{}";
 
 export const MINIMUM_OPENCODE_VERSION = "1.14.19";
 const OPENCODE_HEALTH_TIMEOUT = "5 seconds";
@@ -50,12 +59,33 @@ const decodeOpenCodeHealth = Schema.decodeUnknownEffect(OpenCodeHealthSchema);
 export function resolveOpenCodeConfigContent(
   inputEnvironment: Readonly<Record<string, string | undefined>> | undefined,
   inheritedEnvironment: Readonly<Record<string, string | undefined>> = process.env,
-): string {
-  return (
-    inputEnvironment?.OPENCODE_CONFIG_CONTENT ??
-    inheritedEnvironment.OPENCODE_CONFIG_CONTENT ??
-    OPENCODE_EMPTY_CONFIG_CONTENT
-  );
+): string | undefined {
+  return inputEnvironment?.OPENCODE_CONFIG_CONTENT ?? inheritedEnvironment.OPENCODE_CONFIG_CONTENT;
+}
+
+/** @internal Reads the Azure credential OpenCode stores for custom OpenAI-compatible providers. */
+export function parseOpenCodeAuthApiKey(content: string): string | undefined {
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(content);
+  } catch {
+    return undefined;
+  }
+  if (decoded === null || typeof decoded !== "object" || Array.isArray(decoded)) {
+    return undefined;
+  }
+  const azure = (decoded as { readonly azure?: unknown }).azure;
+  if (azure === null || typeof azure !== "object" || azure === undefined || Array.isArray(azure)) {
+    return undefined;
+  }
+  const credential = azure as {
+    readonly type?: unknown;
+    readonly apiKey?: unknown;
+    readonly key?: unknown;
+  };
+  if (credential.type !== "api") return undefined;
+  const apiKey = credential.apiKey ?? credential.key;
+  return typeof apiKey === "string" && apiKey.trim().length > 0 ? apiKey : undefined;
 }
 
 export function resolveOpenCodeServerPassword(
@@ -82,6 +112,7 @@ const DEFAULT_OPENCODE_SERVER_TIMEOUT_MS = 30_000;
 const DEFAULT_HOSTNAME = "127.0.0.1";
 const OPENCODE_SERVER_STARTUP_MAX_OUTPUT_CHARS = 64 * 1024;
 const OPENCODE_SKILL_DISCOVERY_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
+const OPENCODE_SESSION_LIST_LIMIT = 100;
 export interface OpenCodeServerProcess {
   readonly url: string;
   readonly serverPassword?: string;
@@ -189,6 +220,14 @@ export interface OpenCodeInventory {
   readonly skills: ReadonlyArray<OpenCodeSkill>;
 }
 
+interface OpenCodeCliSessionRecord {
+  readonly id: unknown;
+  readonly title: unknown;
+  readonly directory: unknown;
+  readonly created: unknown;
+  readonly updated: unknown;
+}
+
 export interface ParsedOpenCodeModelSlug {
   readonly providerID: string;
   readonly modelID: string;
@@ -258,6 +297,15 @@ export interface OpenCodeRuntimeShape {
   readonly loadOpenCodeSkills: (
     client: OpencodeClient,
   ) => Effect.Effect<ReadonlyArray<OpenCodeSkill>, OpenCodeRuntimeError>;
+  readonly loadOpenCodeSessions?: (input: {
+    readonly client: OpencodeClient;
+    readonly directory: string;
+  }) => Effect.Effect<ReadonlyArray<OpenCodeSessionListEntry>, OpenCodeRuntimeError>;
+  readonly loadOpenCodeSessionMessages?: (input: {
+    readonly client: OpencodeClient;
+    readonly directory: string;
+    readonly sessionId: string;
+  }) => Effect.Effect<ReadonlyArray<OpenCodeSessionHistoryMessage>, OpenCodeRuntimeError>;
   readonly loadInventoryFromCli: (input: {
     readonly binaryPath: string;
     readonly cwd: string;
@@ -268,6 +316,23 @@ export interface OpenCodeRuntimeShape {
     readonly cwd: string;
     readonly environment?: NodeJS.ProcessEnv;
   }) => Effect.Effect<ReadonlyArray<OpenCodeSkill>, OpenCodeRuntimeError>;
+  readonly listOpenCodeSessions?: (input: {
+    readonly binaryPath: string;
+    readonly cwd: string;
+    readonly environment?: NodeJS.ProcessEnv;
+  }) => Effect.Effect<ReadonlyArray<OpenCodeSessionListEntry>, OpenCodeRuntimeError>;
+  readonly listAllOpenCodeSessions?: (input: {
+    readonly binaryPath: string;
+    readonly cwd: string;
+    readonly environment?: NodeJS.ProcessEnv;
+  }) => Effect.Effect<ReadonlyArray<OpenCodeSessionListEntry>, OpenCodeRuntimeError>;
+  /** Exports one session for on-demand usage reconciliation. */
+  readonly exportOpenCodeSession?: (input: {
+    readonly binaryPath: string;
+    readonly cwd: string;
+    readonly sessionId: string;
+    readonly environment?: NodeJS.ProcessEnv;
+  }) => Effect.Effect<ReadonlyArray<UsageRecord>, OpenCodeRuntimeError>;
 }
 
 function parseServerUrlFromOutput(output: string): string | null {
@@ -398,6 +463,209 @@ export function parseAgentListCliOutput(stdout: string): ReadonlyArray<Agent> {
 export function parseSkillsCliOutput(stdout: string): ReadonlyArray<OpenCodeSkill> {
   const result = decodeOpenCodeSkillsCliOutputExit(stdout);
   return Exit.isSuccess(result) ? result.value : [];
+}
+
+function parseOpenCodeTimestamp(value: unknown): string | undefined {
+  const timestamp =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && value.trim().length > 0
+        ? Number.isNaN(Number(value))
+          ? Date.parse(value)
+          : Number(value)
+        : Number.NaN;
+  if (!Number.isFinite(timestamp)) return undefined;
+  const iso = DateTime.formatIso(DateTime.makeUnsafe(timestamp));
+  return Number.isNaN(Date.parse(iso)) ? undefined : iso;
+}
+
+function quotePosixShell(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function quoteWindowsShell(value: string): string {
+  return `"${value.replaceAll('"', '""')}"`;
+}
+
+/** @internal Returns the latest prompt time from an OpenCode message payload. */
+export function latestOpenCodeUserPromptAt(messages: unknown): string | undefined {
+  if (!Array.isArray(messages)) return undefined;
+  return messages.reduce<string | undefined>((latest, value) => {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return latest;
+    const info = (value as { readonly info?: unknown }).info;
+    if (info === null || typeof info !== "object" || info === undefined || Array.isArray(info)) {
+      return latest;
+    }
+    const candidate = info as {
+      readonly role?: unknown;
+      readonly time?: { readonly created?: unknown };
+    };
+    if (candidate.role !== "user") return latest;
+    const createdAt = parseOpenCodeTimestamp(candidate.time?.created);
+    if (createdAt === undefined) return latest;
+    return latest === undefined || createdAt > latest ? createdAt : latest;
+  }, undefined);
+}
+
+/** @internal Parses the telemetry fields emitted by `opencode export`. */
+export function parseOpenCodeExport(
+  content: string,
+  sessionId: string,
+): ReadonlyArray<UsageRecord> {
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(content);
+  } catch {
+    return [];
+  }
+  if (decoded === null || typeof decoded !== "object" || Array.isArray(decoded)) return [];
+  const messages = (decoded as { readonly messages?: unknown }).messages;
+  if (!Array.isArray(messages)) return [];
+  const positiveInt = (value: unknown) =>
+    typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.trunc(value) : 0;
+  return messages.flatMap((value): Array<UsageRecord> => {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return [];
+    const info = (value as { readonly info?: unknown }).info;
+    if (info === null || typeof info !== "object" || info === undefined || Array.isArray(info))
+      return [];
+    const record = info as {
+      readonly id?: unknown;
+      readonly role?: unknown;
+      readonly providerID?: unknown;
+      readonly modelID?: unknown;
+      readonly model?: unknown;
+      readonly time?: { readonly created?: unknown; readonly completed?: unknown };
+      readonly tokens?: unknown;
+      readonly cost?: unknown;
+    };
+    if (record.role !== "assistant" || typeof record.id !== "string") return [];
+    const timestamp = parseOpenCodeTimestamp(record.time?.completed ?? record.time?.created);
+    if (timestamp === undefined || record.tokens === null || typeof record.tokens !== "object")
+      return [];
+    const tokenRecord = record.tokens as {
+      readonly input?: unknown;
+      readonly output?: unknown;
+      readonly reasoning?: unknown;
+      readonly cache?: { readonly read?: unknown; readonly write?: unknown };
+    };
+    const provider = typeof record.providerID === "string" ? record.providerID.trim() : "";
+    const modelId = typeof record.modelID === "string" ? record.modelID.trim() : "";
+    const fallbackModel = typeof record.model === "string" ? record.model.trim() : "";
+    const model = provider && modelId ? `${provider}/${modelId}` : fallbackModel;
+    if (!model) return [];
+    const cachedInputTokens = positiveInt(tokenRecord.cache?.read);
+    const cacheCreationTokens = positiveInt(tokenRecord.cache?.write);
+    const inputTokens = positiveInt(tokenRecord.input);
+    const outputTokens = positiveInt(tokenRecord.output);
+    const timestampMs = Date.parse(timestamp);
+    return [
+      {
+        provider: "opencode",
+        timestampMs,
+        model,
+        sessionId,
+        totals: {
+          uncachedInputTokens: Math.max(0, inputTokens - cachedInputTokens - cacheCreationTokens),
+          cachedInputTokens,
+          cacheCreationTokens,
+          outputTokens,
+          reasoningTokens: Math.min(outputTokens, positiveInt(tokenRecord.reasoning)),
+        },
+        reportedCostUsd:
+          typeof record.cost === "number" && Number.isFinite(record.cost) && record.cost >= 0
+            ? record.cost
+            : null,
+        dedupeKey: `opencode:${sessionId}:${record.id}`,
+      },
+    ];
+  });
+}
+
+/** @internal */
+export function parseOpenCodeSessionListCliOutput(
+  stdout: string,
+): ReadonlyArray<OpenCodeSessionListEntry> {
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(stdout);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(decoded)) return [];
+
+  const sessions: Array<OpenCodeSessionListEntry> = [];
+  for (const value of decoded) {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) continue;
+    const record = value as OpenCodeCliSessionRecord;
+    if (
+      typeof record.id !== "string" ||
+      typeof record.directory !== "string" ||
+      typeof record.title !== "string"
+    ) {
+      continue;
+    }
+    const createdAt = parseOpenCodeTimestamp(record.created);
+    const updatedAt = parseOpenCodeTimestamp(record.updated);
+    const id = record.id.trim();
+    const directory = record.directory.trim();
+    if (!createdAt || !updatedAt || id.length === 0 || directory.length === 0) continue;
+    const title = record.title.trim();
+    sessions.push({
+      id,
+      directory,
+      createdAt,
+      updatedAt,
+      ...(title.length > 0 ? { title } : {}),
+    });
+  }
+  return sessions;
+}
+
+/** @internal */
+export function parseOpenCodeSessionMessages(
+  messages: unknown,
+  sessionId: string,
+  fallbackCreatedAt: string,
+): ReadonlyArray<OpenCodeSessionHistoryMessage> {
+  if (!Array.isArray(messages)) return [];
+  return messages.flatMap((value): Array<OpenCodeSessionHistoryMessage> => {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return [];
+    const record = value as {
+      readonly info?: {
+        readonly id?: unknown;
+        readonly role?: unknown;
+        readonly time?: { readonly created?: unknown };
+      };
+      readonly parts?: unknown;
+    };
+    if (
+      !record.info ||
+      typeof record.info.id !== "string" ||
+      (record.info.role !== "user" && record.info.role !== "assistant") ||
+      !Array.isArray(record.parts)
+    ) {
+      return [];
+    }
+    const text = record.parts
+      .flatMap((part) => {
+        if (part === null || typeof part !== "object" || Array.isArray(part)) return [];
+        const candidate = part as { readonly type?: unknown; readonly text?: unknown };
+        return candidate.type === "text" && typeof candidate.text === "string"
+          ? [candidate.text]
+          : [];
+      })
+      .join("");
+    if (text.trim().length === 0) return [];
+    return [
+      {
+        messageId:
+          `opencode:history:${sessionId}:${record.info.id}` as OpenCodeSessionHistoryMessage["messageId"],
+        role: record.info.role,
+        text,
+        createdAt: parseOpenCodeTimestamp(record.info.time?.created) ?? fallbackCreatedAt,
+      },
+    ];
+  });
 }
 
 export function parseOpenCodeModelSlug(
@@ -575,6 +843,8 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const netService = yield* NetService.NetService;
   const hostPlatform = yield* HostProcessPlatform;
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   const resolveCommand = (command: string, args: ReadonlyArray<string>, env?: NodeJS.ProcessEnv) =>
     resolveSpawnCommand(command, args, env ? { env } : {});
 
@@ -602,14 +872,14 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       yield* Effect.addFinalizer(() => terminateCommandGroup.pipe(Effect.ignore));
       const collectOptions =
         input.maxOutputBytes === undefined ? undefined : { maxBytes: input.maxOutputBytes };
-      const [stdout, stderr, code] = yield* Effect.all(
+      const [stdout, stderr] = yield* Effect.all(
         [
           collectStreamAsString(child.stdout, collectOptions),
           collectStreamAsString(child.stderr, collectOptions),
-          child.exitCode,
         ],
         { concurrency: "unbounded" },
       );
+      const code = yield* child.exitCode;
       const exitCode = Number(code);
       if (yield* isWindowsCommandNotFound(exitCode, stderr)) {
         return yield* new OpenCodeRuntimeError({
@@ -675,23 +945,37 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
         ...(input.serverPassword !== undefined ? { serverPassword: input.serverPassword } : {}),
         ...(input.environment !== undefined ? { environment: input.environment } : {}),
       });
+      const configuredOpenAiKey = input.environment?.OPENAI_API_KEY?.trim();
+      const openCodeAuthApiKey =
+        configuredOpenAiKey && configuredOpenAiKey.length > 0
+          ? undefined
+          : yield* Effect.gen(function* () {
+              const home = input.environment?.HOME ?? process.env.HOME;
+              if (!home) return undefined;
+              const authPath = path.join(home, ".local", "share", "opencode", "auth.json");
+              const content = yield* fileSystem
+                .readFileString(authPath)
+                .pipe(Effect.orElseSucceed(() => undefined));
+              return content === undefined ? undefined : parseOpenCodeAuthApiKey(content);
+            });
 
+      const configContent = resolveOpenCodeConfigContent(input.environment);
       const child = yield* spawner
         .spawn(
           ChildProcess.make(spawnCommand.command, spawnCommand.args, {
             detached: hostPlatform !== "win32",
             shell: spawnCommand.shell,
+            cwd: input.directory,
             env: {
               ...input.environment,
+              ...(openCodeAuthApiKey !== undefined ? { OPENAI_API_KEY: openCodeAuthApiKey } : {}),
               ...(serverPassword !== undefined ? { OPENCODE_SERVER_PASSWORD: serverPassword } : {}),
               // Respect an OPENCODE_CONFIG_CONTENT provided by the caller or
-              // the inherited process environment, only falling back to the
-              // empty config when neither is set. Setting it unconditionally
-              // previously clobbered the user's opencode config, hiding their
-              // providers/models. The value is set explicitly (rather than
-              // relying on inheritance) because `extendEnv` is false whenever
-              // `input.environment` is provided.
-              OPENCODE_CONFIG_CONTENT: resolveOpenCodeConfigContent(input.environment),
+              // inherited process environment. When neither is set, omit the
+              // override so OpenCode can load its normal config files. The
+              // value is set explicitly when present because `extendEnv` is
+              // false whenever `input.environment` is provided.
+              ...(configContent !== undefined ? { OPENCODE_CONFIG_CONTENT: configContent } : {}),
             },
             extendEnv: input.environment === undefined,
           }),
@@ -919,6 +1203,103 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
         })),
       ),
     );
+
+  const loadOpenCodeSessions: OpenCodeRuntimeShape["loadOpenCodeSessions"] = (input) =>
+    runOpenCodeSdk("session.list", (signal) =>
+      input.client.session.list({ roots: true, limit: OPENCODE_SESSION_LIST_LIMIT }, { signal }),
+    )
+      .pipe(
+        Effect.map((response) =>
+          (response.data ?? []).flatMap((session): Array<OpenCodeSessionListEntry> => {
+            const time = session.time;
+            const createdAt = parseOpenCodeTimestamp(time?.created);
+            const updatedAt = parseOpenCodeTimestamp(time?.updated);
+            const directory = session.directory?.trim();
+            const id = session.id?.trim();
+            if (!createdAt || !updatedAt || !directory || !id) return [];
+            const title = session.title?.trim();
+            return [
+              {
+                id,
+                directory,
+                createdAt,
+                updatedAt,
+                ...(title ? { title } : {}),
+              } satisfies OpenCodeSessionListEntry,
+            ];
+          }),
+        ),
+      )
+      .pipe(
+        Effect.flatMap((sessions) => {
+          const canonicalize = (directory: string) =>
+            fileSystem
+              .realPath(directory)
+              .pipe(Effect.orElseSucceed(() => path.resolve(directory)));
+          return Effect.gen(function* () {
+            const requestedDirectory = yield* canonicalize(input.directory);
+            const matching = yield* Effect.forEach(
+              sessions,
+              (session) =>
+                canonicalize(session.directory).pipe(
+                  Effect.map((directory) =>
+                    directory === requestedDirectory ? session : undefined,
+                  ),
+                ),
+              { concurrency: 1 },
+            );
+            const matchingSessions = matching
+              .filter((session): session is OpenCodeSessionListEntry => session !== undefined)
+              .toSorted((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+              .slice(0, OPENCODE_SESSION_LIST_LIMIT);
+            return yield* Effect.forEach(
+              matchingSessions,
+              (session) =>
+                runOpenCodeSdk("session.messages", (signal) =>
+                  input.client.session.messages({ sessionID: session.id }, { signal }),
+                ).pipe(
+                  Effect.map((response) => {
+                    const lastPromptAt = latestOpenCodeUserPromptAt(response.data);
+                    return lastPromptAt ? { ...session, lastPromptAt } : session;
+                  }),
+                  Effect.orElseSucceed(() => session),
+                ),
+              { concurrency: 4 },
+            );
+          });
+        }),
+      );
+  const loadOpenCodeSessionMessages: OpenCodeRuntimeShape["loadOpenCodeSessionMessages"] = (
+    input,
+  ) =>
+    Effect.gen(function* () {
+      const session = yield* runOpenCodeSdk("session.get", (signal) =>
+        input.client.session.get({ sessionID: input.sessionId }, { signal }),
+      );
+      const sessionDirectory = session.data?.directory?.trim();
+      if (sessionDirectory !== undefined) {
+        const canonicalize = (directory: string) =>
+          fileSystem.realPath(directory).pipe(Effect.orElseSucceed(() => path.resolve(directory)));
+        const [requestedDirectory, actualDirectory] = yield* Effect.all([
+          canonicalize(input.directory),
+          canonicalize(sessionDirectory),
+        ]);
+        if (requestedDirectory !== actualDirectory) {
+          return yield* new OpenCodeRuntimeError({
+            operation: "session.messages",
+            detail: `OpenCode session '${input.sessionId}' belongs to a different directory.`,
+          });
+        }
+      }
+      const response = yield* runOpenCodeSdk("session.messages", (signal) =>
+        input.client.session.messages({ sessionID: input.sessionId }, { signal }),
+      );
+      return parseOpenCodeSessionMessages(
+        response.data,
+        input.sessionId,
+        DateTime.formatIso(yield* DateTime.now),
+      );
+    });
   const loadSkills = (client: OpencodeClient) =>
     loadOpenCodeSkills(client).pipe(Effect.orElseSucceed((): ReadonlyArray<OpenCodeSkill> => []));
 
@@ -1047,15 +1428,124 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       ),
     );
 
+  const listOpenCodeSessions: OpenCodeRuntimeShape["listOpenCodeSessions"] = (input) =>
+    Effect.gen(function* () {
+      const result = yield* runOpenCodeCommand({
+        binaryPath: input.binaryPath,
+        args: ["session", "list", "--max-count=100", "--format=json"],
+        cwd: input.cwd,
+        ...(input.environment !== undefined ? { environment: input.environment } : {}),
+      });
+      if (result.code !== 0) {
+        return yield* new OpenCodeRuntimeError({
+          operation: "session.list",
+          detail: `OpenCode session list command exited with code ${result.code}.`,
+        });
+      }
+
+      const sessions = parseOpenCodeSessionListCliOutput(result.stdout);
+      const canonicalize = (directory: string) =>
+        fileSystem.realPath(directory).pipe(Effect.orElseSucceed(() => path.resolve(directory)));
+      const requestedDirectory = yield* canonicalize(input.cwd);
+      const matching = yield* Effect.forEach(
+        sessions,
+        (session) =>
+          canonicalize(session.directory).pipe(
+            Effect.map((directory) => (directory === requestedDirectory ? session : null)),
+          ),
+        { concurrency: 1 },
+      );
+
+      return matching
+        .filter((session): session is OpenCodeSessionListEntry => session !== null)
+        .toSorted((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+        .slice(0, OPENCODE_SESSION_LIST_LIMIT);
+    });
+
+  const exportOpenCodeSession: OpenCodeRuntimeShape["exportOpenCodeSession"] = (input) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const temporaryDirectory = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-opencode-export-",
+        });
+        const outputPath = path.join(temporaryDirectory, "session.json");
+        const command =
+          hostPlatform === "win32"
+            ? {
+                binaryPath: input.environment?.ComSpec ?? "cmd.exe",
+                args: [
+                  "/d",
+                  "/s",
+                  "/c",
+                  `${quoteWindowsShell(input.binaryPath)} export --sanitize ${quoteWindowsShell(input.sessionId)} > ${quoteWindowsShell(outputPath)}`,
+                ],
+              }
+            : {
+                binaryPath: "sh",
+                args: [
+                  "-c",
+                  `exec ${quotePosixShell(input.binaryPath)} export --sanitize ${quotePosixShell(input.sessionId)} > ${quotePosixShell(outputPath)}`,
+                ],
+              };
+        const result = yield* runOpenCodeCommand({
+          ...command,
+          cwd: input.cwd,
+          maxOutputBytes: 64 * 1024,
+          ...(input.environment !== undefined ? { environment: input.environment } : {}),
+        });
+        if (result.code !== 0) {
+          return yield* new OpenCodeRuntimeError({
+            operation: "session.export",
+            detail: `OpenCode export command exited with code ${result.code}.`,
+          });
+        }
+        const content = yield* fileSystem.readFileString(outputPath).pipe(
+          Effect.mapError(
+            (cause) =>
+              new OpenCodeRuntimeError({
+                operation: "session.export",
+                detail: `OpenCode export output could not be read: ${openCodeRuntimeErrorDetail(cause)}`,
+                cause,
+              }),
+          ),
+        );
+        return parseOpenCodeExport(content, input.sessionId);
+      }),
+    );
+
+  const listAllOpenCodeSessions: OpenCodeRuntimeShape["listAllOpenCodeSessions"] = (input) =>
+    Effect.gen(function* () {
+      const result = yield* runOpenCodeCommand({
+        binaryPath: input.binaryPath,
+        args: ["session", "list", "--format=json"],
+        cwd: input.cwd,
+        ...(input.environment !== undefined ? { environment: input.environment } : {}),
+      });
+      if (result.code !== 0) {
+        return yield* new OpenCodeRuntimeError({
+          operation: "session.listAll",
+          detail: `OpenCode session list command exited with code ${result.code}.`,
+        });
+      }
+      return parseOpenCodeSessionListCliOutput(result.stdout).toSorted((left, right) =>
+        right.updatedAt.localeCompare(left.updatedAt),
+      );
+    });
+
   return {
     startOpenCodeServerProcess,
     connectToOpenCodeServer,
     runOpenCodeCommand,
     createOpenCodeSdkClient,
     loadOpenCodeInventory,
+    loadOpenCodeSessions,
+    loadOpenCodeSessionMessages,
     loadOpenCodeSkills,
     loadInventoryFromCli,
     loadSkillsFromCli,
+    listOpenCodeSessions,
+    listAllOpenCodeSessions,
+    exportOpenCodeSession,
   } satisfies OpenCodeRuntimeShape;
 });
 

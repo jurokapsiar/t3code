@@ -86,6 +86,7 @@ export function useUsage(
         resolution: input.resolution,
         sinceTime: input.sinceTime,
         untilTime: input.untilTime,
+        includeOpenCode: input.includeOpenCode,
       }),
     [
       input.sinceDay,
@@ -94,6 +95,7 @@ export function useUsage(
       input.resolution,
       input.sinceTime,
       input.untilTime,
+      input.includeOpenCode,
     ],
   );
   const atom = usageByWindowAtom(windowKey);

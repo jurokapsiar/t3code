@@ -27,6 +27,7 @@ import * as Predicate from "effect/Predicate";
 import { toProjectorDecodeError, type OrchestrationProjectorDecodeError } from "./Errors.ts";
 import {
   MessageSentPayloadSchema,
+  ThreadHistoryReplacedPayload,
   ProjectCreatedPayload,
   ProjectDeletedPayload,
   ProjectMetaUpdatedPayload,
@@ -800,6 +801,30 @@ export function projectEvent(
           }),
         };
       });
+
+    case "thread.history.replaced":
+      return decodeForEvent(
+        ThreadHistoryReplacedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            messages: payload.messages.map((message) => ({
+              id: message.messageId,
+              role: message.role,
+              text: message.text,
+              turnId: null,
+              streaming: false,
+              createdAt: message.createdAt,
+              updatedAt: message.createdAt,
+            })),
+            updatedAt: payload.updatedAt,
+          }),
+        })),
+      );
 
     case "thread.session-set":
       return Effect.gen(function* () {

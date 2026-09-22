@@ -1341,6 +1341,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(command.modelSelection !== undefined
             ? { modelSelection: command.modelSelection }
             : {}),
+          ...(command.openCodeSessionSource !== undefined
+            ? { openCodeSessionSource: command.openCodeSessionSource }
+            : {}),
           ...(command.titleSeed !== undefined ? { titleSeed: command.titleSeed } : {}),
           runtimeMode: targetThread.runtimeMode,
           interactionMode: targetThread.interactionMode,
@@ -1824,7 +1827,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
-    case "thread.history.import": {
+    case "thread.history.replace": {
       const thread = yield* requireThread({
         readModel,
         command,
@@ -1833,9 +1836,67 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       if (
         thread.deletedAt !== null ||
         thread.archivedAt !== null ||
-        thread.messages.length > 0 ||
+        (thread.session?.activeTurnId !== null && thread.session?.activeTurnId !== undefined) ||
+        openRequests(thread).size > 0
+      ) {
+        return [];
+      }
+      const pendingNewSessionPrompt =
+        thread.session?.status === "starting" &&
+        thread.messages.length === 1 &&
+        thread.messages[0]?.role === "user";
+      if (pendingNewSessionPrompt) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.threadId}' cannot replace history while provider session is starting.`,
+        });
+      }
+      const sameHistory =
+        thread.messages.length === command.messages.length &&
+        thread.messages.every((message, index) => {
+          const incoming = command.messages[index];
+          return (
+            incoming !== undefined &&
+            message.id === incoming.messageId &&
+            message.role === incoming.role &&
+            message.text === incoming.text &&
+            message.createdAt === incoming.createdAt
+          );
+        });
+      if (sameHistory) return [];
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+          metadata: { historyImport: true },
+        })),
+        type: "thread.history.replaced",
+        payload: {
+          threadId: command.threadId,
+          messages: command.messages,
+          updatedAt: command.createdAt,
+        },
+      };
+    }
+
+    case "thread.history.import": {
+      const thread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const pendingProviderPromptImport =
+        thread.session?.status === "starting" &&
+        thread.messages.length === 1 &&
+        thread.messages[0]?.role === "user";
+      if (
+        thread.deletedAt !== null ||
+        thread.archivedAt !== null ||
+        (thread.messages.length > 0 && !pendingProviderPromptImport) ||
         thread.latestTurn !== null ||
-        thread.session !== null ||
+        (thread.session !== null && !pendingProviderPromptImport) ||
         openRequests(thread).size > 0
       ) {
         return yield* new OrchestrationCommandInvariantError({

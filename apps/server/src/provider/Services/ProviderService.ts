@@ -14,6 +14,7 @@
 import type {
   ProviderInterruptTurnInput,
   ProviderInstanceId,
+  OpenCodeReconcileResult,
   ProviderRespondToRequestInput,
   ProviderRespondToUserInputInput,
   ProviderRuntimeEvent,
@@ -94,6 +95,10 @@ export interface ProviderServiceShape {
    * Aggregates runtime session lists from all registered adapters.
    */
   readonly listSessions: () => Effect.Effect<ReadonlyArray<ProviderSession>>;
+
+  readonly reconcileThread: (
+    threadId: ThreadId,
+  ) => Effect.Effect<OpenCodeReconcileResult, ProviderServiceError>;
 
   /**
    * Read capabilities for the adapter bound to a configured provider instance.

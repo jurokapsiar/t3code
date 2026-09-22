@@ -44,6 +44,7 @@ import {
   OrchestrationGetTurnDiffError,
   ORCHESTRATION_WS_METHODS,
   ProjectId,
+  ProviderInstanceId,
   type ProjectEntriesFailure,
   type ProjectFileFailure,
   type ProjectFileOperation,
@@ -1862,6 +1863,128 @@ const makeWsRpcLayer = (
                   }),
               ),
             ),
+            { "rpc.aggregate": "provider" },
+          ),
+        [WS_METHODS.opencodeListSessions]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.opencodeListSessions,
+            Effect.gen(function* () {
+              const instance = yield* providerInstances.getInstance(input.instanceId);
+              if (instance === undefined || !instance.enabled) {
+                return yield* new ProviderSetupError({
+                  instanceId: input.instanceId,
+                  operation: "list-opencode-sessions",
+                  detail: instance ? "This provider is disabled." : "Provider instance not found.",
+                });
+              }
+              if (
+                instance.driverKind !== "opencode" ||
+                instance.listOpenCodeSessions === undefined
+              ) {
+                return yield* new ProviderSetupError({
+                  instanceId: input.instanceId,
+                  operation: "list-opencode-sessions",
+                  detail: "The selected provider instance is not OpenCode.",
+                });
+              }
+              return yield* instance.listOpenCodeSessions(input.cwd).pipe(
+                Effect.map((sessions) => ({ sessions })),
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderSetupError({
+                      instanceId: input.instanceId,
+                      operation: "list-opencode-sessions",
+                      detail: cause.detail,
+                      cause,
+                    }),
+                ),
+              );
+            }),
+            { "rpc.aggregate": "provider" },
+          ),
+        [WS_METHODS.opencodeGetSessionMessages]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.opencodeGetSessionMessages,
+            Effect.gen(function* () {
+              const instance = yield* providerInstances.getInstance(input.instanceId);
+              if (instance === undefined || !instance.enabled) {
+                return yield* new ProviderSetupError({
+                  instanceId: input.instanceId,
+                  operation: "get-opencode-session-messages",
+                  detail: instance ? "This provider is disabled." : "Provider instance not found.",
+                });
+              }
+              if (
+                instance.driverKind !== "opencode" ||
+                instance.getOpenCodeSessionMessages === undefined
+              ) {
+                return yield* new ProviderSetupError({
+                  instanceId: input.instanceId,
+                  operation: "get-opencode-session-messages",
+                  detail: "The selected provider instance is not OpenCode.",
+                });
+              }
+              return yield* instance.getOpenCodeSessionMessages(input.cwd, input.sessionId).pipe(
+                Effect.map((messages) => ({ messages })),
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderSetupError({
+                      instanceId: input.instanceId,
+                      operation: "get-opencode-session-messages",
+                      detail: cause.detail,
+                      cause,
+                    }),
+                ),
+              );
+            }),
+            { "rpc.aggregate": "provider" },
+          ),
+        [WS_METHODS.opencodeReconcileThread]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.opencodeReconcileThread,
+            Effect.gen(function* () {
+              const result = yield* providerService.reconcileThread(input.threadId).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderSetupError({
+                      instanceId: ProviderInstanceId.make("opencode"),
+                      operation: "reconcile-opencode-thread",
+                      detail: "detail" in cause ? String(cause.detail) : String(cause),
+                      cause,
+                    }),
+                ),
+              );
+              const thread = yield* projectionSnapshotQuery
+                .getThreadDetailById(input.threadId, {
+                  activityKinds: [],
+                })
+                .pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ProviderSetupError({
+                        instanceId: ProviderInstanceId.make("opencode"),
+                        operation: "reconcile-opencode-thread",
+                        detail: "detail" in cause ? String(cause.detail) : String(cause),
+                        cause,
+                      }),
+                  ),
+                );
+              const changed =
+                result.status === "reconciled" &&
+                Option.isSome(thread) &&
+                (thread.value.messages.length !== result.messages.length ||
+                  thread.value.messages.some((message, index) => {
+                    const incoming = result.messages[index];
+                    return (
+                      incoming === undefined ||
+                      message.id !== incoming.messageId ||
+                      message.role !== incoming.role ||
+                      message.text !== incoming.text ||
+                      message.createdAt !== incoming.createdAt
+                    );
+                  }));
+              return { status: result.status, changed };
+            }),
             { "rpc.aggregate": "provider" },
           ),
         [WS_METHODS.serverUpdateProvider]: (input) =>

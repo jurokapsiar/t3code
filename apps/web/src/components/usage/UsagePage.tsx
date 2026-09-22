@@ -112,7 +112,7 @@ export function UsagePage() {
   const { days: windowDays, window } = windowSelection;
   const isPast24Hours = windowDays === 1;
   const { merged, environments, selectedEnvironments, isPending, isPartial, refresh } = useUsage(
-    window,
+    { ...window, includeOpenCode: metric === "cost" },
     selectedEnvironmentIds,
   );
   const presentations = useAtomValue(environmentPresentations.presentationsAtom);

@@ -45,6 +45,7 @@ import { useEnvironmentQuery } from "../../state/query";
 import {
   appendComposerDraftAttachments,
   type ComposerDraftInsertion,
+  type ComposerDraft,
   clearComposerDraft,
   composerDraftsAtom,
   createNewTaskDraft,
@@ -171,6 +172,7 @@ type NewTaskFlowContextValue = {
   readonly selectedProject: EnvironmentProject | null;
   readonly modelOptions: ReadonlyArray<ModelOption>;
   readonly selectedModel: ModelSelection | null;
+  readonly openCodeSessionSource: ComposerDraft["openCodeSessionSource"];
   readonly selectedModelOption: ModelOption | null;
   readonly selectedProviderStatus: ServerProvider | null;
   readonly providerGroups: ReadonlyArray<ProviderGroup>;
@@ -219,6 +221,7 @@ type NewTaskFlowContextValue = {
   readonly setSelectedModelOptions: (
     value: ReadonlyArray<ProviderOptionSelection> | undefined,
   ) => void;
+  readonly setOpenCodeSessionSource: (source: ComposerDraft["openCodeSessionSource"]) => void;
   readonly setExpandedProvider: (value: string | null) => void;
 };
 
@@ -417,6 +420,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     );
   }, [activeDraftKey, editingPendingTask, selectedProject]);
   const selectedProjectDraft = useComposerDraft(selectedProjectDraftKey);
+  const openCodeSessionSource = selectedProjectDraft.openCodeSessionSource;
   const prompt = selectedProjectDraft.text;
   const attachments = selectedProjectDraft.attachments;
   // Default mode until the user picks one explicitly — same resolution web
@@ -555,6 +559,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       );
       updateComposerDraftSettings(selectedProjectDraftKey, {
         modelSelection: selection,
+        ...(provider?.driver === "opencode" ? {} : { openCodeSessionSource: undefined }),
         ...(provider?.showInteractionModeToggle === false
           ? { interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE }
           : {}),
@@ -580,6 +585,13 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       setStickyComposerModelSelection(nextSelection);
     },
     [selectedModel, selectedProjectDraftKey],
+  );
+  const setOpenCodeSessionSource = useCallback(
+    (source: ComposerDraft["openCodeSessionSource"]) => {
+      if (!selectedProjectDraftKey) return;
+      updateComposerDraftSettings(selectedProjectDraftKey, { openCodeSessionSource: source });
+    },
+    [selectedProjectDraftKey],
   );
 
   const providerGroups = useMemo(() => groupByProvider(modelOptions), [modelOptions]);
@@ -746,6 +758,9 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       if (match) {
         carryDraftContentTo(match);
       }
+      if (selectedProjectDraftKey) {
+        updateComposerDraftSettings(selectedProjectDraftKey, { openCodeSessionSource: undefined });
+      }
       setSelectedEnvironmentId(environmentId);
       setSelectedProjectKey(match ? scopedProjectKey(match.environmentId, match.id) : null);
     },
@@ -776,6 +791,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
           worktreePath: mode === "local" ? localSelection.worktreePath : selectedWorktreePath,
           ...(draftStartFromOrigin !== undefined ? { startFromOrigin: draftStartFromOrigin } : {}),
         },
+        openCodeSessionSource: undefined,
       });
     },
     [
@@ -839,6 +855,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
           }),
           ...(draftStartFromOrigin !== undefined ? { startFromOrigin: draftStartFromOrigin } : {}),
         },
+        openCodeSessionSource: undefined,
       });
     },
     [draftStartFromOrigin, selectedProject, selectedProjectDraftKey, workspaceMode],
@@ -931,6 +948,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
         modelSelection: message.modelSelection,
         runtimeMode: message.runtimeMode,
         interactionMode: message.interactionMode,
+        openCodeSessionSource: message.openCodeSessionSource,
         workspaceSelection: {
           mode: message.creation.workspaceMode,
           branch: message.creation.branch,
@@ -994,6 +1012,9 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
         attachments: draft.attachments,
         context: draft.context,
         modelSelection: draftModelSelection,
+        ...(draft.openCodeSessionSource && selectedModelOption?.providerDriver === "opencode"
+          ? { openCodeSessionSource: draft.openCodeSessionSource }
+          : {}),
         runtimeMode: draft.runtimeMode ?? defaultRuntimeMode,
         interactionMode: resolvePendingTaskInteractionMode({
           preferenceLoaded: planModePreferenceLoaded,
@@ -1035,6 +1056,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       editingPendingTask,
       selectedEnvironmentServerConfig,
       selectedModel,
+      openCodeSessionSource,
       selectedProject,
       selectedProjectDraftKey,
       legacyPlanModeEnabled,
@@ -1176,6 +1198,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       selectedProject,
       modelOptions,
       selectedModel,
+      openCodeSessionSource,
       selectedModelOption,
       selectedProviderStatus,
       providerGroups,
@@ -1204,6 +1227,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       setRuntimeMode,
       setInteractionMode,
       setSelectedModelOptions,
+      setOpenCodeSessionSource,
       setExpandedProvider,
     }),
     [
@@ -1237,11 +1261,13 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       hasMoreBranches,
       selectedEnvironmentId,
       selectedModel,
+      openCodeSessionSource,
       selectedModelKey,
       selectedModelOption,
       selectedProjectDraftKey,
       selectedProviderStatus,
       setSelectedModelOptions,
+      setOpenCodeSessionSource,
       selectedProject,
       selectedProjectKey,
       selectedWorktreePath,

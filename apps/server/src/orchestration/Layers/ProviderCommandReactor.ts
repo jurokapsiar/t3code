@@ -9,6 +9,7 @@ import {
   type OrchestrationSession,
   ThreadId,
   type ProviderSession,
+  type ProviderSessionStartInput,
   type RuntimeMode,
   type TurnId,
 } from "@t3tools/contracts";
@@ -671,6 +672,7 @@ const make = Effect.gen(function* () {
     options?: {
       readonly modelSelection?: ModelSelection;
       readonly pendingTurnStart?: boolean;
+      readonly openCodeSessionSource?: ProviderSessionStartInput["openCodeSessionSource"];
     },
   ) {
     const thread = yield* resolveThreadShell(threadId);
@@ -745,6 +747,13 @@ const make = Effect.gen(function* () {
       });
     }
     const preferredProvider: ProviderDriverKind = desiredDriverKind;
+    if (options?.openCodeSessionSource !== undefined && desiredDriverKind !== "opencode") {
+      return yield* new ProviderAdapterRequestError({
+        provider: preferredProvider,
+        method: "thread.turn.start",
+        detail: "An OpenCode session source can only be used with the OpenCode provider.",
+      });
+    }
     if (options?.pendingTurnStart === true && thread.session?.status !== "running") {
       yield* setThreadSession({
         threadId,
@@ -812,6 +821,7 @@ const make = Effect.gen(function* () {
     const startProviderSession = (input?: {
       readonly resumeCursor?: unknown;
       readonly provider?: ProviderDriverKind;
+      readonly openCodeSessionSource?: ProviderSessionStartInput["openCodeSessionSource"];
     }) =>
       providerService
         .startSession(threadId, {
@@ -822,6 +832,9 @@ const make = Effect.gen(function* () {
           ...(thread.title ? { title: thread.title } : {}),
           modelSelection: desiredModelSelection,
           ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
+          ...(input?.openCodeSessionSource !== undefined
+            ? { openCodeSessionSource: input.openCodeSessionSource }
+            : {}),
           runtimeMode: desiredRuntimeMode,
         })
         .pipe(Effect.tap(() => refreshWorkspaceSnapshot));
@@ -857,6 +870,13 @@ const make = Effect.gen(function* () {
 
     const existingSessionThreadId =
       thread.session && thread.session.status !== "stopped" && activeSession ? thread.id : null;
+    if (existingSessionThreadId !== null && options?.openCodeSessionSource !== undefined) {
+      return yield* new ProviderAdapterRequestError({
+        provider: preferredProvider,
+        method: "thread.turn.start",
+        detail: "An OpenCode session cannot be changed after the thread has started.",
+      });
+    }
     if (existingSessionThreadId) {
       const runtimeModeChanged = thread.runtimeMode !== thread.session?.runtimeMode;
       const cwdChanged = effectiveCwd !== activeSession?.cwd;
@@ -923,7 +943,11 @@ const make = Effect.gen(function* () {
       return restartedSession.threadId;
     }
 
-    const startedSession = yield* startProviderSession(undefined);
+    const startedSession = yield* startProviderSession(
+      options?.openCodeSessionSource !== undefined
+        ? { openCodeSessionSource: options.openCodeSessionSource }
+        : undefined,
+    );
     yield* bindSessionToThread(startedSession);
     return startedSession.threadId;
   });
@@ -934,6 +958,7 @@ const make = Effect.gen(function* () {
     readonly attachments?: ReadonlyArray<ChatAttachment>;
     readonly modelSelection?: ModelSelection;
     readonly interactionMode?: "default" | "plan";
+    readonly openCodeSessionSource?: ProviderSessionStartInput["openCodeSessionSource"];
     readonly createdAt: string;
   }) {
     const thread = yield* resolveThreadShell(input.threadId);
@@ -945,6 +970,9 @@ const make = Effect.gen(function* () {
     yield* ensureSessionForThread(input.threadId, input.createdAt, {
       ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
       pendingTurnStart: true,
+      ...(input.openCodeSessionSource !== undefined
+        ? { openCodeSessionSource: input.openCodeSessionSource }
+        : {}),
     });
     if (input.modelSelection !== undefined) {
       threadModelSelections.set(input.threadId, input.modelSelection);
@@ -1555,6 +1583,9 @@ const make = Effect.gen(function* () {
         ? { modelSelection: event.payload.modelSelection }
         : {}),
       interactionMode: event.payload.interactionMode,
+      ...(event.payload.openCodeSessionSource !== undefined
+        ? { openCodeSessionSource: event.payload.openCodeSessionSource }
+        : {}),
       createdAt: event.payload.createdAt,
     }).pipe(
       Effect.map(Option.some),

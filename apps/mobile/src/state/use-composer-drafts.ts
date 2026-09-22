@@ -10,9 +10,11 @@ import {
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   ProjectId as ProjectIdSchema,
   ProviderInteractionMode as ProviderInteractionModeSchema,
+  OpenCodeSessionSource,
   RuntimeMode as RuntimeModeSchema,
   type EnvironmentId,
   type ModelSelection,
+  type OpenCodeSessionSource as OpenCodeSessionSourceType,
   type ProjectId,
   type ProviderInteractionMode,
   type RuntimeMode,
@@ -326,6 +328,7 @@ export interface ComposerDraft {
   readonly modelSelection?: ModelSelection;
   readonly runtimeMode?: RuntimeMode;
   readonly interactionMode?: ProviderInteractionMode;
+  readonly openCodeSessionSource?: OpenCodeSessionSourceType;
   readonly workspaceSelection?: ComposerDraftWorkspaceSelection;
   /**
    * Set on new-task drafts only. The project is stored here rather than in
@@ -357,7 +360,12 @@ export interface ComposerDraftWorkspaceSelection {
 
 export type ComposerDraftSettingsUpdate = Pick<
   ComposerDraft,
-  "modelSelection" | "runtimeMode" | "interactionMode" | "workspaceSelection" | "project"
+  | "modelSelection"
+  | "runtimeMode"
+  | "interactionMode"
+  | "openCodeSessionSource"
+  | "workspaceSelection"
+  | "project"
 >;
 
 const ComposerDraftWorkspaceSelectionSchema = Schema.Struct({
@@ -388,6 +396,7 @@ const ComposerDraftSchema = Schema.Struct({
   modelSelection: Schema.optional(ModelSelectionSchema),
   runtimeMode: Schema.optional(RuntimeModeSchema),
   interactionMode: Schema.optional(ProviderInteractionModeSchema),
+  openCodeSessionSource: Schema.optional(OpenCodeSessionSource),
   workspaceSelection: Schema.optional(ComposerDraftWorkspaceSelectionSchema),
   project: Schema.optional(ComposerDraftProjectSchema),
 });
@@ -543,6 +552,7 @@ function isEmptyDraft(draft: ComposerDraft): boolean {
     draft.modelSelection === undefined &&
     draft.runtimeMode === undefined &&
     draft.interactionMode === undefined &&
+    draft.openCodeSessionSource === undefined &&
     draft.workspaceSelection === undefined
   );
 }

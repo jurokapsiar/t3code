@@ -1015,6 +1015,27 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           return;
         }
 
+        case "thread.history.replaced": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            updatedAt: event.payload.updatedAt,
+            latestUserMessageAt:
+              event.payload.messages
+                .filter((message) => message.role === "user")
+                .map((message) => message.createdAt)
+                .toSorted()
+                .at(-1) ?? null,
+          });
+          yield* refreshThreadShellSummary(event.payload.threadId);
+          return;
+        }
+
         case "thread.proposed-plan-upserted":
         case "thread.activity-appended":
         case "thread.approval-response-requested":
@@ -1065,6 +1086,37 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             updatedAt: event.occurredAt,
           });
           yield* refreshThreadShellSummary(event.payload.threadId);
+          return;
+        }
+
+        case "thread.history.replaced": {
+          const existingRows = yield* projectionThreadMessageRepository.listByThreadId({
+            threadId: event.payload.threadId,
+          });
+          if (existingRows.length > 0) {
+            attachmentSideEffects.prunedThreadRelativePaths.set(
+              event.payload.threadId,
+              collectThreadAttachmentRelativePaths(event.payload.threadId, existingRows),
+            );
+          }
+          yield* projectionThreadMessageRepository.deleteByThreadId({
+            threadId: event.payload.threadId,
+          });
+          yield* Effect.forEach(
+            event.payload.messages,
+            (message) =>
+              projectionThreadMessageRepository.upsert({
+                messageId: message.messageId,
+                threadId: event.payload.threadId,
+                turnId: null,
+                role: message.role,
+                text: message.text,
+                isStreaming: false,
+                createdAt: message.createdAt,
+                updatedAt: message.createdAt,
+              }),
+            { concurrency: 1 },
+          ).pipe(Effect.asVoid);
           return;
         }
 

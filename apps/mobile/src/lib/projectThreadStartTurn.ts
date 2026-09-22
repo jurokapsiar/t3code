@@ -3,6 +3,7 @@ import {
   MessageId,
   ThreadId,
   type ModelSelection,
+  type OpenCodeSessionSource,
   type OrchestrationMessageContext,
   type ProjectId,
   type ProviderInteractionMode,
@@ -34,6 +35,7 @@ export interface ProjectThreadStartTurnSpec {
   /** Wire attachments from `prepareTurnAttachments`, in composer order. */
   readonly uploadedAttachments: ReadonlyArray<UploadedMobileAttachment>;
   readonly modelSelection: ModelSelection;
+  readonly openCodeSessionSource?: OpenCodeSessionSource;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
   readonly workspaceMode: "local" | "worktree";
@@ -63,6 +65,7 @@ export function buildProjectThreadStartTurnInput(spec: ProjectThreadStartTurnSpe
       attachments: spec.uploadedAttachments,
     },
     modelSelection: spec.modelSelection,
+    ...(spec.openCodeSessionSource ? { openCodeSessionSource: spec.openCodeSessionSource } : {}),
     titleSeed: title,
     runtimeMode: spec.runtimeMode,
     interactionMode: spec.interactionMode,

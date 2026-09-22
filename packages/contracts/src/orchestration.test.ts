@@ -25,6 +25,7 @@ import {
   ProjectCreateCommand,
   OrchestrationMessage,
   ThreadMessageSentPayload,
+  ThreadHistoryReplaceCommand,
   ThreadMetaUpdatedPayload,
   ThreadLinkedPullRequest,
   ThreadTurnStartCommand,
@@ -67,8 +68,29 @@ const decodeThreadCreatedPayload = Schema.decodeUnknownEffect(ThreadCreatedPaylo
 const decodeOrchestrationCommand = Schema.decodeUnknownEffect(OrchestrationCommand);
 const decodeOrchestrationEvent = Schema.decodeUnknownEffect(OrchestrationEvent);
 const decodeThreadMetaUpdatedPayload = Schema.decodeUnknownEffect(ThreadMetaUpdatedPayload);
+const decodeThreadHistoryReplaceCommand = Schema.decodeUnknownEffect(ThreadHistoryReplaceCommand);
 const decodeDispatchCommandError = Schema.decodeUnknownEffect(OrchestrationDispatchCommandError);
 const decodeSnapShotAccessibility = Schema.decodeUnknownEffect(SnapShotAccessibility);
+
+it.effect("decodes an OpenCode history replacement command", () =>
+  Effect.gen(function* () {
+    const command = yield* decodeThreadHistoryReplaceCommand({
+      type: "thread.history.replace",
+      commandId: CommandId.make("history-replace"),
+      threadId: ThreadId.make("thread-history-replace"),
+      messages: [
+        {
+          messageId: "opencode:history:ses_1:msg_1",
+          role: "assistant",
+          text: "answer",
+          createdAt: "2026-09-12T00:00:00.000Z",
+        },
+      ],
+      createdAt: "2026-09-13T00:00:00.000Z",
+    });
+    assert.strictEqual(command.type, "thread.history.replace");
+  }),
+);
 
 it.effect("decodes a dispatch error after its bootstrap thread was deleted", () =>
   Effect.gen(function* () {
