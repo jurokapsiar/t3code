@@ -820,7 +820,7 @@ export function projectEvent(
         Effect.map((payload) => ({
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
-            messages: payload.messages.map((message) => ({
+            messages: payload.messages.slice(-MAX_THREAD_MESSAGES).map((message) => ({
               id: message.messageId,
               role: message.role,
               text: message.text,

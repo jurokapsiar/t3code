@@ -1414,7 +1414,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     const routable = yield* resolveRoutableSession({
       threadId,
       operation: "ProviderService.reconcileThread",
-      allowRecovery: true,
+      allowRecovery: false,
     });
     if (routable.adapter.reconcileThread === undefined) {
       return yield* toValidationError(
@@ -1422,8 +1422,13 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         `Provider '${routable.adapter.provider}' does not support history reconciliation.`,
       );
     }
-    if (routable.recovered) {
-      return routable.reconcileResult ?? { status: "deferred" };
+    if (!routable.isActive) {
+      const recovered = yield* resolveRoutableSession({
+        threadId,
+        operation: "ProviderService.reconcileThread",
+        allowRecovery: true,
+      });
+      return recovered.reconcileResult ?? { status: "deferred" };
     }
     return yield* routable.adapter.reconcileThread(threadId);
   });

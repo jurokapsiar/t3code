@@ -757,7 +757,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       setSelectedEnvironmentId(environmentId);
       setSelectedProjectKey(match ? scopedProjectKey(match.environmentId, match.id) : null);
     },
-    [projects, selectedProject, carryDraftContentTo],
+    [projects, selectedProject, selectedProjectDraftKey, carryDraftContentTo],
   );
 
   const setWorkspaceMode = useCallback(
@@ -822,6 +822,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
         worktreePath: localSelection.worktreePath,
         ...(draftStartFromOrigin !== undefined ? { startFromOrigin: draftStartFromOrigin } : {}),
       },
+      openCodeSessionSource: undefined,
     });
   }, [
     availableBranches,

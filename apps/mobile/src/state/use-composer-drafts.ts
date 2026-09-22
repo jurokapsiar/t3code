@@ -637,7 +637,8 @@ export function decodePersistedComposerState(value: unknown): {
               draft.attachments.length === 0 &&
               draft.runtimeMode === undefined &&
               draft.interactionMode === undefined &&
-              draft.workspaceSelection === undefined
+              draft.workspaceSelection === undefined &&
+              draft.openCodeSessionSource === undefined
               ? { ...draft, modelSelection: undefined }
               : draft,
             now,

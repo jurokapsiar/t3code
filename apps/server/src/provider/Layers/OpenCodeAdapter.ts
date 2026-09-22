@@ -3894,6 +3894,14 @@ export function makeOpenCodeAdapter(
             : {}),
           cwd: context.directory,
           runtimeMode: context.session.runtimeMode,
+          ...(context.session.model
+            ? {
+                modelSelection: {
+                  instanceId: boundInstanceId,
+                  model: context.session.model,
+                },
+              }
+            : {}),
           ...(resumeCursor !== undefined ? { resumeCursor } : {}),
         });
         return yield* reconcileThread(threadId);
