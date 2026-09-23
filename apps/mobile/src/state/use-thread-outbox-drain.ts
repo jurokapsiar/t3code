@@ -819,6 +819,9 @@ export function useThreadOutboxDrain(): void {
             attachments: prepared.attachments,
           },
           modelSelection: sendSettings.modelSelection,
+          ...(queuedMessage.openCodeSessionSource
+            ? { openCodeSessionSource: queuedMessage.openCodeSessionSource }
+            : {}),
           runtimeMode: sendSettings.runtimeMode,
           interactionMode: sendSettings.interactionMode,
           createdAt: queuedMessage.createdAt,
@@ -947,6 +950,9 @@ export function useThreadOutboxDrain(): void {
           ),
           uploadedAttachments: prepared.attachments,
           modelSelection: sendSettings.modelSelection,
+          ...(queuedMessage.openCodeSessionSource
+            ? { openCodeSessionSource: queuedMessage.openCodeSessionSource }
+            : {}),
           runtimeMode: sendSettings.runtimeMode,
           interactionMode: sendSettings.interactionMode,
           workspaceMode: creation.workspaceMode,

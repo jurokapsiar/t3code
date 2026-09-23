@@ -8,6 +8,7 @@ import {
   ProjectId,
   type MessageId,
   type ModelSelection,
+  type OpenCodeSessionHistoryMessage,
   type PreviewAnnotationPayload,
   type ProviderInteractionMode,
   ProviderDriverKind,
@@ -64,6 +65,15 @@ export const MAX_HIDDEN_MOUNTED_TERMINAL_THREADS = 10;
 export const ENVIRONMENT_RECONNECT_WARNING_GRACE_MS = 2_000;
 
 export const LastInvokedScriptByProjectSchema = Schema.Record(ProjectId, Schema.String);
+
+export function formatFirstTurnFailureMessage(input: {
+  readonly detail: string;
+  readonly bootstrapThreadDeleted: boolean;
+}): string {
+  return input.bootstrapThreadDeleted
+    ? `The temporary thread was removed because startup failed. ${input.detail}`
+    : input.detail;
+}
 
 export function agentControlledBrowserCloseConfirmation(
   surfaces: readonly RightPanelSurface[],
@@ -486,6 +496,7 @@ export function buildLocalDraftThread(
   threadId: ThreadId,
   draftThread: DraftThreadState,
   fallbackModelSelection: ModelSelection,
+  history: ReadonlyArray<OpenCodeSessionHistoryMessage> = [],
 ): Thread {
   return {
     id: threadId,
@@ -496,7 +507,15 @@ export function buildLocalDraftThread(
     runtimeMode: draftThread.runtimeMode,
     interactionMode: draftThread.interactionMode,
     session: null,
-    messages: [],
+    messages: history.map((message) => ({
+      id: message.messageId,
+      role: message.role,
+      text: message.text,
+      turnId: null,
+      streaming: false,
+      createdAt: message.createdAt,
+      updatedAt: message.createdAt,
+    })),
     createdAt: draftThread.createdAt,
     updatedAt: draftThread.createdAt,
     archivedAt: null,
@@ -1029,10 +1048,14 @@ export function threadShellHasStarted(
 // through the environment's provider catalog before locking to a driver.
 export function deriveLockedProvider(input: {
   thread: Thread | null | undefined;
+  isDraftThread?: boolean;
   selectedProvider: string | null;
   threadProvider: string | null;
   providers: ReadonlyArray<Pick<ServerProvider, "instanceId" | "driver">>;
 }): ProviderDriverKind | null {
+  if (input.isDraftThread === true) {
+    return null;
+  }
   if (!threadHasStarted(input.thread)) {
     return null;
   }

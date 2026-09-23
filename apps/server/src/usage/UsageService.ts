@@ -3,7 +3,8 @@
  *
  * The scan reads the provider CLIs' own session files (Claude Code, Codex, and
  * Grok Build) rather than T3 Code's orchestration projections, so usage covers
- * turns driven outside T3 Code too. This is the approach `ccusage` takes.
+ * turns driven outside T3 Code too. OpenCode exports are reconciled on demand
+ * for the Cost view because its session database is not an append-only transcript.
  *
  * Transcripts are append-only, so parsed records are memoised per file by
  * `(size, mtime)`. A cold 30-day scan of ~1.4 GB lands around 2-3 seconds; warm
@@ -17,6 +18,7 @@ import * as NodeOS from "node:os";
 import {
   ClaudeSettings,
   CodexSettings,
+  OpenCodeSettings,
   type ProviderInstanceConfig,
   USAGE_CONTRACT_VERSION,
   type ServerSettings as ServerSettingsValue,
@@ -46,6 +48,7 @@ import { ServerConfig } from "../config.ts";
 import { expandHomePath } from "../pathExpansion.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
+import { OpenCodeRuntime } from "../provider/opencodeRuntime.ts";
 import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
 import { UsageAggregator } from "./usageAggregation.ts";
 import { createOverrideRateTable, parseRateTable, type RateTable } from "./usagePricing.ts";
@@ -84,6 +87,7 @@ const CACHE_RETENTION_DAYS = 90;
 
 const decodeCodexSettings = Schema.decodeOption(CodexSettings);
 const decodeClaudeSettings = Schema.decodeOption(ClaudeSettings);
+const decodeOpenCodeSettings = Schema.decodeOption(OpenCodeSettings);
 
 /** On-disk shape of the rate snapshot. */
 const RatesCacheFile = Schema.Struct({
@@ -484,6 +488,66 @@ export const make = Effect.gen(function* () {
     return scanned;
   });
 
+  const collectOpenCodeExports = Effect.fn("UsageService.collectOpenCodeExports")(function* (
+    settings: ServerSettingsValue,
+    includeOpenCode: boolean,
+  ) {
+    if (!includeOpenCode) return [] as ScannedDir[];
+    const openCodeRuntime = yield* Effect.serviceOption(OpenCodeRuntime);
+    if (Option.isNone(openCodeRuntime)) return [];
+
+    const instances: Array<Pick<ProviderInstanceConfig, "config" | "environment" | "enabled">> =
+      Object.values(settings.providerInstances).filter(
+        (instance) => instance.driver === "opencode",
+      );
+    if (!Object.hasOwn(settings.providerInstances, "opencode")) {
+      instances.push({
+        config: settings.providers.opencode,
+        enabled: settings.providers.opencode.enabled,
+      });
+    }
+
+    const scanned: ScannedDir[] = [];
+    const exportedSessionIds = new Set<string>();
+    for (const instance of instances) {
+      const decoded = decodeOpenCodeSettings(instance.config ?? {});
+      if (Option.isNone(decoded) || !instance.enabled) continue;
+      const environment = mergeProviderInstanceEnvironment(instance.environment, hostEnvironment);
+      const cwd = process.cwd();
+      const listSessions = openCodeRuntime.value.listAllOpenCodeSessions;
+      const exportSession = openCodeRuntime.value.exportOpenCodeSession;
+      if (listSessions === undefined || exportSession === undefined) continue;
+      const sessions = yield* listSessions({
+        binaryPath: decoded.value.binaryPath,
+        cwd,
+        environment,
+      }).pipe(Effect.orElseSucceed(() => []));
+      const exportedRecords = yield* Effect.forEach(
+        sessions,
+        (session) => {
+          if (exportedSessionIds.has(session.id))
+            return Effect.succeed([] as ReadonlyArray<UsageRecord>);
+          exportedSessionIds.add(session.id);
+          return exportSession({
+            binaryPath: decoded.value.binaryPath,
+            cwd,
+            sessionId: session.id,
+            environment,
+          }).pipe(Effect.orElseSucceed(() => [] as ReadonlyArray<UsageRecord>));
+        },
+        { concurrency: 1 },
+      );
+      const filtered = exportedRecords.flat();
+      scanned.push({
+        provider: "opencode",
+        dir: cwd,
+        volumeId: "",
+        files: [{ path: `opencode-export:${cwd}`, records: filtered }],
+      });
+    }
+    return scanned;
+  });
+
   const scanSummary = Effect.fn("UsageService.scanSummary")(function* (
     input: UsageSummaryInput,
     settings: ServerSettingsValue,
@@ -538,10 +602,16 @@ export const make = Effect.gen(function* () {
     // Pricing only matters once records are aggregated, so the rate table
     // loads while transcripts stream instead of gating them: a cold rates
     // fetch on a slow network no longer delays the scan by its own timeout.
-    const [, scannedDirs] = yield* Effect.all(
-      [ensureRates(false), collectDirs(windowStartMs, settings, retentionCutoffMs)],
+    const inputIncludesOpenCode = input.includeOpenCode === true;
+    const [, transcriptDirs, openCodeDirs] = yield* Effect.all(
+      [
+        ensureRates(false),
+        collectDirs(windowStartMs, settings, retentionCutoffMs),
+        collectOpenCodeExports(settings, inputIncludesOpenCode),
+      ],
       { concurrency: 2 },
     );
+    const scannedDirs = [...transcriptDirs, ...openCodeDirs];
 
     const aggregator = new UsageAggregator({
       timeZone: input.timeZone,
@@ -658,6 +728,7 @@ export const make = Effect.gen(function* () {
       input.resolution ?? "day",
       input.sinceTime ?? null,
       input.untilTime ?? null,
+      input.includeOpenCode === true,
       priceOverrides,
     ]);
 

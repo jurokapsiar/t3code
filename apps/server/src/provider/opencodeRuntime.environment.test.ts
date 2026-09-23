@@ -19,6 +19,7 @@ import {
   OpenCodeRuntime,
   OpenCodeRuntimeError,
   OpenCodeRuntimeLive,
+  parseOpenCodeAuthApiKey,
   resolveOpenCodeConfigContent,
   resolveOpenCodeServerPassword,
   verifyOpenCodeServerVersion,
@@ -34,13 +35,31 @@ describe("resolveOpenCodeConfigContent", () => {
     ).toBe('{"source":"caller"}');
   });
 
-  it("falls back to the inherited environment and then an empty config", () => {
+  it("falls back to the inherited environment and otherwise leaves config-file loading enabled", () => {
     expect(
       resolveOpenCodeConfigContent(undefined, {
         OPENCODE_CONFIG_CONTENT: '{"source":"process"}',
       }),
     ).toBe('{"source":"process"}');
-    expect(resolveOpenCodeConfigContent(undefined, {})).toBe("{}");
+    expect(resolveOpenCodeConfigContent(undefined, {})).toBeUndefined();
+  });
+});
+
+describe("parseOpenCodeAuthApiKey", () => {
+  it("reads an Azure API credential without exposing other auth fields", () => {
+    expect(
+      parseOpenCodeAuthApiKey(
+        JSON.stringify({
+          azure: { type: "api", key: "azure-key", apiKey: "azure-api-key" },
+          openai: { type: "oauth", access: "oauth-token" },
+        }),
+      ),
+    ).toBe("azure-api-key");
+  });
+
+  it("returns undefined for malformed or incomplete auth data", () => {
+    expect(parseOpenCodeAuthApiKey("not json")).toBeUndefined();
+    expect(parseOpenCodeAuthApiKey(JSON.stringify({ azure: { type: "api" } }))).toBeUndefined();
   });
 });
 
@@ -185,12 +204,17 @@ const writeOutput = (stream) => new Promise((resolve, reject) => {
   stream.write("x".repeat(2 * 1024 * 1024), (error) => error ? reject(error) : resolve());
 });
 const server = createServer(async (request, response) => {
-  if (request.url.startsWith("/global/health")) {
-    response.setHeader("Content-Type", "application/json");
-    response.end(JSON.stringify({ healthy: true, version: "1.14.19" }));
-    return;
-  }
-  await Promise.all([writeOutput(process.stdout), writeOutput(process.stderr)]);
+ if (request.url.startsWith("/global/health")) {
+   response.setHeader("Content-Type", "application/json");
+   response.end(JSON.stringify({ healthy: true, version: "1.14.19" }));
+   return;
+ }
+ if (request.url.startsWith("/cwd")) {
+   response.setHeader("Content-Type", "text/plain");
+   response.end(process.cwd());
+   return;
+ }
+ await Promise.all([writeOutput(process.stdout), writeOutput(process.stderr)]);
   response.end("drained");
 });
 server.listen(0, "127.0.0.1", () => {
@@ -224,8 +248,12 @@ server.listen(0, "127.0.0.1", () => {
           },
         });
         const response = yield* HttpClient.get(`${server.url}/output`);
+        const childCwd = yield* HttpClient.get(`${server.url}/cwd`).pipe(
+          Effect.flatMap((value) => value.text),
+        );
 
         expect(yield* response.text).toBe("drained");
+        expect(childCwd).toBe(tempDir);
         expect(yield* server.isRunning).toBe(true);
       }).pipe(
         Effect.scoped,

@@ -6,6 +6,7 @@ import {
   defaultInstanceIdForDriver,
   EnvironmentId,
   ModelSelection,
+  OpenCodeSessionSource,
   ProjectId,
   ProviderInstanceId,
   ProviderInteractionMode,
@@ -252,6 +253,7 @@ const PersistedComposerThreadDraftState = Schema.Struct({
   modelSelectionExplicit: Schema.optionalKey(Schema.Boolean),
   runtimeMode: Schema.optionalKey(RuntimeMode),
   interactionMode: Schema.optionalKey(ProviderInteractionMode),
+  openCodeSessionSource: Schema.optionalKey(OpenCodeSessionSource),
 });
 type PersistedComposerThreadDraftState = typeof PersistedComposerThreadDraftState.Type;
 
@@ -403,6 +405,7 @@ export interface ComposerThreadDraftState {
   modelSelectionExplicit?: boolean;
   runtimeMode: RuntimeMode | null;
   interactionMode: ProviderInteractionMode | null;
+  openCodeSessionSource?: OpenCodeSessionSource;
 }
 
 /**
@@ -612,6 +615,10 @@ interface ComposerDraftStoreState {
   setInteractionMode: (
     threadRef: ComposerThreadTarget,
     interactionMode: ProviderInteractionMode | null | undefined,
+  ) => void;
+  setOpenCodeSessionSource: (
+    threadRef: ComposerThreadTarget,
+    source: OpenCodeSessionSource | undefined,
   ) => void;
   addImage: (threadRef: ComposerThreadTarget, image: ComposerImageAttachment) => boolean;
   /** Returns the ids the draft accepted; duplicates and over-cap attachments are left out. */
@@ -904,7 +911,8 @@ function shouldRemoveDraft(draft: ComposerThreadDraftState): boolean {
     Object.keys(draft.modelSelectionByProvider).length === 0 &&
     draft.activeProvider === null &&
     draft.runtimeMode === null &&
-    draft.interactionMode === null
+    draft.interactionMode === null &&
+    draft.openCodeSessionSource === undefined
   );
 }
 
@@ -1944,6 +1952,11 @@ function normalizePersistedDraftsByThreadId(
     let modelSelectionByProvider: Partial<Record<ProviderInstanceId, ModelSelection>> = {};
     let activeProvider: ProviderInstanceId | null = null;
     let modelSelectionExplicit: true | undefined = undefined;
+    const openCodeSessionSource = Schema.is(OpenCodeSessionSource)(
+      draftCandidate.openCodeSessionSource,
+    )
+      ? draftCandidate.openCodeSessionSource
+      : undefined;
 
     if (
       draftCandidate.modelSelectionByProvider &&
@@ -1999,7 +2012,8 @@ function normalizePersistedDraftsByThreadId(
       previewAnnotations.length === 0 &&
       !hasModelData &&
       !runtimeMode &&
-      !interactionMode
+      !interactionMode &&
+      openCodeSessionSource === undefined
     ) {
       continue;
     }
@@ -2032,6 +2046,7 @@ function normalizePersistedDraftsByThreadId(
         : {}),
       ...(runtimeMode ? { runtimeMode } : {}),
       ...(interactionMode ? { interactionMode } : {}),
+      ...(openCodeSessionSource ? { openCodeSessionSource } : {}),
     };
   }
 
@@ -2196,6 +2211,9 @@ export function partializeComposerDraftStoreState(
         : {}),
       ...(draft.runtimeMode ? { runtimeMode: draft.runtimeMode } : {}),
       ...(draft.interactionMode ? { interactionMode: draft.interactionMode } : {}),
+      ...(draft.openCodeSessionSource
+        ? { openCodeSessionSource: draft.openCodeSessionSource }
+        : {}),
     };
     persistedDraftsByThreadKey[threadKey] = persistedDraft;
   }
@@ -3278,6 +3296,37 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               ...base,
               interactionMode: nextInteractionMode,
             };
+            const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
+            if (shouldRemoveDraft(nextDraft)) {
+              delete nextDraftsByThreadKey[threadKey];
+            } else {
+              nextDraftsByThreadKey[threadKey] = nextDraft;
+            }
+            return { draftsByThreadKey: nextDraftsByThreadKey };
+          });
+        },
+        setOpenCodeSessionSource: (threadRef, source) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
+          if (threadKey.length === 0) {
+            return;
+          }
+          const normalizedSource = Schema.is(OpenCodeSessionSource)(source) ? source : undefined;
+          set((state) => {
+            const existing = state.draftsByThreadKey[threadKey];
+            if (!existing && normalizedSource === undefined) {
+              return state;
+            }
+            const base = existing ?? createEmptyThreadDraft();
+            if (Equal.equals(base.openCodeSessionSource, normalizedSource)) {
+              return state;
+            }
+            const nextDraft: ComposerThreadDraftState = {
+              ...base,
+              ...(normalizedSource ? { openCodeSessionSource: normalizedSource } : {}),
+            };
+            if (!normalizedSource) {
+              delete nextDraft.openCodeSessionSource;
+            }
             const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
             if (shouldRemoveDraft(nextDraft)) {
               delete nextDraftsByThreadKey[threadKey];

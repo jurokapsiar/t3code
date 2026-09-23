@@ -1250,12 +1250,16 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             { ...existing, providerInstanceId: bindingInstanceId },
             input.binding.threadId,
           );
+          const reconcileResult =
+            adapter.reconcileThread !== undefined
+              ? yield* adapter.reconcileThread(input.binding.threadId)
+              : undefined;
           yield* analytics.record("provider.session.recovered", {
             provider: existing.provider,
             strategy: "adopt-existing",
             hasResumeCursor: existing.resumeCursor !== undefined,
           });
-          return { adapter, session: existing } as const;
+          return { adapter, session: existing, reconcileResult } as const;
         }
       }
 
@@ -1293,12 +1297,16 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         { ...resumed, providerInstanceId: bindingInstanceId },
         input.binding.threadId,
       );
+      const reconcileResult =
+        adapter.reconcileThread !== undefined
+          ? yield* adapter.reconcileThread(input.binding.threadId)
+          : undefined;
       yield* analytics.record("provider.session.recovered", {
         provider: resumed.provider,
         strategy: "resume-thread",
         hasResumeCursor: resumed.resumeCursor !== undefined,
       });
-      return { adapter, session: resumed } as const;
+      return { adapter, session: resumed, reconcileResult } as const;
     }).pipe(
       withMetrics({
         counter: providerSessionsTotal,
@@ -1333,6 +1341,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         threadId: input.threadId,
         runtimeMode: binding.runtimeMode,
         isActive: true,
+        recovered: false,
+        reconcileResult: undefined,
       } as const;
     }
 
@@ -1343,6 +1353,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         threadId: input.threadId,
         runtimeMode: binding.runtimeMode,
         isActive: false,
+        recovered: false,
+        reconcileResult: undefined,
       } as const;
     }
 
@@ -1356,6 +1368,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       threadId: input.threadId,
       runtimeMode: recovered.session.runtimeMode,
       isActive: true,
+      recovered: true,
+      reconcileResult: recovered.reconcileResult,
     } as const;
   });
 
@@ -1392,6 +1406,31 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             }),
       { discard: true },
     );
+  });
+
+  const reconcileThread: ProviderServiceMethod<"reconcileThread"> = Effect.fn(
+    "ProviderService.reconcileThread",
+  )(function* (threadId) {
+    const routable = yield* resolveRoutableSession({
+      threadId,
+      operation: "ProviderService.reconcileThread",
+      allowRecovery: false,
+    });
+    if (routable.adapter.reconcileThread === undefined) {
+      return yield* toValidationError(
+        "ProviderService.reconcileThread",
+        `Provider '${routable.adapter.provider}' does not support history reconciliation.`,
+      );
+    }
+    if (!routable.isActive) {
+      const recovered = yield* resolveRoutableSession({
+        threadId,
+        operation: "ProviderService.reconcileThread",
+        allowRecovery: true,
+      });
+      return recovered.reconcileResult ?? { status: "deferred" };
+    }
+    return yield* routable.adapter.reconcileThread(threadId);
   });
 
   const startSession: ProviderServiceMethod<"startSession"> = Effect.fn("startSession")(
@@ -2407,6 +2446,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     respondToUserInput,
     stopSession,
     listSessions,
+    reconcileThread,
     getCapabilities,
     getInstanceInfo,
     assertConversationRollbackSupported,

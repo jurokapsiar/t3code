@@ -11,6 +11,7 @@ import {
   ProviderUploadFeedbackInput,
   ProviderUploadFeedbackResult,
 } from "./provider.ts";
+import { ProviderRuntimeEvent } from "./providerRuntime.ts";
 
 const decodeProviderSessionStartInput = Schema.decodeUnknownSync(ProviderSessionStartInput);
 const decodeProviderSendTurnInput = Schema.decodeUnknownSync(ProviderSendTurnInput);
@@ -18,6 +19,7 @@ const decodeProviderSession = Schema.decodeUnknownSync(ProviderSession);
 const decodeProviderEvent = Schema.decodeUnknownSync(ProviderEvent);
 const decodeProviderUploadFeedbackInput = Schema.decodeUnknownSync(ProviderUploadFeedbackInput);
 const decodeProviderUploadFeedbackResult = Schema.decodeUnknownSync(ProviderUploadFeedbackResult);
+const decodeProviderRuntimeEvent = Schema.decodeUnknownSync(ProviderRuntimeEvent);
 
 function getOptionValue(
   options: ReadonlyArray<{ id: string; value: unknown }> | undefined,
@@ -27,6 +29,38 @@ function getOptionValue(
 }
 
 describe("ProviderSessionStartInput", () => {
+  it("accepts OpenCode session sources", () => {
+    const existing = decodeProviderSessionStartInput({
+      threadId: "thread-1",
+      provider: "opencode",
+      runtimeMode: "approval-required",
+      openCodeSessionSource: { type: "existing", sessionId: "ses_123" },
+    });
+    expect(existing.openCodeSessionSource).toEqual({
+      type: "existing",
+      sessionId: "ses_123",
+    });
+
+    const fresh = decodeProviderSessionStartInput({
+      threadId: "thread-1",
+      provider: "opencode",
+      runtimeMode: "approval-required",
+      openCodeSessionSource: { type: "new" },
+    });
+    expect(fresh.openCodeSessionSource).toEqual({ type: "new" });
+  });
+
+  it("rejects an empty OpenCode session id", () => {
+    expect(() =>
+      decodeProviderSessionStartInput({
+        threadId: "thread-1",
+        provider: "opencode",
+        runtimeMode: "approval-required",
+        openCodeSessionSource: { type: "existing", sessionId: "   " },
+      }),
+    ).toThrow();
+  });
+
   it("accepts codex-compatible payloads", () => {
     const parsed = decodeProviderSessionStartInput({
       threadId: "thread-1",
@@ -117,6 +151,29 @@ describe("ProviderSessionStartInput", () => {
     expect(parsed.provider).toBe("ollama");
     expect(parsed.providerInstanceId).toBe("ollama_local");
     expect(parsed.modelSelection?.instanceId).toBe("ollama_local");
+  });
+});
+
+describe("OpenCode history reconciliation runtime events", () => {
+  it("accepts a canonical OpenCode history snapshot", () => {
+    const event = decodeProviderRuntimeEvent({
+      eventId: "event-history-reconciled",
+      provider: "opencode",
+      threadId: "thread-history-reconciled",
+      createdAt: "2026-09-13T00:00:00.000Z",
+      type: "thread.history.reconciled",
+      payload: {
+        messages: [
+          {
+            messageId: "opencode:history:ses_1:msg_1",
+            role: "assistant",
+            text: "answer",
+            createdAt: "2026-09-12T00:00:00.000Z",
+          },
+        ],
+      },
+    });
+    expect(event.type).toBe("thread.history.reconciled");
   });
 });
 

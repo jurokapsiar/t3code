@@ -86,6 +86,7 @@ const runtimeMock = {
     revertMessageID: undefined as string | undefined,
     revertCalls: [] as Array<{ sessionID: string; messageID?: string }>,
     messageCalls: [] as Array<{ sessionID: string; messageID: string }>,
+    messagesCalls: [] as string[],
     messageFailures: 0,
     promptCalls: [] as Array<unknown>,
     commandCalls: [] as Array<Record<string, unknown>>,
@@ -152,6 +153,7 @@ const runtimeMock = {
     this.state.revertMessageID = undefined;
     this.state.revertCalls.length = 0;
     this.state.messageCalls.length = 0;
+    this.state.messagesCalls.length = 0;
     this.state.messageFailures = 0;
     this.state.promptCalls.length = 0;
     this.state.commandCalls.length = 0;
@@ -405,10 +407,13 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
           runtimeMock.state.summarizeCalls.push(input);
           return { data: true };
         },
-        messages: async ({ sessionID }: { sessionID: string }) => ({
-          data:
-            runtimeMock.state.forkMessagesBySession.get(sessionID) ?? runtimeMock.state.messages,
-        }),
+        messages: async ({ sessionID }: { sessionID: string }) => {
+          runtimeMock.state.messagesCalls.push(sessionID);
+          return {
+            data:
+              runtimeMock.state.forkMessagesBySession.get(sessionID) ?? runtimeMock.state.messages,
+          };
+        },
         message: async ({ sessionID, messageID }: { sessionID: string; messageID: string }) => {
           runtimeMock.state.messageCalls.push({ sessionID, messageID });
           if (runtimeMock.state.messageFailures > 0) {
@@ -622,6 +627,13 @@ beforeEach(() => {
 
 const advanceTestClock = (ms: number) =>
   TestClock.adjust(`${ms} millis`).pipe(Effect.andThen(Effect.yieldNow));
+
+const reconcileThread = (adapter: OpenCodeAdapterShape) => {
+  if (adapter.reconcileThread === undefined) {
+    throw new Error("OpenCode adapter does not support reconciliation");
+  }
+  return adapter.reconcileThread;
+};
 
 function promiseWithResolvers<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -1116,63 +1128,40 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
     }),
   );
 
-  it.effect("compacts through the native OpenCode session API", () =>
+  it.effect("does not expose T3-owned compaction", () =>
     Effect.gen(function* () {
       const adapter = yield* OpenCodeAdapter;
       const threadId = asThreadId("thread-opencode-compact");
-      runtimeMock.state.subscribedEvents.push({
-        type: "session.compacted",
-        properties: { sessionID: "http://127.0.0.1:9999/session" },
-      });
-      const eventsFiber = yield* adapter.streamEvents.pipe(
-        Stream.filter((event) => event.threadId === threadId),
-        Stream.take(3),
-        Stream.runCollect,
-        Effect.forkChild,
-      );
       yield* adapter.startSession({
         provider: ProviderDriverKind.make("opencode"),
         threadId,
         runtimeMode: "full-access",
       });
-      NodeAssert.ok(adapter.compaction?.type === "native");
-      yield* adapter.compaction.start(
-        threadId,
-        createModelSelection(ProviderInstanceId.make("opencode"), "openai/gpt-5"),
-      );
-      const summarizeCall = runtimeMock.state.summarizeCalls[0] as Record<string, unknown>;
-      NodeAssert.equal(summarizeCall.modelID, "gpt-5");
-      const events = Array.from(yield* Fiber.join(eventsFiber));
+      NodeAssert.equal(adapter.compaction, undefined);
+      NodeAssert.equal(adapter.capabilities.supportsConversationRollback, false);
+      const rollback = yield* adapter.rollbackThread(threadId, 1).pipe(Effect.flip);
+      NodeAssert.match(rollback.message, /OpenCode owns conversation history/);
       yield* adapter.stopSession(threadId);
-      const compacted = events.some(
-        (event) => event.type === "thread.state.changed" && event.payload.state === "compacted",
-      );
-      NodeAssert.equal(compacted, true);
     }),
   );
-  it.effect("falls back to a fresh session when the persisted session is gone", () =>
+  it.effect("does not replace a missing persisted session", () =>
     Effect.gen(function* () {
       const adapter = yield* OpenCodeAdapter;
       const threadId = asThreadId("thread-opencode-stale");
       runtimeMock.state.missingSessionIds.add("ses_stale");
 
-      const session = yield* adapter.startSession({
-        provider: ProviderDriverKind.make("opencode"),
-        threadId,
-        runtimeMode: "full-access",
-        resumeCursor: { schemaVersion: 1, sessionId: "ses_stale" },
-      });
+      const exit = yield* Effect.exit(
+        adapter.startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          runtimeMode: "full-access",
+          resumeCursor: { schemaVersion: 1, sessionId: "ses_stale" },
+        }),
+      );
 
-      // get probed the stale id, found nothing, then created a new session and
-      // emitted a fresh cursor rather than wedging the thread.
+      NodeAssert.equal(Exit.isFailure(exit), true);
       NodeAssert.deepEqual(runtimeMock.state.sessionGetIds, ["ses_stale"]);
-      NodeAssert.deepEqual(runtimeMock.state.sessionCreateUrls, ["http://127.0.0.1:9999"]);
-      NodeAssert.deepEqual(session.resumeCursor, {
-        schemaVersion: 1,
-        sessionId: "http://127.0.0.1:9999/session",
-      });
-
-      yield* adapter.stopSession(threadId);
+      NodeAssert.deepEqual(runtimeMock.state.sessionCreateUrls, []);
     }),
   );
 
@@ -1249,41 +1238,193 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
     }),
   );
 
-  it.effect(
-    "forks the resumed session into the requested directory instead of losing context",
-    () =>
-      Effect.gen(function* () {
-        const adapter = yield* OpenCodeAdapter;
-        const threadId = asThreadId("thread-opencode-cwd");
-        // The persisted session still exists but was created in another working dir
-        // (e.g. the thread moved from the project root into a git worktree).
-        runtimeMock.state.sessionDirectoryById.set("ses_otherdir", "/some/other/worktree");
+  it.effect("adopts an explicit session and imports its transcript once", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-import");
+      runtimeMock.state.messages = [
+        {
+          info: { id: "user-existing", role: "user" },
+          parts: [{ id: "user-part", type: "text", text: "previous prompt" }],
+        },
+        {
+          info: { id: "assistant-existing", role: "assistant" },
+          parts: [{ id: "assistant-part", type: "text", text: "previous answer" }],
+        },
+      ];
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.take(3),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
 
-        const session = yield* adapter.startSession({
+      const session = yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "approval-required",
+        openCodeSessionSource: { type: "existing", sessionId: "ses_existing" },
+      });
+
+      NodeAssert.deepEqual(session.resumeCursor, {
+        schemaVersion: 1,
+        sessionId: "ses_existing",
+      });
+      NodeAssert.deepEqual(runtimeMock.state.sessionGetIds, ["ses_existing"]);
+      const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second")));
+      NodeAssert.deepEqual(
+        events.map((event) => event.type),
+        ["session.started", "thread.started", "thread.history.imported"],
+      );
+      const imported = events[2];
+      NodeAssert.equal(imported?.type, "thread.history.imported");
+      if (imported?.type === "thread.history.imported") {
+        NodeAssert.deepEqual(
+          imported.payload.messages.map(({ messageId, role, text }) => ({ messageId, role, text })),
+          [
+            {
+              messageId: "opencode:history:ses_existing:user-existing",
+              role: "user",
+              text: "previous prompt",
+            },
+            {
+              messageId: "opencode:history:ses_existing:assistant-existing",
+              role: "assistant",
+              text: "previous answer",
+            },
+          ],
+        );
+      }
+      NodeAssert.deepEqual(runtimeMock.state.messagesCalls, ["ses_existing"]);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("reconciles an adopted session from its canonical OpenCode messages", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-reconcile");
+      runtimeMock.state.messages = [
+        {
+          info: { id: "user-current", role: "user" },
+          parts: [{ id: "user-part", type: "text", text: "current prompt" }],
+        },
+        {
+          info: { id: "assistant-current", role: "assistant" },
+          parts: [{ id: "assistant-part", type: "text", text: "current answer" }],
+        },
+      ];
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+        resumeCursor: { schemaVersion: 1, sessionId: "ses_reconcile" },
+      });
+
+      const result = yield* reconcileThread(adapter)(threadId);
+      NodeAssert.equal(result.status, "reconciled");
+      if (result.status === "reconciled") {
+        NodeAssert.deepEqual(
+          result.messages.map(({ messageId, role, text }) => ({ messageId, role, text })),
+          [
+            {
+              messageId: "opencode:history:ses_reconcile:user-current",
+              role: "user",
+              text: "current prompt",
+            },
+            {
+              messageId: "opencode:history:ses_reconcile:assistant-current",
+              role: "assistant",
+              text: "current answer",
+            },
+          ],
+        );
+      }
+      NodeAssert.deepEqual(runtimeMock.state.messagesCalls, ["ses_reconcile"]);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("restarts the provider stream when its SSE connection is inactive", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-stream-reconcile");
+      runtimeMock.state.messages = [
+        {
+          info: { id: "msg_stream", role: "assistant" },
+          parts: [{ id: "part_stream", type: "text", text: "synced answer" }],
+        },
+      ];
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+        resumeCursor: { schemaVersion: 1, sessionId: "ses_stream_reconcile" },
+      });
+
+      runtimeMock.state.eventStreamError?.(new Error("socket closed"));
+      const result = yield* reconcileThread(adapter)(threadId);
+
+      NodeAssert.equal(result.status, "reconciled");
+      NodeAssert.equal(yield* adapter.hasSession(threadId), true);
+      NodeAssert.deepEqual(runtimeMock.state.messagesCalls, ["ses_stream_reconcile"]);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("defers reconciliation while the provider session is connecting", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-reconcile-connecting");
+      const eventSubscribeObserved = promiseWithResolvers<void>();
+      runtimeMock.state.autoConnect = false;
+      runtimeMock.state.eventSubscribeObserved = () => eventSubscribeObserved.resolve(undefined);
+
+      const startFiber = yield* adapter
+        .startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          runtimeMode: "full-access",
+        })
+        .pipe(Effect.result, Effect.forkChild);
+      yield* Effect.promise(() => eventSubscribeObserved.promise);
+      NodeAssert.equal((yield* adapter.listSessions())[0]?.status, "connecting");
+
+      runtimeMock.state.autoConnect = true;
+      const result = yield* reconcileThread(adapter)(threadId);
+
+      NodeAssert.deepEqual(result, { status: "deferred" });
+      NodeAssert.deepEqual(runtimeMock.state.closeCalls, []);
+
+      yield* adapter.stopSession(threadId);
+      const startResult = yield* Fiber.join(startFiber);
+      NodeAssert.equal(startResult._tag, "Failure");
+    }),
+  );
+
+  it.effect("rejects a resumed session from a different directory instead of forking", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-cwd");
+      // The persisted session still exists but was created in another working dir
+      // (e.g. the thread moved from the project root into a git worktree).
+      runtimeMock.state.sessionDirectoryById.set("ses_otherdir", "/some/other/worktree");
+
+      const exit = yield* Effect.exit(
+        adapter.startSession({
           provider: ProviderDriverKind.make("opencode"),
           threadId,
           runtimeMode: "full-access",
           resumeCursor: { schemaVersion: 1, sessionId: "ses_otherdir" },
-        });
+        }),
+      );
 
-        // A cwd change must not mint an empty session: the adapter forks the
-        // persisted session into the requested cwd, carrying history forward.
-        NodeAssert.deepEqual(runtimeMock.state.sessionGetIds, ["ses_otherdir"]);
-        NodeAssert.deepEqual(runtimeMock.state.sessionCreateUrls, []);
-        NodeAssert.equal(runtimeMock.state.forkCalls.length, 1);
-        NodeAssert.equal(runtimeMock.state.forkCalls[0]?.sessionID, "ses_otherdir");
-        NodeAssert.equal(typeof runtimeMock.state.forkCalls[0]?.directory, "string");
-        // Permission ruleset re-asserted on the fork for the current runtimeMode.
-        NodeAssert.equal(runtimeMock.state.sessionUpdateCalls.length, 1);
-        NodeAssert.equal(runtimeMock.state.sessionUpdateCalls[0]?.sessionID, "ses_otherdir_fork");
-        // Durable cursor now points at the history-complete fork in the new directory.
-        NodeAssert.deepEqual(session.resumeCursor, {
-          schemaVersion: 1,
-          sessionId: "ses_otherdir_fork",
-        });
-
-        yield* adapter.stopSession(threadId);
-      }),
+      NodeAssert.equal(Exit.isFailure(exit), true);
+      NodeAssert.deepEqual(runtimeMock.state.sessionGetIds, ["ses_otherdir"]);
+      NodeAssert.deepEqual(runtimeMock.state.sessionCreateUrls, []);
+      NodeAssert.deepEqual(runtimeMock.state.forkCalls, []);
+    }),
   );
 
   it.effect("reuses the resumed session when the stored directory differs only lexically", () =>
@@ -6645,7 +6786,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
     }).pipe(Effect.provide(adapterLayer));
   });
 
-  it.effect("forks before the removed user prompt and resumes only retained history", () =>
+  it.effect("rejects T3-owned conversation rollback", () =>
     Effect.gen(function* () {
       const adapter = yield* OpenCodeAdapter;
       const threadId = asThreadId("thread-rollback-all");
@@ -6655,130 +6796,10 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         runtimeMode: "full-access",
       });
 
-      runtimeMock.state.messages = [
-        { info: { id: "user-1", role: "user" }, parts: [] },
-        {
-          info: { id: "assistant-1", role: "assistant" },
-          parts: [{ id: "part-1", type: "text", text: "first answer" }],
-        },
-        { info: { id: "user-2", role: "user" }, parts: [] },
-        {
-          info: { id: "assistant-2", role: "assistant" },
-          parts: [{ id: "part-2", type: "text", text: "second answer" }],
-        },
-      ];
-
-      const originalCursor = (yield* adapter.listSessions()).find(
-        (session) => session.threadId === threadId,
-      )?.resumeCursor;
-      runtimeMock.state.forkPreservesBoundary = false;
-      const boundaryError = yield* adapter.rollbackThread(threadId, 1).pipe(Effect.flip);
-      NodeAssert.match(boundaryError.message, /did not preserve the requested rewind boundary/);
-      NodeAssert.deepEqual(
-        (yield* adapter.listSessions()).find((session) => session.threadId === threadId)
-          ?.resumeCursor,
-        originalCursor,
-      );
-      runtimeMock.state.forkPreservesBoundary = true;
-
-      for (const numTurns of [0, 1, 2, 3]) {
-        yield* adapter.stopSession(threadId);
-        yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
-        runtimeMock.state.forkCalls.length = 0;
-        const snapshot = yield* adapter.rollbackThread(threadId, numTurns);
-        NodeAssert.deepEqual(
-          runtimeMock.state.forkCalls.map(({ sessionID, messageID }) => ({ sessionID, messageID })),
-          numTurns === 0
-            ? []
-            : [
-                {
-                  sessionID: "http://127.0.0.1:9999/session",
-                  messageID: numTurns === 1 ? "user-2" : "user-1",
-                },
-              ],
-        );
-        NodeAssert.deepEqual(
-          snapshot.turns.map((turn) => turn.id),
-          numTurns === 0
-            ? ["assistant-1", "assistant-2"]
-            : ["assistant-1_fork"].slice(0, Math.max(0, 2 - numTurns)),
-        );
-        NodeAssert.deepEqual(runtimeMock.state.revertCalls, []);
-      }
-      yield* adapter.stopSession(threadId);
-      yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
-      for (const remaining of [1, 0]) {
-        const snapshot = yield* adapter.rollbackThread(threadId, 1);
-        NodeAssert.equal(snapshot.turns.length, remaining);
-        NodeAssert.deepEqual((yield* adapter.readThread(threadId)).turns, snapshot.turns);
-        const cursor = (yield* adapter.listSessions()).find(
-          (session) => session.threadId === threadId,
-        )?.resumeCursor;
-        NodeAssert.deepEqual(cursor, {
-          schemaVersion: 1,
-          sessionId:
-            remaining === 1
-              ? "http://127.0.0.1:9999/session_fork"
-              : "http://127.0.0.1:9999/session_fork_fork",
-        });
-        yield* adapter.stopSession(threadId);
-        yield* adapter.startSession({ threadId, runtimeMode: "full-access", resumeCursor: cursor });
-        NodeAssert.deepEqual((yield* adapter.readThread(threadId)).turns, snapshot.turns);
-      }
-      NodeAssert.deepEqual(
-        runtimeMock.state.forkCalls.slice(-2).map((call) => call.messageID),
-        ["user-2", "user-1_fork"],
-      );
-      yield* adapter.sendTurn({
-        threadId,
-        input: "continue the retained conversation",
-        modelSelection: createModelSelection(
-          ProviderInstanceId.make("opencode"),
-          "anthropic/claude-sonnet-4-5",
-        ),
-      });
-      NodeAssert.equal(
-        (runtimeMock.state.promptCalls.at(-1) as { sessionID: string }).sessionID,
-        "http://127.0.0.1:9999/session_fork_fork",
-      );
-      const continuation = runtimeMock.state.promptCalls.at(-1) as {
-        sessionID: string;
-        messageID: string;
-      };
-      runtimeMock.state.forkMessagesBySession.get(continuation.sessionID)!.push({
-        info: { id: "continuation-answer", role: "assistant" },
-        parts: [{ id: "continuation-part", type: "text", text: "continued answer" }],
-      });
-      const continuationCursor = (yield* adapter.listSessions()).find(
-        (session) => session.threadId === threadId,
-      )?.resumeCursor;
-      yield* adapter.stopSession(threadId);
-      yield* adapter.startSession({
-        threadId,
-        runtimeMode: "full-access",
-        resumeCursor: continuationCursor,
-      });
-      NodeAssert.deepEqual(
-        (yield* adapter.readThread(threadId)).turns.map((turn) => turn.id),
-        ["continuation-answer"],
-      );
-      NodeAssert.deepEqual((yield* adapter.rollbackThread(threadId, 1)).turns, []);
-      NodeAssert.equal(runtimeMock.state.forkCalls.at(-1)?.messageID, continuation.messageID);
-      yield* adapter.stopSession(threadId);
-      yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
-      runtimeMock.state.messages = runtimeMock.state.messages.filter(
-        (entry) => entry.info.id !== "user-2",
-      );
-      const sharedUserSnapshot = yield* adapter.rollbackThread(threadId, 1);
-      NodeAssert.equal(runtimeMock.state.forkCalls.at(-1)?.messageID, "user-1");
-      NodeAssert.deepEqual(sharedUserSnapshot.turns, []);
-      NodeAssert.deepEqual((yield* adapter.readThread(threadId)).turns, []);
-
-      runtimeMock.state.messages = [];
-      runtimeMock.state.forkCalls.length = 0;
-      const emptySnapshot = yield* adapter.rollbackThread(threadId, 1);
+      const error = yield* adapter.rollbackThread(threadId, 1).pipe(Effect.flip);
+      NodeAssert.match(error.message, /OpenCode owns conversation history/);
       NodeAssert.deepEqual(runtimeMock.state.forkCalls, []);
-      NodeAssert.deepEqual(emptySnapshot.turns, []);
+      yield* adapter.stopSession(threadId);
     }),
   );
 
@@ -7155,27 +7176,27 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       const values = Map.prototype.values;
       yield* Effect.acquireRelease(
         Effect.sync(() =>
-          vi.spyOn(Map.prototype, "values").mockImplementation(function (
-            this: Map<unknown, unknown>,
-          ) {
-            const iterator = values.call(this);
-            const next = iterator.next.bind(iterator);
-            iterator.next = () => {
-              const result = next();
-              const value: unknown = result.value;
-              if (
-                typeof value === "object" &&
-                value !== null &&
-                "id" in value &&
-                typeof value.id === "string" &&
-                value.id.startsWith("history-part-")
-              ) {
-                visitedHistoryParts += 1;
-              }
-              return result;
-            };
-            return iterator;
-          }),
+          vi
+            .spyOn(Map.prototype, "values")
+            .mockImplementation(function (this: Map<unknown, unknown>) {
+              const iterator = values.call(this);
+              const next = iterator.next.bind(iterator);
+              iterator.next = () => {
+                const result = next();
+                const value: unknown = result.value;
+                if (
+                  typeof value === "object" &&
+                  value !== null &&
+                  "id" in value &&
+                  typeof value.id === "string" &&
+                  value.id.startsWith("history-part-")
+                ) {
+                  visitedHistoryParts += 1;
+                }
+                return result;
+              };
+              return iterator;
+            }),
         ),
         (spy) => Effect.sync(() => spy.mockRestore()),
       );

@@ -37,6 +37,7 @@ import {
   branchMismatchKey,
   buildExpiredTerminalContextToastCopy,
   buildLoadingThreadFromShell,
+  buildLocalDraftThread,
   buildRunningThreadTurnInterruptInput,
   buildThreadTurnInterruptInput,
   createLocalDispatchSnapshot,
@@ -86,6 +87,7 @@ import {
   shouldShowBranchMismatchBanner,
   shouldShowPlanFollowUpPrompt,
   shouldWriteThreadErrorToCurrentServerThread,
+  formatFirstTurnFailureMessage,
   toolGroupConsumesUpwardNavigation,
   waitForRevertedMessage,
   prepareRevertedMessageAttachments,
@@ -125,6 +127,26 @@ describe("agent browser close confirmation", () => {
         "tab-2": { controller: "agent" },
       }),
     ).toContain("Close 2 browsers");
+  });
+});
+
+describe("formatFirstTurnFailureMessage", () => {
+  it("explains when bootstrap removed the temporary server thread", () => {
+    expect(
+      formatFirstTurnFailureMessage({
+        detail: "Failed to create worktree.",
+        bootstrapThreadDeleted: true,
+      }),
+    ).toBe("The temporary thread was removed because startup failed. Failed to create worktree.");
+  });
+
+  it("preserves ordinary provider failure details", () => {
+    expect(
+      formatFirstTurnFailureMessage({
+        detail: "Provider unavailable.",
+        bootstrapThreadDeleted: false,
+      }),
+    ).toBe("Provider unavailable.");
   });
 });
 
@@ -1140,6 +1162,77 @@ describe("buildLoadingThreadFromShell", () => {
   });
 });
 
+describe("buildLocalDraftThread", () => {
+  it("replaces draft messages with the selected OpenCode session history", () => {
+    const thread = buildLocalDraftThread(
+      ThreadId.make("draft-thread"),
+      {
+        threadId: ThreadId.make("draft-thread"),
+        environmentId: EnvironmentId.make("environment"),
+        projectId: ProjectId.make("project"),
+        logicalProjectKey: "project",
+        createdAt: "2025-09-10T00:00:00.000Z",
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        envMode: "local",
+        startFromOrigin: false,
+      },
+      NO_PROVIDER_MODEL_SELECTION,
+      [
+        {
+          messageId: MessageId.make("opencode:history:session:old"),
+          role: "user",
+          text: "old prompt",
+          createdAt: "2025-09-09T00:00:00.000Z",
+        },
+      ],
+    );
+
+    expect(thread.messages).toEqual([
+      {
+        id: MessageId.make("opencode:history:session:old"),
+        role: "user",
+        text: "old prompt",
+        turnId: null,
+        streaming: false,
+        createdAt: "2025-09-09T00:00:00.000Z",
+        updatedAt: "2025-09-09T00:00:00.000Z",
+      },
+    ]);
+
+    const replacement = buildLocalDraftThread(
+      ThreadId.make("draft-thread"),
+      {
+        threadId: ThreadId.make("draft-thread"),
+        environmentId: EnvironmentId.make("environment"),
+        projectId: ProjectId.make("project"),
+        logicalProjectKey: "project",
+        createdAt: "2025-09-10T00:00:00.000Z",
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        envMode: "local",
+        startFromOrigin: false,
+      },
+      NO_PROVIDER_MODEL_SELECTION,
+      [
+        {
+          messageId: MessageId.make("opencode:history:session:new"),
+          role: "assistant",
+          text: "new answer",
+          createdAt: "2025-09-10T00:00:00.000Z",
+        },
+      ],
+    );
+    expect(replacement.messages.map((message) => message.id)).toEqual([
+      MessageId.make("opencode:history:session:new"),
+    ]);
+  });
+});
+
 describe("resolveThreadMetadataUpdateForNextTurn", () => {
   const modelSelection = {
     instanceId: ProviderInstanceId.make("codex"),
@@ -1333,6 +1426,22 @@ describe("resolveComposerProviderSelection", () => {
         selectedProvider: selected.instanceId,
         threadProvider: original.instanceId,
         providers: [original.snapshot, selected.snapshot],
+      }),
+    ).toBeNull();
+  });
+
+  it("does not lock a draft to its fallback model after OpenCode history loads", () => {
+    const fallback = entry("codex");
+    const selected = entry("opencode");
+    const thread = importedThread(fallback.instanceId);
+
+    expect(
+      deriveLockedProvider({
+        thread,
+        isDraftThread: true,
+        selectedProvider: selected.instanceId,
+        threadProvider: thread.modelSelection.instanceId,
+        providers: [fallback.snapshot, selected.snapshot],
       }),
     ).toBeNull();
   });

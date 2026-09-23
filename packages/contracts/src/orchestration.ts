@@ -24,6 +24,7 @@ import {
   TurnId,
 } from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
+import { OpenCodeSessionSource } from "./opencode.ts";
 import {
   PullRequestActor,
   PullRequestChecksState,
@@ -1315,6 +1316,7 @@ export const ThreadTurnStartCommand = Schema.Struct({
     context: Schema.optional(OrchestrationMessageContext),
   }),
   modelSelection: Schema.optional(ModelSelection),
+  openCodeSessionSource: Schema.optional(OpenCodeSessionSource),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   interactionMode: ProviderInteractionMode.pipe(
@@ -1337,6 +1339,7 @@ const ClientThreadTurnStartCommand = Schema.Struct({
     context: Schema.optional(OrchestrationMessageContext),
   }),
   modelSelection: Schema.optional(ModelSelection),
+  openCodeSessionSource: Schema.optional(OpenCodeSessionSource),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
@@ -1536,6 +1539,21 @@ const ThreadHistoryImportCommand = Schema.Struct({
   ).check(Schema.isNonEmpty()),
 });
 
+export const ThreadHistoryReplaceCommand = Schema.Struct({
+  type: Schema.Literal("thread.history.replace"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  messages: Schema.Array(
+    Schema.Struct({
+      messageId: MessageId,
+      role: Schema.Literals(["user", "assistant"]),
+      text: Schema.String,
+      createdAt: IsoDateTime,
+    }),
+  ),
+  createdAt: IsoDateTime,
+});
+
 /**
  * Persists a user message without starting a turn. Used by worktree bootstraps
  * so the send is durable while the worktree is still being prepared; the
@@ -1653,6 +1671,7 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadMessageReasoningDeltaCommand,
   ThreadMessageReasoningCompleteCommand,
   ThreadHistoryImportCommand,
+  ThreadHistoryReplaceCommand,
   ThreadMessageUserAppendCommand,
   ThreadProposedPlanUpsertCommand,
   ThreadTurnDiffCompleteCommand,
@@ -1694,6 +1713,7 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.runtime-mode-set",
   "thread.interaction-mode-set",
   "thread.message-sent",
+  "thread.history.replaced",
   "thread.turn-start-requested",
   "thread.turn-interrupt-requested",
   "thread.approval-response-requested",
@@ -1900,10 +1920,24 @@ export const ThreadMessageSentPayload = Schema.Struct({
   updatedAt: IsoDateTime,
 });
 
+export const ThreadHistoryReplacedPayload = Schema.Struct({
+  threadId: ThreadId,
+  messages: Schema.Array(
+    Schema.Struct({
+      messageId: MessageId,
+      role: Schema.Literals(["user", "assistant"]),
+      text: Schema.String,
+      createdAt: IsoDateTime,
+    }),
+  ),
+  updatedAt: IsoDateTime,
+});
+
 export const ThreadTurnStartRequestedPayload = Schema.Struct({
   threadId: ThreadId,
   messageId: MessageId,
   modelSelection: Schema.optional(ModelSelection),
+  openCodeSessionSource: Schema.optional(OpenCodeSessionSource),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   interactionMode: ProviderInteractionMode.pipe(
@@ -2123,6 +2157,11 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.message-sent"),
     payload: ThreadMessageSentPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.history.replaced"),
+    payload: ThreadHistoryReplacedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

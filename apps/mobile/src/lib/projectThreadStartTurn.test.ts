@@ -19,6 +19,33 @@ describe("project thread title", () => {
     expect(deriveThreadTitleFromPrompt(" \n ")).toBe("New thread");
   });
 
+  it("carries an OpenCode session source through first-turn bootstrap", () => {
+    const input = buildProjectThreadStartTurnInput({
+      projectId: ProjectId.make("project"),
+      projectCwd: "/workspace",
+      threadId: "new-thread",
+      commandId: "command",
+      messageId: "message",
+      createdAt: "2026-09-01T00:00:00Z",
+      text: "Continue the parser work",
+      uploadedAttachments: [],
+      modelSelection: { instanceId: ProviderInstanceId.make("opencode"), model: "openai/gpt-5" },
+      openCodeSessionSource: { type: "existing", sessionId: "ses_previous" },
+      runtimeMode: "approval-required",
+      interactionMode: "default",
+      workspaceMode: "local",
+      branch: null,
+      worktreePath: null,
+      startFromOrigin: false,
+      worktreeBranchName: "unused",
+    });
+
+    expect(input.openCodeSessionSource).toEqual({
+      type: "existing",
+      sessionId: "ses_previous",
+    });
+  });
+
   it.each([
     {
       comment: undefined,

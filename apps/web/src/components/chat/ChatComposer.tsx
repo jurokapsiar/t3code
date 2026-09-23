@@ -980,6 +980,7 @@ import { useMediaQuery } from "../../hooks/useMediaQuery";
 import { usePanelAnimationSettings } from "../../panelAnimations";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { serverEnvironment } from "../../state/server";
+import { OpenCodeSessionPicker } from "./OpenCodeSessionPicker";
 import type { ReviewCommentContext } from "../../reviewCommentContext";
 
 const WORKSPACE_SNAPSHOT_RETRY_COOLDOWN_MS = 10_000;
@@ -1418,6 +1419,7 @@ export interface ChatComposerProps {
   keybindings: ResolvedKeybindingsConfig;
   terminalOpen: boolean;
   gitCwd: string | null;
+  opencodeCwd: string | null;
   pullRequestProjectId: ProjectId | null;
   pullRequestRepository: string | null;
   restingControlsHost: HTMLDivElement | null;
@@ -1775,6 +1777,18 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     (store) => store.syncPersistedAttachments,
   );
   const getComposerDraft = useComposerDraftStore((store) => store.getComposerDraft);
+  const setOpenCodeSessionSource = useComposerDraftStore((store) => store.setOpenCodeSessionSource);
+  const openCodeSessionSource = getComposerDraft(composerDraftTarget)?.openCodeSessionSource;
+  const previousOpenCodeCwdRef = useRef(props.opencodeCwd);
+  useEffect(() => {
+    if (
+      previousOpenCodeCwdRef.current !== props.opencodeCwd &&
+      openCodeSessionSource !== undefined
+    ) {
+      setOpenCodeSessionSource(composerDraftTarget, undefined);
+    }
+    previousOpenCodeCwdRef.current = props.opencodeCwd;
+  }, [composerDraftTarget, openCodeSessionSource, props.opencodeCwd, setOpenCodeSessionSource]);
 
   useEffect(() => {
     if (!attachmentUploadsCapabilityKnown) {
@@ -5097,6 +5111,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         }}
         onOpenProviderSetup={onOpenProviderSetup}
       />
+
+      {props.isLocalDraftThread && selectedProvider === "opencode" ? (
+        <OpenCodeSessionPicker
+          environmentId={environmentId}
+          instanceId={selectedInstanceId}
+          cwd={props.opencodeCwd}
+          source={openCodeSessionSource}
+          editable
+          onSourceChange={(source) => setOpenCodeSessionSource(composerDraftTarget, source)}
+        />
+      ) : null}
 
       <>
         {restingBlockDefs.map((def, index) => {

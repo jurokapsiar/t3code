@@ -10,6 +10,7 @@ import {
   IsoDateTime,
   MessageId,
   ModelSelection,
+  OpenCodeSessionSource,
   OrchestrationMessageContext,
   ProjectId,
   ProviderInteractionMode,
@@ -54,6 +55,7 @@ export const QueuedThreadMessageSchema = Schema.Struct({
   context: Schema.optional(OrchestrationMessageContext),
   attachments: Schema.Array(DraftComposerAttachmentSchema),
   modelSelection: Schema.optional(ModelSelection),
+  openCodeSessionSource: Schema.optional(OpenCodeSessionSource),
   runtimeMode: Schema.optional(RuntimeMode),
   interactionMode: Schema.optional(ProviderInteractionMode),
   // Present when the queued item creates a brand-new thread (pending task)
@@ -84,6 +86,7 @@ export interface QueuedThreadMessage {
   readonly context?: OrchestrationMessageContext;
   readonly attachments: ReadonlyArray<DraftComposerAttachment>;
   readonly modelSelection?: ModelSelectionType;
+  readonly openCodeSessionSource?: OpenCodeSessionSource;
   readonly runtimeMode?: RuntimeModeType;
   readonly interactionMode?: ProviderInteractionModeType;
   readonly creation?: QueuedThreadCreation;

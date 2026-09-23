@@ -506,4 +506,184 @@ it.layer(NodeServices.layer)("thread history import", (it) => {
       }
     }),
   );
+
+  it.effect("no-ops equal history replacements and replaces changed history", () =>
+    Effect.gen(function* () {
+      const createdAt = "2026-08-24T10:00:00.000Z";
+      const threadId = ThreadId.make("thread-history-replacement");
+      const messageId = MessageId.make("opencode:history:ses_1:msg_1");
+      const created = yield* projectEvent(createEmptyReadModel(createdAt), {
+        sequence: 1,
+        eventId: EventId.make("event-history-replacement-created"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        type: "thread.created",
+        occurredAt: createdAt,
+        commandId: CommandId.make("command-history-replacement-created"),
+        causationEventId: null,
+        correlationId: CommandId.make("command-history-replacement-created"),
+        metadata: {},
+        payload: {
+          threadId,
+          projectId: ProjectId.make("project-1"),
+          title: "History replacement",
+          modelSelection: { instanceId: ProviderInstanceId.make("opencode"), model: "gpt-5" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+          updatedAt: createdAt,
+        },
+      });
+      const readModel = yield* projectEvent(created, {
+        sequence: 2,
+        eventId: EventId.make("event-history-replacement-message"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        type: "thread.message-sent",
+        occurredAt: createdAt,
+        commandId: CommandId.make("command-history-replacement-message"),
+        causationEventId: null,
+        correlationId: CommandId.make("command-history-replacement-message"),
+        metadata: { historyImport: true },
+        payload: {
+          threadId,
+          messageId,
+          role: "assistant",
+          text: "old answer",
+          turnId: null,
+          streaming: false,
+          createdAt,
+          updatedAt: createdAt,
+        },
+      });
+      const baseCommand = {
+        type: "thread.history.replace" as const,
+        commandId: CommandId.make("command-history-replacement"),
+        threadId,
+        createdAt,
+      };
+
+      const equal = yield* decideOrchestrationCommand({
+        command: {
+          ...baseCommand,
+          messages: [{ messageId, role: "assistant", text: "old answer", createdAt }],
+        },
+        readModel,
+      });
+      expect(equal).toEqual([]);
+
+      const changed = yield* decideOrchestrationCommand({
+        command: {
+          ...baseCommand,
+          messages: [{ messageId, role: "assistant", text: "new answer", createdAt }],
+        },
+        readModel,
+      });
+      expect(changed).toMatchObject({
+        type: "thread.history.replaced",
+        payload: {
+          threadId,
+          messages: [{ messageId, role: "assistant", text: "new answer", createdAt }],
+        },
+      });
+    }),
+  );
+
+  it.effect("does not replace a new session's initial user prompt with empty history", () =>
+    Effect.gen(function* () {
+      const createdAt = "2026-08-24T10:00:00.000Z";
+      const threadId = ThreadId.make("thread-history-replacement-new-session");
+      const projectId = ProjectId.make("project-history-replacement-new-session");
+      const messageId = MessageId.make("message-new-session-prompt");
+      const created = yield* projectEvent(createEmptyReadModel(createdAt), {
+        sequence: 1,
+        eventId: EventId.make("event-new-session-created"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        type: "thread.created",
+        occurredAt: createdAt,
+        commandId: CommandId.make("command-new-session-created"),
+        causationEventId: null,
+        correlationId: CommandId.make("command-new-session-created"),
+        metadata: {},
+        payload: {
+          threadId,
+          projectId,
+          title: "New session",
+          modelSelection: { instanceId: ProviderInstanceId.make("opencode"), model: "gpt-5" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+          updatedAt: createdAt,
+        },
+      });
+      const withPrompt = yield* projectEvent(created, {
+        sequence: 2,
+        eventId: EventId.make("event-new-session-prompt"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        type: "thread.message-sent",
+        occurredAt: createdAt,
+        commandId: CommandId.make("command-new-session-prompt"),
+        causationEventId: null,
+        correlationId: CommandId.make("command-new-session-prompt"),
+        metadata: {},
+        payload: {
+          threadId,
+          messageId,
+          role: "user",
+          text: "Read the current directory",
+          turnId: null,
+          streaming: false,
+          createdAt,
+          updatedAt: createdAt,
+        },
+      });
+      const readModel = yield* projectEvent(withPrompt, {
+        sequence: 3,
+        eventId: EventId.make("event-new-session-starting"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        type: "thread.session-set",
+        occurredAt: createdAt,
+        commandId: CommandId.make("command-new-session-starting"),
+        causationEventId: null,
+        correlationId: CommandId.make("command-new-session-starting"),
+        metadata: {},
+        payload: {
+          threadId,
+          session: {
+            threadId,
+            status: "starting",
+            providerName: "opencode",
+            providerInstanceId: ProviderInstanceId.make("opencode"),
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: createdAt,
+          },
+        },
+      });
+
+      const error = yield* Effect.flip(
+        decideOrchestrationCommand({
+          command: {
+            type: "thread.history.replace",
+            commandId: CommandId.make("command-new-session-empty-reconcile"),
+            threadId,
+            messages: [],
+            createdAt,
+          },
+          readModel,
+        }),
+      );
+
+      expect(error._tag).toBe("OrchestrationCommandInvariantError");
+      expect(error.message).toContain("cannot replace history while provider session is starting");
+    }),
+  );
 });

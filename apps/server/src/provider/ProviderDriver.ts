@@ -26,6 +26,8 @@ import type {
   ProviderDriverKind,
   ProviderInstanceEnvironment,
   ProviderInstanceId,
+  OpenCodeSessionHistoryMessage,
+  OpenCodeSessionListEntry,
   ServerProvider,
 } from "@t3tools/contracts";
 import type * as Effect from "effect/Effect";
@@ -73,6 +75,13 @@ export interface ProviderInstance {
   readonly enabled: boolean;
   readonly snapshot: ServerProviderShape;
   readonly snapshotForCwd?: (cwd: string) => Effect.Effect<ServerProvider, ProviderDriverError>;
+  readonly listOpenCodeSessions?: (
+    cwd: string,
+  ) => Effect.Effect<ReadonlyArray<OpenCodeSessionListEntry>, ProviderDriverError>;
+  readonly getOpenCodeSessionMessages?: (
+    cwd: string,
+    sessionId: string,
+  ) => Effect.Effect<ReadonlyArray<OpenCodeSessionHistoryMessage>, ProviderDriverError>;
   readonly refreshModels?: () => Effect.Effect<void, ProviderDriverError>;
   /** Invalidate T3-owned discovery caches before an explicit provider refresh. */
   readonly invalidateCaches?: Effect.Effect<void>;

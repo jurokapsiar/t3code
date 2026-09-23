@@ -1,5 +1,6 @@
 import {
   EventId,
+  OpenCodeReconcileResult,
   type OpenCodeSettings,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -53,6 +54,7 @@ import {
   openCodeRuntimeErrorDetail,
   loadOpenCodeCommands,
   parseOpenCodeModelSlug,
+  parseOpenCodeSessionMessages,
   runOpenCodeSdk,
   toOpenCodeFileParts,
   toOpenCodePermissionReply,
@@ -174,6 +176,13 @@ export function isSameOpenCodeDirectory(
 interface OpenCodeTurnSnapshot {
   readonly id: TurnId;
   readonly items: Array<unknown>;
+}
+
+interface OpenCodeImportedHistoryMessage {
+  readonly messageId: string;
+  readonly role: "user" | "assistant";
+  readonly text: string;
+  readonly createdAt: string;
 }
 
 type OpenCodeSubscribedEvent =
@@ -368,6 +377,7 @@ interface OpenCodeSessionContext {
   readonly commandFibers: Set<Fiber.Fiber<void, ProviderAdapterRequestError>>;
   readonly promptSemaphore: Semaphore.Semaphore;
   readonly firstConnection: Deferred.Deferred<void, ProviderAdapterRequestError>;
+  streamActive: boolean;
   /**
    * One-shot guard flipped by `stopOpenCodeContext` / `emitUnexpectedExit`.
    * The session lifecycle is owned by `sessionScope`; this Ref exists only
@@ -2187,6 +2197,7 @@ export function makeOpenCodeAdapter(
           return;
         }
         const isFirstConnection = !(yield* Deferred.isDone(context.firstConnection));
+        context.streamActive = true;
         if (isFirstConnection) {
           const updatedAt = yield* nowIso;
           if (
@@ -2763,6 +2774,7 @@ export function makeOpenCodeAdapter(
           context.client.event.subscribe(undefined, {
             signal: eventsAbortController.signal,
             onSseError: (cause) => {
+              context.streamActive = false;
               lastStreamError = cause;
               Queue.offerUnsafe(streamErrors, cause);
             },
@@ -2881,76 +2893,65 @@ export function makeOpenCodeAdapter(
                   }),
                 );
               }
-              // Resume: re-adopt the session named by the durable cursor —
-              // OpenCode scopes history by session id. The probe recovers only
-              // a confirmed not-found (start fresh); transport/auth/server
-              // errors propagate instead of masking as a new empty session.
+              // OpenCode scopes history by session id. An explicit session source
+              // is authoritative: missing or mismatched sessions are errors and
+              // never turn into a different upstream conversation.
               const resolved = yield* Effect.gen(function* () {
-                const adopted = resumeSessionId
-                  ? yield* runOpenCodeSdk("session.get", () =>
-                      client.session.get({ sessionID: resumeSessionId }),
-                    ).pipe(
-                      Effect.map((response) => response.data),
-                      Effect.catchIf(
-                        (cause) => isOpenCodeNotFound(cause),
-                        () => Effect.void,
-                      ),
-                    )
-                  : undefined;
-
-                // Reuse in place only when the session still matches the
-                // requested cwd; on a cwd change it is forked below instead.
-                const reusable =
-                  adopted &&
-                  (!adopted.directory || (yield* sameDirectory(adopted.directory, directory)))
-                    ? adopted
+                const explicitSessionId =
+                  input.openCodeSessionSource?.type === "existing"
+                    ? input.openCodeSessionSource.sessionId
                     : undefined;
+                const requestedSessionId =
+                  explicitSessionId ??
+                  (input.openCodeSessionSource === undefined ? resumeSessionId : undefined);
 
-                if (reusable) {
-                  // Resume skips `session.create`, so re-assert the ruleset —
-                  // a runtime-mode change would otherwise leave the session on
-                  // its original permissions.
-                  yield* runOpenCodeSdk("session.update", () =>
-                    client.session.update({
-                      sessionID: reusable.id,
-                      permission: buildOpenCodePermissionRules(input.runtimeMode),
-                    }),
+                if (requestedSessionId) {
+                  const adopted = yield* runOpenCodeSdk("session.get", () =>
+                    client.session.get({ sessionID: requestedSessionId }),
+                  ).pipe(
+                    Effect.map((response) => response.data),
+                    Effect.catchIf(
+                      (cause) => isOpenCodeNotFound(cause),
+                      () =>
+                        Effect.fail(
+                          new ProviderAdapterRequestError({
+                            provider: PROVIDER,
+                            method: "session.get",
+                            detail: `OpenCode session '${requestedSessionId}' was not found. Choose another session or create a new one.`,
+                          }),
+                        ),
+                    ),
+                    Effect.mapError((cause) =>
+                      Schema.is(ProviderAdapterRequestError)(cause) ? cause : toRequestError(cause),
+                    ),
                   );
-                  return { openCodeSession: reusable, created: false };
-                }
-
-                // The session lives under a different cwd (e.g. the thread
-                // moved into a git worktree). Fork it into the requested
-                // directory instead of minting an empty one — the fork carries
-                // the full history, so the follow-up keeps its context (#3604).
-                if (adopted) {
-                  yield* Effect.logInfo(
-                    `OpenCode session '${adopted.id}' was created under a different working directory; forking into '${directory}' to preserve conversation history.`,
-                  );
-                  const forkedSession = yield* runOpenCodeSdk("session.fork", () =>
-                    client.session.fork({ sessionID: adopted.id, directory }),
-                  );
-                  const forked = forkedSession.data;
-                  if (!forked) {
-                    return yield* new OpenCodeRuntimeError({
-                      operation: "session.fork",
-                      detail: "OpenCode session.fork returned no session payload.",
+                  if (!adopted) {
+                    return yield* new ProviderAdapterRequestError({
+                      provider: PROVIDER,
+                      method: "session.get",
+                      detail: `OpenCode session '${requestedSessionId}' returned no session payload.`,
+                    });
+                  }
+                  if (adopted.directory && !(yield* sameDirectory(adopted.directory, directory))) {
+                    return yield* new ProviderAdapterRequestError({
+                      provider: PROVIDER,
+                      method: "session.get",
+                      detail: `OpenCode session '${requestedSessionId}' belongs to a different directory. Choose a session for this project or create a new one.`,
                     });
                   }
                   yield* runOpenCodeSdk("session.update", () =>
                     client.session.update({
-                      sessionID: forked.id,
+                      sessionID: adopted.id,
                       permission: buildOpenCodePermissionRules(input.runtimeMode),
                     }),
                   );
-                  return { openCodeSession: forked, created: true };
+                  return {
+                    openCodeSession: adopted,
+                    created: false,
+                    importTranscript: explicitSessionId !== undefined,
+                  };
                 }
 
-                if (resumeSessionId) {
-                  yield* Effect.logWarning(
-                    `OpenCode session '${resumeSessionId}' no longer exists; starting a fresh session.`,
-                  );
-                }
                 const createdSession = yield* runOpenCodeSdk("session.create", () =>
                   client.session.create({
                     ...(input.title ? { title: input.title } : {}),
@@ -2963,8 +2964,50 @@ export function makeOpenCodeAdapter(
                     detail: "OpenCode session.create returned no session payload.",
                   });
                 }
-                return { openCodeSession: createdSession.data, created: true };
+                return {
+                  openCodeSession: createdSession.data,
+                  created: true,
+                  importTranscript: false,
+                };
               });
+
+              const importedMessages: ReadonlyArray<OpenCodeImportedHistoryMessage> =
+                resolved.importTranscript
+                  ? yield* Effect.gen(function* () {
+                      const fallbackCreatedAt = DateTime.formatIso(yield* DateTime.now);
+                      return yield* runOpenCodeSdk("session.messages", () =>
+                        client.session.messages({ sessionID: resolved.openCodeSession.id }),
+                      ).pipe(
+                        Effect.map((response) =>
+                          (response.data ?? []).flatMap((entry) => {
+                            const text = entry.parts
+                              .filter(
+                                (part): part is Extract<Part, { type: "text" }> =>
+                                  part.type === "text",
+                              )
+                              .map((part) => part.text)
+                              .join("");
+                            if (text.trim().length === 0) return [];
+                            const createdMillis =
+                              typeof entry.info.time?.created === "number"
+                                ? entry.info.time.created
+                                : undefined;
+                            return [
+                              {
+                                messageId: `opencode:history:${resolved.openCodeSession.id}:${entry.info.id}`,
+                                role: entry.info.role,
+                                text,
+                                createdAt:
+                                  createdMillis === undefined
+                                    ? fallbackCreatedAt
+                                    : (isoFromEpochMs(createdMillis) ?? fallbackCreatedAt),
+                              } satisfies OpenCodeImportedHistoryMessage,
+                            ];
+                          }),
+                        ),
+                      );
+                    })
+                  : [];
 
               return {
                 sessionScope,
@@ -2972,6 +3015,7 @@ export function makeOpenCodeAdapter(
                 client,
                 openCodeSession: resolved.openCodeSession,
                 created: resolved.created,
+                importedMessages,
               };
             }).pipe(Effect.provideService(Scope.Scope, sessionScope)),
           );
@@ -3032,6 +3076,7 @@ export function makeOpenCodeAdapter(
           commandFibers: new Set(),
           promptSemaphore: Semaphore.makeUnsafe(1),
           firstConnection: Deferred.makeUnsafe<void, ProviderAdapterRequestError>(),
+          streamActive: false,
           stopped: yield* Ref.make(false),
           sessionScope: started.sessionScope,
         };
@@ -3087,6 +3132,15 @@ export function makeOpenCodeAdapter(
             providerThreadId: started.openCodeSession.id,
           },
         });
+        if (started.importedMessages.length > 0) {
+          yield* emit({
+            ...(yield* buildEventBase({ threadId: input.threadId })),
+            type: "thread.history.imported",
+            payload: {
+              messages: started.importedMessages,
+            },
+          });
+        }
 
         return context.session;
       },
@@ -3534,72 +3588,6 @@ export function makeOpenCodeAdapter(
       );
     });
 
-    const compactThread = Effect.fn("compactThread")(function* (
-      threadId: ThreadId,
-      requestedModelSelection?: ProviderSendTurnInput["modelSelection"],
-    ) {
-      const context = yield* ensureSessionContext(sessions, threadId);
-      yield* awaitOpenCodeContextReady(context);
-      const modelSelection =
-        requestedModelSelection ??
-        (context.session.model
-          ? { instanceId: boundInstanceId, model: context.session.model }
-          : undefined);
-      if (modelSelection !== undefined && modelSelection.instanceId !== boundInstanceId) {
-        return yield* new ProviderAdapterValidationError({
-          provider: PROVIDER,
-          operation: "compactThread",
-          issue: `OpenCode model selection is bound to instance '${modelSelection.instanceId}', expected '${boundInstanceId}'.`,
-        });
-      }
-      const parsedModel = parseOpenCodeModelSlug(modelSelection?.model);
-      if (!parsedModel) {
-        return yield* new ProviderAdapterValidationError({
-          provider: PROVIDER,
-          operation: "compactThread",
-          issue: "OpenCode compaction requires an active 'provider/model' selection.",
-        });
-      }
-      yield* context.promptSemaphore.withPermit(
-        Effect.gen(function* () {
-          if (sessions.get(threadId) !== context || (yield* Ref.get(context.stopped))) {
-            return yield* Effect.interrupt;
-          }
-          if (context.activeTurnId !== undefined) {
-            return yield* new ProviderAdapterValidationError({
-              provider: PROVIDER,
-              operation: "compactThread",
-              issue: "OpenCode cannot compact while a turn is running.",
-            });
-          }
-          yield* runOpenCodeSdk("session.summarize", (signal) =>
-            context.client.session.summarize(
-              {
-                sessionID: context.openCodeSessionId,
-                ...parsedModel,
-                auto: false,
-              },
-              { signal },
-            ),
-          ).pipe(
-            Effect.timeout("10 minutes"),
-            Effect.catchTags({
-              OpenCodeRuntimeError: (cause) => Effect.fail(toRequestError(cause)),
-              TimeoutError: (cause) =>
-                Effect.fail(
-                  new ProviderAdapterRequestError({
-                    provider: PROVIDER,
-                    method: "session.summarize",
-                    detail: "OpenCode session compaction did not complete within 10 minutes.",
-                    cause,
-                  }),
-                ),
-            }),
-            Effect.asVoid,
-          );
-        }),
-      );
-    });
     const interruptTurn: OpenCodeAdapterShape["interruptTurn"] = Effect.fn("interruptTurn")(
       function* (threadId, turnId) {
         const context = yield* ensureSessionContext(sessions, threadId);
@@ -3881,6 +3869,83 @@ export function makeOpenCodeAdapter(
     const hasSession: OpenCodeAdapterShape["hasSession"] = (threadId) =>
       Effect.sync(() => sessions.has(threadId));
 
+    const reconcileThread: NonNullable<OpenCodeAdapterShape["reconcileThread"]> = Effect.fn(
+      "reconcileThread",
+    )(function* (threadId) {
+      const context = yield* ensureSessionContext(sessions, threadId);
+      if (
+        context.session.status === "connecting" ||
+        context.activeTurnId !== undefined ||
+        context.promptAdmission !== undefined ||
+        context.pendingPermissions.size > 0 ||
+        context.pendingQuestions.size > 0
+      ) {
+        return { status: "deferred" } satisfies OpenCodeReconcileResult;
+      }
+      if (!context.streamActive) {
+        const resumeCursor = context.session.resumeCursor;
+        yield* stopOpenCodeContext(context);
+        deleteContextIfCurrent(context);
+        yield* startSession({
+          provider: context.session.provider,
+          threadId,
+          ...(context.session.providerInstanceId
+            ? { providerInstanceId: context.session.providerInstanceId }
+            : {}),
+          cwd: context.directory,
+          runtimeMode: context.session.runtimeMode,
+          ...(context.session.model
+            ? {
+                modelSelection: {
+                  instanceId: boundInstanceId,
+                  model: context.session.model,
+                },
+              }
+            : {}),
+          ...(resumeCursor !== undefined ? { resumeCursor } : {}),
+        });
+        return yield* reconcileThread(threadId);
+      }
+
+      const session = yield* runOpenCodeSdk("session.get", () =>
+        context.client.session.get({ sessionID: context.openCodeSessionId }),
+      ).pipe(Effect.mapError(toRequestError));
+      if (!session.data) {
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "session.get",
+          detail: `OpenCode session '${context.openCodeSessionId}' returned no session payload.`,
+        });
+      }
+      if (
+        session.data.directory &&
+        !(yield* sameDirectory(session.data.directory, context.directory))
+      ) {
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "session.get",
+          detail: `OpenCode session '${context.openCodeSessionId}' belongs to a different directory.`,
+        });
+      }
+      const messages = yield* runOpenCodeSdk("session.messages", () =>
+        context.client.session.messages({ sessionID: context.openCodeSessionId }),
+      ).pipe(Effect.mapError(toRequestError));
+      const result = {
+        status: "reconciled",
+        messages: parseOpenCodeSessionMessages(
+          messages.data,
+          context.openCodeSessionId,
+          yield* nowIso,
+        ),
+      } satisfies OpenCodeReconcileResult;
+      yield* emit({
+        ...(yield* buildEventBase({ threadId })),
+        type: "thread.history.reconciled",
+        payload: { messages: result.messages },
+      });
+      return result;
+    });
+
     const readThread: OpenCodeAdapterShape["readThread"] = Effect.fn("readThread")(
       function* (threadId) {
         const context = yield* ensureSessionContext(sessions, threadId);
@@ -3911,101 +3976,15 @@ export function makeOpenCodeAdapter(
       },
     );
 
-    const rollbackThread: OpenCodeAdapterShape["rollbackThread"] = Effect.fn("rollbackThread")(
-      function* (threadId, numTurns) {
-        const context = yield* ensureSessionContext(sessions, threadId);
-        const snapshot = yield* readThread(threadId);
-        const targetIndex = Math.max(0, snapshot.turns.length - numTurns);
-        const target = snapshot.turns[targetIndex];
-        if (target) {
-          const messages = yield* runOpenCodeSdk("session.messages", () =>
-            context.client.session.messages({ sessionID: context.openCodeSessionId }),
-          ).pipe(Effect.mapError(toRequestError));
-          const entries = messages.data ?? [];
-          const targetMessageIndex = entries.findIndex((entry) => entry.info.id === target.id);
-          if (targetMessageIndex < 0) {
-            return yield* toRequestError(
-              new OpenCodeRuntimeError({
-                operation: "session.fork",
-                detail: "The OpenCode rewind boundary is no longer available.",
-              }),
-            );
-          }
-          const firstRemovedMessage =
-            entries
-              .slice(0, targetMessageIndex + 1)
-              .findLast((entry) => entry.info.role === "user") ?? entries[targetMessageIndex]!;
-          // Native revert also rewrites workspace files. Fork only the retained
-          // conversation so T3 alone decides whether filesystem changes survive.
-          const fork = yield* runOpenCodeSdk("session.fork", () =>
-            context.client.session.fork({
-              sessionID: context.openCodeSessionId,
-              messageID: firstRemovedMessage.info.id,
-              directory: context.directory,
-            }),
-          ).pipe(Effect.mapError(toRequestError));
-          if (!fork.data) {
-            return yield* toRequestError(
-              new OpenCodeRuntimeError({
-                operation: "session.fork",
-                detail: "OpenCode session.fork returned no session payload.",
-              }),
-            );
-          }
-          const forkedSessionId = fork.data.id;
-          const forkMessages = yield* runOpenCodeSdk("session.messages", () =>
-            context.client.session.messages({ sessionID: forkedSessionId }),
-          ).pipe(Effect.mapError(toRequestError));
-          if (forkMessages.data?.length !== entries.indexOf(firstRemovedMessage)) {
-            return yield* toRequestError(
-              new OpenCodeRuntimeError({
-                operation: "session.fork",
-                detail: "OpenCode did not preserve the requested rewind boundary.",
-              }),
-            );
-          }
-          yield* runOpenCodeSdk("session.update", () =>
-            context.client.session.update({
-              sessionID: forkedSessionId,
-              permission: buildOpenCodePermissionRules(context.session.runtimeMode),
-            }),
-          ).pipe(Effect.mapError(toRequestError));
-          yield* clearPendingOpenCodeRequests(context, { type: "session.fork" });
-          context.openCodeSessionId = forkedSessionId;
-          context.relatedSessionIds.clear();
-          context.relatedSessionIds.add(forkedSessionId);
-          context.messageRoleById.clear();
-          context.textPartsByMessageId.clear();
-          context.turnTokenUsage = undefined;
-          context.activeTurnId = undefined;
-          context.interruptedTurnId = undefined;
-          context.reconcileIdleStatus = false;
-          context.awaitingBusyAfterInterruption = false;
-          context.pendingIdleReconciliation = undefined;
-          context.session = {
-            ...context.session,
-            resumeCursor: { schemaVersion: OPENCODE_RESUME_VERSION, sessionId: forkedSessionId },
-            updatedAt: yield* nowIso,
-          };
-          yield* emit({
-            ...(yield* buildEventBase({ threadId })),
-            type: "thread.started",
-            payload: { providerThreadId: forkedSessionId },
-          });
-          return {
-            threadId,
-            turns: forkMessages.data
-              .filter((entry) => entry.info.role === "assistant")
-              .map((entry) => ({
-                id: TurnId.make(entry.info.id),
-                items: [entry.info, ...entry.parts],
-              })),
-          };
-        }
-
-        return snapshot;
-      },
-    );
+    const rollbackThread: OpenCodeAdapterShape["rollbackThread"] = (threadId, _numTurns) =>
+      Effect.fail(
+        new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "rollbackThread",
+          detail: `OpenCode owns conversation history. Start a new thread instead of reverting this session.`,
+          cause: threadId,
+        }),
+      );
 
     const stopAll: OpenCodeAdapterShape["stopAll"] = () =>
       Effect.gen(function* () {
@@ -4026,16 +4005,17 @@ export function makeOpenCodeAdapter(
       provider: PROVIDER,
       capabilities: {
         sessionModelSwitch: "in-session",
+        supportsConversationRollback: false,
       },
       startSession,
       sendTurn,
-      compaction: { type: "native", start: compactThread },
       interruptTurn,
       respondToRequest,
       respondToUserInput,
       stopSession,
       listSessions,
       hasSession,
+      reconcileThread,
       readThread,
       rollbackThread,
       stopAll,

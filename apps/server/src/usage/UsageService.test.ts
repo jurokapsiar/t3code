@@ -12,6 +12,7 @@ import {
   EnvironmentId,
   ProviderDriverKind,
   ProviderInstanceId,
+  type OpenCodeSessionListEntry,
   UsageDay,
   type UsageSummaryInput,
 } from "@t3tools/contracts";
@@ -29,6 +30,7 @@ import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { OpenCodeRuntime, type OpenCodeRuntimeShape } from "../provider/opencodeRuntime.ts";
 import * as UsageService from "./UsageService.ts";
 
 const encodeUnknownJsonString = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -82,6 +84,7 @@ const serviceLayers = (input: {
   /** Defaults to an unparsable document so every scan retries the fetch. */
   readonly ratesDocument?: unknown;
   readonly environment?: NodeJS.ProcessEnv;
+  readonly openCodeRuntime?: OpenCodeRuntimeShape;
 }) =>
   ServerConfig.layerTest(process.cwd(), { prefix: input.prefix }).pipe(
     Layer.provideMerge(NodeServices.layer),
@@ -105,6 +108,9 @@ const serviceLayers = (input: {
         ...input.environment,
       }),
     ),
+    Layer.provideMerge(
+      Layer.succeed(OpenCodeRuntime, input.openCodeRuntime ?? ({} as OpenCodeRuntimeShape)),
+    ),
   );
 
 function totalOutputTokens(summary: { buckets: readonly { totals: { outputTokens: number } }[] }) {
@@ -112,6 +118,76 @@ function totalOutputTokens(summary: { buckets: readonly { totals: { outputTokens
 }
 
 describe("UsageService", () => {
+  it.live("does not reuse a non-Cost scan for the Cost view's OpenCode export", () =>
+    Effect.gen(function* () {
+      const { settings, home } = yield* setup;
+      const session: OpenCodeSessionListEntry = {
+        id: "ses_opencode",
+        title: "OpenCode session",
+        directory: home,
+        createdAt: "2026-08-01T10:00:00.000Z",
+        updatedAt: "2026-08-01T10:00:00.000Z",
+      };
+      const runtime = {
+        listAllOpenCodeSessions: () => Effect.succeed([session]),
+        exportOpenCodeSession: () =>
+          Effect.succeed([
+            {
+              provider: "opencode" as const,
+              timestampMs: Date.parse("2026-08-01T10:00:00.000Z"),
+              model: "azure-foundry/gpt-5.6-luna",
+              sessionId: session.id,
+              totals: {
+                uncachedInputTokens: 10,
+                cachedInputTokens: 0,
+                cacheCreationTokens: 0,
+                outputTokens: 20,
+                reasoningTokens: 0,
+              },
+              reportedCostUsd: 0.42,
+              dedupeKey: "opencode:ses_opencode:msg_1",
+            },
+          ]),
+      } as unknown as OpenCodeRuntimeShape;
+      const service = yield* UsageService.make.pipe(
+        Effect.provide(
+          serviceLayers({
+            prefix: "usage-service-opencode-cache-test",
+            home,
+            settings: {
+              ...settings,
+              providers: {
+                ...settings.providers,
+                opencode: { enabled: false, binaryPath: "opencode" },
+              },
+              providerInstances: {
+                opencode: {
+                  driver: ProviderDriverKind.make("opencode"),
+                  enabled: true,
+                  config: { binaryPath: "opencode" },
+                },
+              },
+            },
+            openCodeRuntime: runtime,
+          }),
+        ),
+      );
+
+      const withoutCost = yield* service.readSummary({ ...WINDOW, includeOpenCode: false });
+      assert.equal(
+        withoutCost.buckets.some((bucket) => bucket.provider === "opencode"),
+        false,
+      );
+      const withCost = yield* service
+        .readSummary({ ...WINDOW, includeOpenCode: true })
+        .pipe(Effect.provideService(OpenCodeRuntime, runtime));
+      assert.equal(
+        withCost.buckets.some((bucket) => bucket.provider === "opencode"),
+        true,
+      );
+    }),
+  );
+
   it.live("reads configured and disabled accounts once across shared and aliased homes", () =>
     Effect.gen(function* () {
       const { transcript, settings, home } = yield* setup;

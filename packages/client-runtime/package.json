@@ -139,6 +139,10 @@
       "types": "./src/state/models.ts",
       "default": "./src/state/models.ts"
     },
+    "./state/opencode": {
+      "types": "./src/state/opencode.ts",
+      "default": "./src/state/opencode.ts"
+    },
     "./state/orchestration": {
       "types": "./src/state/orchestration.ts",
       "default": "./src/state/orchestration.ts"

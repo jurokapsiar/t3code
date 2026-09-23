@@ -1,7 +1,7 @@
 import * as Schema from "effect/Schema";
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
-import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { NonNegativeInt, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import {
   ProviderAuthCancelInput,
   ProviderAuthCompleteInput,
@@ -85,6 +85,7 @@ import {
   ReviewDiffPreviewResult,
 } from "./review.ts";
 import { KeybindingsConfigError } from "./keybindings.ts";
+import { OpenCodeSessionHistoryMessage, OpenCodeSessionListEntry } from "./opencode.ts";
 import {
   ClientOrchestrationCommand,
   ORCHESTRATION_WS_METHODS,
@@ -295,6 +296,9 @@ export const WS_METHODS = {
   attachmentsDelete: "attachments.delete",
 
   // Provider methods
+  opencodeListSessions: "opencode.listSessions",
+  opencodeGetSessionMessages: "opencode.getSessionMessages",
+  opencodeReconcileThread: "opencode.reconcileThread",
   providerUploadFeedback: "provider.uploadFeedback",
   providerAuthStart: "provider.auth.start",
   providerConsumeResetCredit: "provider.consumeResetCredit",
@@ -491,6 +495,38 @@ const WsServerUpdateProviderRpc = Rpc.make(WS_METHODS.serverUpdateProvider, {
 });
 
 const ProviderSetupRpcError = Schema.Union([ProviderSetupError, EnvironmentAuthorizationError]);
+
+export const WsOpencodeListSessionsRpc = Rpc.make(WS_METHODS.opencodeListSessions, {
+  payload: Schema.Struct({
+    instanceId: ProviderInstanceId,
+    cwd: TrimmedNonEmptyString,
+  }),
+  success: Schema.Struct({
+    sessions: Schema.Array(OpenCodeSessionListEntry),
+  }),
+  error: Schema.Union([ProviderSetupError, EnvironmentAuthorizationError]),
+});
+
+export const WsOpencodeGetSessionMessagesRpc = Rpc.make(WS_METHODS.opencodeGetSessionMessages, {
+  payload: Schema.Struct({
+    instanceId: ProviderInstanceId,
+    cwd: TrimmedNonEmptyString,
+    sessionId: TrimmedNonEmptyString,
+  }),
+  success: Schema.Struct({
+    messages: Schema.Array(OpenCodeSessionHistoryMessage),
+  }),
+  error: Schema.Union([ProviderSetupError, EnvironmentAuthorizationError]),
+});
+
+export const WsOpencodeReconcileThreadRpc = Rpc.make(WS_METHODS.opencodeReconcileThread, {
+  payload: Schema.Struct({ threadId: ThreadId }),
+  success: Schema.Struct({
+    status: Schema.Literals(["reconciled", "deferred"]),
+    changed: Schema.Boolean,
+  }),
+  error: Schema.Union([ProviderSetupError, EnvironmentAuthorizationError]),
+});
 
 const WsProviderConsumeResetCreditRpc = Rpc.make(WS_METHODS.providerConsumeResetCredit, {
   payload: ProviderConsumeResetCreditInput,
@@ -1388,6 +1424,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerRefreshProvidersRpc,
   WsServerUpdateProviderRpc,
   WsProviderConsumeResetCreditRpc,
+  WsOpencodeListSessionsRpc,
+  WsOpencodeGetSessionMessagesRpc,
+  WsOpencodeReconcileThreadRpc,
   WsProviderAuthStartRpc,
   WsProviderAuthCompleteRpc,
   WsProviderAuthCancelRpc,

@@ -5,9 +5,146 @@ import { describe, it } from "vite-plus/test";
 import {
   parseAgentListCliOutput,
   parseModelsCliOutput,
+  parseOpenCodeSessionMessages,
+  latestOpenCodeUserPromptAt,
+  parseOpenCodeSessionListCliOutput,
+  parseOpenCodeExport,
   parseSkillsCliOutput,
   toOpenCodeFileParts,
 } from "./opencodeRuntime.ts";
+
+describe("parseOpenCodeSessionListCliOutput", () => {
+  it("parses session metadata and normalizes millisecond timestamps", () => {
+    const result = parseOpenCodeSessionListCliOutput(
+      JSON.stringify([
+        {
+          id: "ses_123",
+          title: "Fix parser",
+          directory: "/repo",
+          created: 1_757_376_000_000,
+          updated: 1_757_462_400_000,
+        },
+      ]),
+    );
+
+    NodeAssert.deepEqual(result, [
+      {
+        id: "ses_123",
+        title: "Fix parser",
+        directory: "/repo",
+        createdAt: "2025-09-09T00:00:00.000Z",
+        updatedAt: "2025-09-10T00:00:00.000Z",
+      },
+    ]);
+  });
+
+  it("skips malformed or non-array output", () => {
+    NodeAssert.deepEqual(parseOpenCodeSessionListCliOutput("not json"), []);
+    NodeAssert.deepEqual(
+      parseOpenCodeSessionListCliOutput(JSON.stringify([{ id: "missing-fields" }])),
+      [],
+    );
+  });
+});
+
+describe("parseOpenCodeSessionMessages", () => {
+  it("maps OpenCode text messages into display history", () => {
+    NodeAssert.deepEqual(
+      parseOpenCodeSessionMessages(
+        [
+          {
+            info: { id: "msg_user", role: "user", time: { created: 1_757_376_000_000 } },
+            parts: [{ type: "text", text: "previous prompt" }],
+          },
+          {
+            info: { id: "msg_assistant", role: "assistant" },
+            parts: [{ type: "text", text: "previous answer" }],
+          },
+        ],
+        "ses_123",
+        "2025-09-10T00:00:00.000Z",
+      ),
+      [
+        {
+          messageId: "opencode:history:ses_123:msg_user",
+          role: "user",
+          text: "previous prompt",
+          createdAt: "2025-09-09T00:00:00.000Z",
+        },
+        {
+          messageId: "opencode:history:ses_123:msg_assistant",
+          role: "assistant",
+          text: "previous answer",
+          createdAt: "2025-09-10T00:00:00.000Z",
+        },
+      ],
+    );
+  });
+});
+
+describe("latestOpenCodeUserPromptAt", () => {
+  it("returns the newest user message timestamp", () => {
+    NodeAssert.equal(
+      latestOpenCodeUserPromptAt([
+        { info: { role: "user", time: { created: 1_757_376_000_000 } } },
+        { info: { role: "assistant", time: { created: 1_757_462_400_000 } } },
+        { info: { role: "user", time: { created: 1_757_548_800_000 } } },
+      ]),
+      "2025-09-11T00:00:00.000Z",
+    );
+  });
+
+  it("returns undefined when no user message has a valid timestamp", () => {
+    NodeAssert.equal(latestOpenCodeUserPromptAt([{ info: { role: "assistant" } }]), undefined);
+  });
+});
+
+describe("parseOpenCodeExport", () => {
+  it("extracts one usage record per assistant response", () => {
+    NodeAssert.deepEqual(
+      parseOpenCodeExport(
+        JSON.stringify({
+          info: {
+            id: "ses_123",
+            title: "Telemetry",
+          },
+          messages: [
+            {
+              info: {
+                id: "msg_123",
+                role: "assistant",
+                providerID: "azure-foundry",
+                modelID: "gpt-5.6-luna",
+                time: { created: 1_757_462_400_000 },
+                tokens: { input: 100, output: 20, reasoning: 5, cache: { read: 30, write: 10 } },
+                cost: 0.42,
+              },
+            },
+            { info: { id: "msg_user", role: "user" } },
+          ],
+        }),
+        "ses_123",
+      ),
+      [
+        {
+          provider: "opencode",
+          timestampMs: 1_757_462_400_000,
+          model: "azure-foundry/gpt-5.6-luna",
+          sessionId: "ses_123",
+          totals: {
+            uncachedInputTokens: 60,
+            cachedInputTokens: 30,
+            cacheCreationTokens: 10,
+            outputTokens: 20,
+            reasoningTokens: 5,
+          },
+          reportedCostUsd: 0.42,
+          dedupeKey: "opencode:ses_123:msg_123",
+        },
+      ],
+    );
+  });
+});
 
 describe("parseModelsCliOutput", () => {
   it("parses a single model from a single provider", () => {

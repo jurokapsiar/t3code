@@ -145,6 +145,8 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
           : {}),
         environment: processEnv,
       });
+      const loadOpenCodeSessions = openCodeRuntime.loadOpenCodeSessions;
+      const loadOpenCodeSessionMessages = openCodeRuntime.loadOpenCodeSessionMessages;
       const textGeneration = yield* makeOpenCodeTextGeneration(effectiveConfig).pipe(
         Effect.provideService(OpenCodeServerOwner.OpenCodeServerOwner, serverOwner),
       );
@@ -287,6 +289,106 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
                     }),
                 ),
               ),
+        listOpenCodeSessions: (cwd) =>
+          Effect.gen(function* () {
+            if (effectiveConfig.serverUrl.trim().length > 0) {
+              if (loadOpenCodeSessions === undefined) {
+                return yield* new ProviderDriverError({
+                  driver: DRIVER_KIND,
+                  instanceId,
+                  detail: "OpenCode session discovery is unavailable.",
+                });
+              }
+              const server = yield* openCodeRuntime.connectToOpenCodeServer({
+                binaryPath: effectiveConfig.binaryPath,
+                directory: cwd,
+                serverUrl: effectiveConfig.serverUrl,
+                ...(effectiveConfig.serverPassword
+                  ? { serverPassword: effectiveConfig.serverPassword }
+                  : {}),
+                environment: processEnv,
+              });
+              const client = openCodeRuntime.createOpenCodeSdkClient({
+                baseUrl: server.url,
+                directory: cwd,
+                ...(server.serverPassword ? { serverPassword: server.serverPassword } : {}),
+              });
+              return yield* loadOpenCodeSessions({ client, directory: cwd });
+            }
+            if (loadOpenCodeSessions === undefined) {
+              if (openCodeRuntime.listOpenCodeSessions === undefined) {
+                return yield* new ProviderDriverError({
+                  driver: DRIVER_KIND,
+                  instanceId,
+                  detail: "OpenCode session discovery is unavailable.",
+                });
+              }
+              return yield* openCodeRuntime.listOpenCodeSessions({
+                binaryPath: effectiveConfig.binaryPath,
+                cwd,
+                environment: processEnv,
+              });
+            }
+            return yield* openCodeRuntime.listOpenCodeSessions!({
+              binaryPath: effectiveConfig.binaryPath,
+              cwd,
+              environment: processEnv,
+            });
+          })
+            .pipe(Effect.scoped)
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderDriverError({
+                    driver: DRIVER_KIND,
+                    instanceId,
+                    detail:
+                      typeof cause === "object" && cause !== null && "detail" in cause
+                        ? String(cause.detail)
+                        : String(cause),
+                    cause,
+                  }),
+              ),
+            ),
+        getOpenCodeSessionMessages: (cwd, sessionId) =>
+          Effect.gen(function* () {
+            if (loadOpenCodeSessionMessages === undefined) {
+              return yield* new ProviderDriverError({
+                driver: DRIVER_KIND,
+                instanceId,
+                detail: "OpenCode session history is unavailable.",
+              });
+            }
+            const server = yield* openCodeRuntime.connectToOpenCodeServer({
+              binaryPath: effectiveConfig.binaryPath,
+              directory: cwd,
+              serverUrl: effectiveConfig.serverUrl,
+              ...(effectiveConfig.serverPassword
+                ? { serverPassword: effectiveConfig.serverPassword }
+                : {}),
+              environment: processEnv,
+            });
+            const client = openCodeRuntime.createOpenCodeSdkClient({
+              baseUrl: server.url,
+              directory: cwd,
+              ...(server.serverPassword ? { serverPassword: server.serverPassword } : {}),
+            });
+            return yield* loadOpenCodeSessionMessages({ client, directory: cwd, sessionId });
+          }).pipe(
+            Effect.scoped,
+            Effect.mapError(
+              (cause) =>
+                new ProviderDriverError({
+                  driver: DRIVER_KIND,
+                  instanceId,
+                  detail:
+                    typeof cause === "object" && cause !== null && "detail" in cause
+                      ? String(cause.detail)
+                      : String(cause),
+                  cause,
+                }),
+            ),
+          ),
         adapter,
         textGeneration,
       } satisfies ProviderInstance;

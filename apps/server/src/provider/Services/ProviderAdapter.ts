@@ -11,6 +11,7 @@ import type {
   ApprovalRequestId,
   ProviderApprovalDecision,
   ProviderDriverKind,
+  OpenCodeReconcileResult,
   ProviderUserInputAnswers,
   ProviderRuntimeEvent,
   ProviderSendTurnInput,
@@ -125,6 +126,9 @@ export interface ProviderAdapterShape<TError> {
    * Check whether this adapter owns an active session id.
    */
   readonly hasSession: (threadId: ThreadId) => Effect.Effect<boolean>;
+
+  /** Reconnect the provider stream if needed and return the canonical history snapshot. */
+  readonly reconcileThread?: (threadId: ThreadId) => Effect.Effect<OpenCodeReconcileResult, TError>;
 
   /**
    * Read a provider thread snapshot.

@@ -78,6 +78,7 @@ import { useSelectedThreadRequests } from "../../state/use-selected-thread-reque
 import { useSelectedThreadWorktree } from "../../state/use-selected-thread-worktree";
 import { useThreadComposerState } from "../../state/use-thread-composer-state";
 import { threadEnvironment } from "../../state/threads";
+import { openCodeEnvironment, openCodeReconcileKey } from "../../state/opencode";
 import { projectThreadContentPresentation } from "./threadContentPresentation";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import {
@@ -356,6 +357,37 @@ function ThreadRouteContent(
   const gitActions = useSelectedThreadGitActions();
   const requests = useSelectedThreadRequests();
   const interruptThreadTurn = useAtomCommand(threadEnvironment.interruptTurn, "thread interrupt");
+  const reconcileOpenCodeThread = useAtomCommand(
+    openCodeEnvironment.reconcileThread,
+    "opencode reconcile",
+  );
+  const openCodeReconcileKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (selectedThread === null || selectedThreadDetail === null) {
+      openCodeReconcileKeyRef.current = null;
+      return;
+    }
+    const providerInstanceId =
+      selectedThreadDetail.session.providerInstanceId ??
+      selectedThreadDetail.modelSelection.instanceId;
+    const key = openCodeReconcileKey({
+      isServerThread: true,
+      providerName: selectedThreadDetail.session?.providerName,
+      environmentId: selectedThread.environmentId,
+      threadId: selectedThread.id,
+      providerInstanceId,
+    });
+    if (key === null) {
+      openCodeReconcileKeyRef.current = null;
+      return;
+    }
+    if (openCodeReconcileKeyRef.current === key) return;
+    openCodeReconcileKeyRef.current = key;
+    void reconcileOpenCodeThread({
+      environmentId: selectedThread.environmentId,
+      input: { threadId: selectedThread.id },
+    });
+  }, [reconcileOpenCodeThread, selectedThread, selectedThreadDetail]);
   const navigation = useNavigation();
   const params = props.route.params;
   const environmentIdRaw = firstRouteParam(params.environmentId);

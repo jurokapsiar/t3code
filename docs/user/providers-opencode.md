@@ -17,8 +17,23 @@ settings. T3 Code uses only that configured password for an external server; it
 does not forward a local `OPENCODE_SERVER_PASSWORD`. If connection or version checks
 fail, check the URL, credentials, and OpenCode version, then refresh provider status.
 
-After a lost connection, send another prompt to reconnect to the same OpenCode
-session.
+When you open an existing OpenCode thread, T3 Code checks the event stream and
+reconnects the same session when needed. It also refreshes the displayed history
+from OpenCode and replaces stale T3 history without replaying it as a prompt.
+After a lost connection, reopening the thread retries the same reconciliation.
+
+## Sessions
+
+Before the first prompt in a new OpenCode thread, choose **New OpenCode session**
+or select a previous session for the same project directory. T3 Code shows the
+selected session's earlier transcript for reference, while OpenCode keeps and
+uses the conversation context. A thread cannot switch sessions after its first
+prompt. Missing or moved sessions must be reselected; T3 Code will not silently
+fork or replace the selected session.
+
+OpenCode is the source of truth for session history. If the session was changed
+outside T3 Code, the next thread-open reconciliation updates the T3 display to
+match OpenCode.
 
 ## Approvals
 
@@ -30,7 +45,11 @@ modes even though normal file reads do not; `.env.example` is allowed.
 **Allow for workspace** applies to matching requests in other OpenCode sessions
 using the same workspace. It is broader than the current thread, especially on a
 shared external server. Use **Allow once** for a single request. Denying an action
-does not stop the whole turn.
+does not stop the whole turn. T3 Code applies the selected permission mode, while
+OpenCode remains the authority that receives and stores approval replies.
+
+OpenCode owns its conversation context and native compaction. T3 Code does not
+rebuild OpenCode history or provide conversation rollback for OpenCode threads.
 
 ## Refresh models, commands, and skills
 
