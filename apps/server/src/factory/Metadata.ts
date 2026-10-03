@@ -99,6 +99,24 @@ export interface MarkEnrollmentInput {
   readonly credentialExpiresAt: DateTime.DateTime | null;
 }
 
+export interface MarkPendingEnrollmentInput {
+  readonly registrationId: FactoryRegistrationId;
+  readonly credentialStorage: FactoryCredentialStorage;
+  readonly credentialItemKey: string;
+}
+
+export interface EnrollmentReference {
+  readonly environment: FactoryEnvironmentView;
+  readonly credentialStorage: FactoryCredentialStorage | null;
+  readonly credentialItemKey: string | null;
+}
+
+const CredentialReferenceDbRow = Schema.Struct({
+  registrationId: FactoryRegistrationId,
+  credentialStorage: Schema.NullOr(FactoryCredentialStorage),
+  credentialItemKey: Schema.NullOr(Schema.String),
+});
+
 type EnvironmentUpdateInput = typeof FactoryEnvironmentsUpdateRpc.payloadSchema.Type;
 type GroupCreateInput = typeof FactoryGroupsCreateRpc.payloadSchema.Type;
 type GroupUpdateInput = typeof FactoryGroupsUpdateRpc.payloadSchema.Type;
@@ -124,6 +142,20 @@ export class Metadata extends Context.Service<
     readonly markEnrollment: (
       input: MarkEnrollmentInput,
     ) => Effect.Effect<FactoryEnvironmentView, FactoryError>;
+    readonly markPendingEnrollment: (
+      input: MarkPendingEnrollmentInput,
+    ) => Effect.Effect<FactoryEnvironmentView, FactoryError>;
+    readonly markRemoving: (
+      input: EnvironmentRemoveInput,
+    ) => Effect.Effect<FactoryEnvironmentView, FactoryError>;
+    readonly clearCredentialReference: (
+      registrationId: FactoryRegistrationId,
+    ) => Effect.Effect<FactoryEnvironmentView, FactoryError>;
+    readonly getCredentialReference: (registrationId: FactoryRegistrationId) => Effect.Effect<{
+      readonly storage: FactoryCredentialStorage;
+      readonly itemKey: string;
+    } | null>;
+    readonly listEnrollmentReferences: Effect.Effect<ReadonlyArray<EnrollmentReference>>;
     readonly createGroup: (input: GroupCreateInput) => Effect.Effect<FactoryGroup, FactoryError>;
     readonly renameGroup: (input: GroupUpdateInput) => Effect.Effect<FactoryGroup, FactoryError>;
     readonly deleteGroup: (
@@ -206,6 +238,18 @@ const make = Effect.gen(function* () {
         environment_id AS "environmentId", project_id AS "projectId", order_index AS "order"
       FROM factory_favorites
       ORDER BY order_index, id
+    `,
+  });
+
+  const selectCredentialReferences = SqlSchema.findAll({
+    Request: Schema.Struct({ registrationId: Schema.optional(FactoryRegistrationId) }),
+    Result: CredentialReferenceDbRow,
+    execute: ({ registrationId }) => sql`
+      SELECT registration_id AS "registrationId", credential_storage AS "credentialStorage",
+        credential_item_key AS "credentialItemKey"
+      FROM factory_environments
+      WHERE ${registrationId === undefined ? sql`1 = 1` : sql`registration_id = ${registrationId}`}
+      ORDER BY registration_id
     `,
   });
 
@@ -317,10 +361,43 @@ const make = Effect.gen(function* () {
     return { ...snapshot, revision: currentRevision };
   });
 
+  const getCredentialReference = (registrationId: FactoryRegistrationId) =>
+    selectCredentialReferences({ registrationId }).pipe(
+      Effect.map((rows) => {
+        const row = rows[0];
+        return row?.credentialStorage !== null &&
+          row?.credentialStorage !== undefined &&
+          row.credentialItemKey !== null &&
+          row.credentialItemKey !== undefined
+          ? { storage: row.credentialStorage, itemKey: row.credentialItemKey }
+          : null;
+      }),
+      Effect.orDie,
+    );
+
+  const listEnrollmentReferences: Metadata["Service"]["listEnrollmentReferences"] = Effect.gen(
+    function* () {
+      const environments = yield* readEnvironments();
+      const references = yield* selectCredentialReferences({}).pipe(Effect.orDie);
+      return environments.map((environment) => {
+        const reference = references.find(
+          (row) => row.registrationId === environment.registrationId,
+        );
+        return {
+          environment,
+          credentialStorage: reference?.credentialStorage ?? null,
+          credentialItemKey: reference?.credentialItemKey ?? null,
+        } satisfies EnrollmentReference;
+      });
+    },
+  );
+
   return Metadata.of({
     listEnvironments: readEnvironments(),
     getSnapshot: snapshotWithRevision,
     subscribeChanges: Stream.fromPubSub(changes),
+    getCredentialReference,
+    listEnrollmentReferences,
 
     createEnvironment: (input) =>
       withCommit(
@@ -393,6 +470,22 @@ const make = Effect.gen(function* () {
           if (current === undefined) {
             return yield* factoryError("not-found", "The source environment does not exist.");
           }
+          if (current.state !== "pending" || current.enabled) {
+            return yield* factoryError("conflict", "Only a pending source can be enrolled.");
+          }
+          if (current.credentialStorage !== null) {
+            const reference = yield* getCredentialReference(input.registrationId);
+            if (
+              reference === null ||
+              reference.storage !== input.credentialStorage ||
+              reference.itemKey !== input.credentialItemKey
+            ) {
+              return yield* factoryError(
+                "conflict",
+                "The pending source credential reference changed.",
+              );
+            }
+          }
           yield* sql`
             UPDATE factory_environments
             SET enabled = 1, state = 'offline', credential_storage = ${input.credentialStorage},
@@ -407,6 +500,96 @@ const make = Effect.gen(function* () {
                 ? factoryError("not-found", "The source environment does not exist.")
                 : Effect.succeed(row),
             ),
+          );
+        }),
+      ),
+
+    markPendingEnrollment: (input) =>
+      withCommit(
+        Effect.gen(function* () {
+          const current = yield* findEnvironment(input.registrationId);
+          if (current === undefined) {
+            return yield* factoryError("not-found", "The source environment does not exist.");
+          }
+          if (current.enabled || current.state !== "pending") {
+            return yield* factoryError(
+              "conflict",
+              "Only a pending source can store enrollment credentials.",
+            );
+          }
+          if (current.credentialStorage !== null) {
+            const reference = yield* getCredentialReference(input.registrationId);
+            if (
+              reference === null ||
+              reference.storage !== input.credentialStorage ||
+              reference.itemKey !== input.credentialItemKey
+            ) {
+              return yield* factoryError(
+                "conflict",
+                "The pending source credential reference changed.",
+              );
+            }
+          }
+          yield* sql`
+            UPDATE factory_environments
+            SET credential_storage = ${input.credentialStorage},
+                credential_item_key = ${input.credentialItemKey}, revision = revision + 1
+            WHERE registration_id = ${input.registrationId}
+          `.pipe(Effect.orDie);
+          const environment = yield* findEnvironment(input.registrationId);
+          return (
+            environment ??
+            (yield* factoryError("not-found", "The source environment does not exist."))
+          );
+        }),
+      ),
+
+    markRemoving: (input) =>
+      withCommit(
+        Effect.gen(function* () {
+          const existing = yield* findEnvironment(input.registrationId);
+          if (existing === undefined) {
+            return yield* factoryError("not-found", "The source environment does not exist.");
+          }
+          if (existing.state === "removing" && !existing.enabled) return existing;
+          yield* requireEnvironmentRevision(input.registrationId, input.revision);
+          yield* sql`
+            UPDATE factory_environments
+            SET enabled = 0, state = 'removing', revision = revision + 1
+            WHERE registration_id = ${input.registrationId}
+          `.pipe(Effect.orDie);
+          const environment = yield* findEnvironment(input.registrationId);
+          return (
+            environment ??
+            (yield* factoryError("not-found", "The source environment does not exist."))
+          );
+        }),
+      ),
+
+    clearCredentialReference: (registrationId) =>
+      withCommit(
+        Effect.gen(function* () {
+          const current = yield* findEnvironment(registrationId);
+          if (current === undefined) {
+            return yield* factoryError("not-found", "The source environment does not exist.");
+          }
+          if (current.state !== "removing") {
+            return yield* factoryError(
+              "conflict",
+              "Only a removing source can clear its credential reference.",
+            );
+          }
+          if (current.credentialStorage === null) return current;
+          yield* sql`
+            UPDATE factory_environments
+            SET credential_storage = NULL, credential_item_key = NULL,
+                credential_expires_at = NULL, revision = revision + 1
+            WHERE registration_id = ${registrationId}
+          `.pipe(Effect.orDie);
+          const environment = yield* findEnvironment(registrationId);
+          return (
+            environment ??
+            (yield* factoryError("not-found", "The source environment does not exist."))
           );
         }),
       ),
@@ -564,10 +747,10 @@ const make = Effect.gen(function* () {
             input.registrationId,
             input.revision,
           );
-          if (environment.credentialStorage !== null) {
+          if (environment.state !== "removing" || environment.credentialStorage !== null) {
             return yield* factoryError(
               "invalid-request",
-              "Remove the stored source credential before removing this environment.",
+              "Remove the source credential before finalizing environment removal.",
             );
           }
           yield* sql`DELETE FROM factory_environments WHERE registration_id = ${input.registrationId}`.pipe(

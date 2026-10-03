@@ -42,8 +42,15 @@ it.layer(NodeServices.layer)("factory config", (it) => {
         tailscaleServeEnabled: Option.none<boolean>(),
         tailscaleServePort: Option.none<number>(),
       };
-      const resolve = (factoryEnabled: Option.Option<boolean>, env: Record<string, string>) =>
-        resolveServerConfig({ ...flags, factoryEnabled }, Option.none()).pipe(
+      const resolve = (
+        factoryEnabled: Option.Option<boolean>,
+        env: Record<string, string>,
+        factoryCredentialStore: Option.Option<"secure-vault" | "file"> = Option.none(),
+      ) =>
+        resolveServerConfig(
+          { ...flags, factoryEnabled, factoryCredentialStore },
+          Option.none(),
+        ).pipe(
           Effect.provide(
             Layer.mergeAll(ConfigProvider.layer(ConfigProvider.fromEnv({ env })), NetService.layer),
           ),
@@ -71,6 +78,18 @@ it.layer(NodeServices.layer)("factory config", (it) => {
       const disabled = yield* resolve(Option.none(), {});
       const enabled = yield* resolve(Option.none(), { T3CODE_FACTORY_ENABLED: "true" });
       const flagWins = yield* resolve(Option.some(false), { T3CODE_FACTORY_ENABLED: "true" });
+      const fileFromEnvironment = yield* resolve(Option.none(), {
+        T3CODE_FACTORY_CREDENTIAL_STORE: "file",
+      });
+      const fileFromFlag = yield* resolve(
+        Option.none(),
+        { T3CODE_FACTORY_CREDENTIAL_STORE: "secure-vault" },
+        Option.some("file"),
+      );
+
+      expect(disabled.factoryCredentialStore).toBe("secure-vault");
+      expect(fileFromEnvironment.factoryCredentialStore).toBe("protected-file");
+      expect(fileFromFlag.factoryCredentialStore).toBe("protected-file");
 
       expect(disabled).toMatchObject({ factoryEnabled: false });
       expect(enabled).toMatchObject({ factoryEnabled: true });
@@ -104,6 +123,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
     traceMinLevel: "Info",
     traceTimingEnabled: true,
     factoryEnabled: false,
+    factoryCredentialStore: "secure-vault",
     traceBatchWindowMs: 1_000,
     traceMaxBytes: 10 * 1024 * 1024,
     traceMaxFiles: 10,

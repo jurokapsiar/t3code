@@ -45,8 +45,38 @@ A missing or invalid configured build stops startup. Without a UI directory,
 Factory UI requests return an explicit error; they do not show T3 Code instead.
 When Factory mode is off, the UI directory is not opened.
 
-Factory hosting is still in development. It does not yet enroll source servers
-or combine their sessions, so do not use it to manage remote environments.
+Factory mode can store a source enrollment and its scoped access credential. It
+does not yet open source sessions or combine their projects and threads.
+Enrolled sources stay offline until source supervision is available. Do not
+treat a stored enrollment as a live connection.
+
+### Factory source credentials
+
+When you enroll a source, Factory exchanges its one-time pairing credential for
+a scoped session. Factory stores the session credential in the host's OS vault
+by default. It does not store the one-time credential in Factory metadata. Keep
+the vault available to the server account: unlock the login Keychain on macOS,
+provide an unlocked Secret Service on Linux, or make the system credential vault
+available on Windows. If the vault is unavailable, enrollment fails. Factory
+does not switch to another store.
+
+For a headless host without an available OS vault, opt in to protected-file
+storage:
+
+```sh
+t3 serve --factory --factory-credential-store=file
+```
+
+You can also set `T3CODE_FACTORY_CREDENTIAL_STORE=file`. Keep the T3 data
+directory private and encrypt backups that include Factory credentials. The
+protected files are stored under `userdata/secrets/factory-credentials`.
+
+Back up the Factory database, the server's environment identity, and the
+protected credential files together. If a credential is missing after restore,
+enroll that source again with a fresh one-time pairing credential. To change
+credential stores, remove the enrolled sources while the current store is
+available, then select the new store and enroll them again. A failed removal
+stays visible until Factory can delete the credential.
 
 ## Pair over a LAN or private network
 

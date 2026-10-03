@@ -6,7 +6,7 @@ import {
 } from "@t3tools/shared/observability";
 import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
 import { parsePersistedServerObservabilitySettings } from "@t3tools/shared/serverSettings";
-import { DesktopBackendBootstrap, PortSchema } from "@t3tools/contracts";
+import { DesktopBackendBootstrap, FactoryCredentialStorage, PortSchema } from "@t3tools/contracts";
 import * as Config from "effect/Config";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -84,6 +84,15 @@ const tailscaleServePortFlag = Flag.Int("tailscale-serve-port").pipe(
 
 const factoryEnabledFlag = Flag.Boolean("factory").pipe(
   Flag.withDescription("Enable the opt-in T3 serve factory runtime."),
+  Flag.optional,
+);
+const FactoryCredentialStoreChoice = Schema.Literals(["secure-vault", "file"]);
+type FactoryCredentialStoreChoice = typeof FactoryCredentialStoreChoice.Type;
+const factoryCredentialStoreFlag = Flag.Literals(
+  "factory-credential-store",
+  FactoryCredentialStoreChoice.literals,
+).pipe(
+  Flag.withDescription("Credential store backend. Use file to opt in to protected-file storage."),
   Flag.optional,
 );
 const factoryUiDirFlag = Flag.String("factory-ui-dir").pipe(
@@ -171,6 +180,10 @@ const EnvServerConfig = Config.all({
     Config.map(Option.getOrUndefined),
   ),
   factoryEnabled: Config.Boolean("T3CODE_FACTORY_ENABLED").pipe(Config.withDefault(false)),
+  factoryCredentialStore: Config.schema(
+    FactoryCredentialStoreChoice,
+    "T3CODE_FACTORY_CREDENTIAL_STORE",
+  ).pipe(Config.withDefault("secure-vault")),
   tailscaleServePort: Config.Port("T3CODE_TAILSCALE_SERVE_PORT").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
@@ -211,6 +224,7 @@ export interface CliServerFlags {
   readonly tailscaleServeEnabled: Option.Option<boolean>;
   readonly tailscaleServePort: Option.Option<number>;
   readonly factoryEnabled?: Option.Option<boolean>;
+  readonly factoryCredentialStore?: Option.Option<FactoryCredentialStoreChoice>;
   readonly factoryUiDir?: Option.Option<string>;
 }
 
@@ -247,6 +261,7 @@ export const sharedServerCommandFlags = {
   tailscaleServeEnabled: tailscaleServeFlag,
   tailscaleServePort: tailscaleServePortFlag,
   factoryEnabled: factoryEnabledFlag,
+  factoryCredentialStore: factoryCredentialStoreFlag,
   factoryUiDir: factoryUiDirFlag,
 } as const;
 
@@ -292,6 +307,7 @@ export const resolveServerConfig = (
       tailscaleServeEnabled: flags.tailscaleServeEnabled ?? Option.none(),
       tailscaleServePort: flags.tailscaleServePort ?? Option.none(),
       factoryEnabled: flags.factoryEnabled ?? Option.none(),
+      factoryCredentialStore: flags.factoryCredentialStore ?? Option.none(),
       factoryUiDir: flags.factoryUiDir ?? Option.none(),
     } satisfies CliServerFlags;
     const bootstrapFd = Option.getOrUndefined(normalizedFlags.bootstrapFd) ?? env.bootstrapFd;
@@ -404,6 +420,15 @@ export const resolveServerConfig = (
       resolveOptionPrecedence(normalizedFlags.factoryEnabled, Option.some(env.factoryEnabled)),
       () => false,
     );
+    const factoryCredentialStoreChoice = Option.getOrElse(
+      resolveOptionPrecedence(
+        normalizedFlags.factoryCredentialStore,
+        Option.some(env.factoryCredentialStore),
+      ),
+      () => "secure-vault" as const,
+    );
+    const factoryCredentialStore: FactoryCredentialStorage =
+      factoryCredentialStoreChoice === "file" ? "protected-file" : "secure-vault";
     const rawFactoryUiDir = Option.getOrUndefined(normalizedFlags.factoryUiDir) ?? env.factoryUiDir;
     const factoryUiDir =
       rawFactoryUiDir === undefined
@@ -487,6 +512,7 @@ export const resolveServerConfig = (
       tailscaleServeEnabled,
       tailscaleServePort,
       factoryEnabled,
+      factoryCredentialStore,
       ...(factoryUiDir === undefined ? {} : { factoryUiDir }),
     };
 
@@ -512,6 +538,7 @@ export const resolveCliAuthConfig = (
       tailscaleServeEnabled: Option.none(),
       tailscaleServePort: Option.none(),
       factoryEnabled: Option.none(),
+      factoryCredentialStore: Option.none(),
     },
     cliLogLevel,
   );

@@ -17,6 +17,7 @@ import type * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 
 import { sweepStalePendingAttachments } from "./attachmentStore.ts";
+import { FactoryCredentialStorage } from "@t3tools/contracts";
 import { DEFAULT_SIGNAL_EXPORT, type SignalExport } from "@t3tools/shared/observability";
 import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
 
@@ -102,6 +103,7 @@ export class ServerConfig extends Context.Service<
     readonly tailscaleServeEnabled: boolean;
     readonly tailscaleServePort: number;
     readonly factoryEnabled?: boolean;
+    readonly factoryCredentialStore?: FactoryCredentialStorage;
     readonly factoryUiDir?: string;
   }
 >()("t3/config/ServerConfig") {
@@ -231,6 +233,7 @@ const makeTest = Effect.fn("ServerConfig.makeTest")(function* (
     logWebSocketEvents: false,
     tailscaleServeEnabled: false,
     factoryEnabled: false,
+    factoryCredentialStore: "secure-vault",
     tailscaleServePort: 443,
     port: 0,
     host: undefined,

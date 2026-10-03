@@ -85,6 +85,7 @@ import {
   PersistChatAttachmentsError,
   RpcClientId,
   EnvironmentAuthorizationError,
+  FactoryError,
   FactoryRpcGroup,
   FactoryRpcMethods,
   type ProjectId,
@@ -111,6 +112,8 @@ import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as ServerConfig from "./config.ts";
 import * as FactoryRuntime from "./factory/runtimeLayer.ts";
+import * as CredentialStore from "./factory/CredentialStore.ts";
+import * as Enrollment from "./factory/Enrollment.ts";
 import * as EnvironmentTheme from "./environmentTheme.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
@@ -447,11 +450,23 @@ function projectFileFailureContext(
 
 const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 
-const FactoryMetadataRpcGroup = FactoryRpcGroup.omit(
-  FactoryRpcMethods.environmentsEnroll,
-  FactoryRpcMethods.overviewSubscribe,
-);
+const FactoryMetadataRpcGroup = FactoryRpcGroup.omit(FactoryRpcMethods.overviewSubscribe);
 const ServerWsRpcGroup = WsRpcGroup.merge(FactoryMetadataRpcGroup);
+const isFactoryError = Schema.is(FactoryError);
+
+const safeFactoryEnrollmentError = (
+  error:
+    | FactoryError
+    | CredentialStore.CredentialStoreError
+    | Enrollment.SourceCredentialExchangeError,
+) =>
+  isFactoryError(error)
+    ? error
+    : new FactoryError({
+        code: "operation-failed",
+        message:
+          "Factory could not complete this operation. Verify the source and credential store, then retry.",
+      });
 // When a resuming client's cursor is more than this many events behind the
 // current head, skip the per-event catch-up replay and send a fresh shell
 // snapshot instead. Replaying each intervening event costs a shell refetch;
@@ -2037,6 +2052,15 @@ const makeWsRpcLayer = (
               "rpc.aggregate": "server",
             },
           ),
+        [FactoryRpcMethods.environmentsEnroll]: (input) =>
+          observeRpcEffect(
+            FactoryRpcMethods.environmentsEnroll,
+            factoryRuntime.getEnrollment.pipe(
+              Effect.flatMap((enrollment) => enrollment.enroll(input)),
+              Effect.mapError(safeFactoryEnrollmentError),
+            ),
+            { "rpc.aggregate": "factory" },
+          ),
         [FactoryRpcMethods.environmentsList]: (_input) =>
           observeRpcEffect(
             FactoryRpcMethods.environmentsList,
@@ -2056,8 +2080,9 @@ const makeWsRpcLayer = (
         [FactoryRpcMethods.environmentsRemove]: (input) =>
           observeRpcEffect(
             FactoryRpcMethods.environmentsRemove,
-            factoryRuntime.getMetadata.pipe(
-              Effect.flatMap((metadata) => metadata.removeEnvironment(input)),
+            factoryRuntime.getEnrollment.pipe(
+              Effect.flatMap((enrollment) => enrollment.remove(input)),
+              Effect.mapError(safeFactoryEnrollmentError),
             ),
             { "rpc.aggregate": "factory" },
           ),
