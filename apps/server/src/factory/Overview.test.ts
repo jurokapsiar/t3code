@@ -626,4 +626,144 @@ describe("Factory overview", () => {
       expect(initial.type).toBe("snapshot");
     }),
   );
+
+  it.effect("rejects a patch when revision ten makes an exact snapshot too large", () =>
+    Effect.gen(function* () {
+      const remote = target("revision-boundary", "revision-boundary-env");
+      const baselineHarness = yield* makeHarness([
+        sourceState(remote, [project(remote, "filler", "x"), project(remote, "mutable", "x")]),
+      ]);
+      const baseline = yield* baselineHarness.overview.getSnapshot;
+      const titleLength = 1 + FACTORY_MAX_SNAPSHOT_BYTES - encodedSnapshotBytes(baseline);
+      const exact = yield* makeHarness([
+        sourceState(remote, [
+          project(remote, "filler", "x".repeat(titleLength)),
+          project(remote, "mutable", "x"),
+        ]),
+      ]);
+      const queue = yield* Stream.toQueue(exact.overview.subscribe, { capacity: 4 });
+      const initial = yield* Queue.take(queue);
+      expect(initial).toMatchObject({ type: "snapshot", snapshot: { revision: 0 } });
+
+      for (let revision = 1; revision <= 9; revision++) {
+        const title = revision % 2 === 0 ? "x" : "y";
+        yield* exact.publish({
+          kind: "frame",
+          frame: {
+            kind: "project.updated",
+            target: remote,
+            sequence: revision,
+            project: project(remote, "mutable", title),
+          },
+        });
+        expect(yield* Queue.take(queue)).toMatchObject({ type: "patch", revision });
+      }
+
+      const revisionNine = yield* exact.overview.getSnapshot;
+      expect(revisionNine.revision).toBe(9);
+      expect(encodedSnapshotBytes(revisionNine)).toBe(FACTORY_MAX_SNAPSHOT_BYTES);
+      yield* exact.publish({
+        kind: "frame",
+        frame: {
+          kind: "project.updated",
+          target: remote,
+          sequence: 10,
+          project: project(remote, "mutable", "z"),
+        },
+      });
+
+      const streamResult = yield* Effect.exit(
+        Effect.flip(Stream.runCollect(Stream.fromQueue(queue).pipe(Stream.take(1)))),
+      );
+      expect(Exit.isSuccess(streamResult)).toBe(true);
+      if (!Exit.isSuccess(streamResult)) return;
+      expect(streamResult.value).toMatchObject({ code: "overview-too-large" });
+      const snapshotResult = yield* Effect.exit(exact.overview.getSnapshot);
+      expect(Exit.isSuccess(snapshotResult)).toBe(true);
+      if (!Exit.isSuccess(snapshotResult)) return;
+      const recovery = snapshotResult.value;
+      expect(recovery.revision).toBe(9);
+      expect(encodedSnapshotBytes(recovery)).toBe(FACTORY_MAX_SNAPSHOT_BYTES);
+      expect(encodedSnapshotBytes({ ...recovery, revision: 10 })).toBe(
+        FACTORY_MAX_SNAPSHOT_BYTES + 1,
+      );
+      const recoveryQueue = yield* Stream.toQueue(exact.overview.subscribe, { capacity: 1 });
+      const recoveredEvent = yield* Queue.take(recoveryQueue);
+      expect(recoveredEvent.type).toBe("snapshot");
+      if (recoveredEvent.type === "snapshot") {
+        expect(recoveredEvent.snapshot.revision).toBe(9);
+        expect(encodedSnapshotBytes(recoveredEvent.snapshot)).toBe(FACTORY_MAX_SNAPSHOT_BYTES);
+      }
+    }),
+  );
+
+  it.effect("preflights every patch in a batch against its final revision", () =>
+    Effect.gen(function* () {
+      const remote = target("batch-boundary", "batch-boundary-env");
+      const fillerTarget = target("batch-filler", "batch-filler-env");
+      const existingThread = thread(remote, "large-thread", "large");
+      const baselineHarness = yield* makeHarness([
+        sourceState(fillerTarget, [project(fillerTarget, "filler", "x")]),
+        sourceState(remote, [project(remote, "mutable", "x")], [existingThread]),
+      ]);
+      const baseline = yield* baselineHarness.overview.getSnapshot;
+      const titleLength = 1 + FACTORY_MAX_SNAPSHOT_BYTES - encodedSnapshotBytes(baseline);
+      const exact = yield* makeHarness([
+        sourceState(fillerTarget, [project(fillerTarget, "filler", "x".repeat(titleLength))]),
+        sourceState(remote, [project(remote, "mutable", "x")], [existingThread]),
+      ]);
+      const queue = yield* Stream.toQueue(exact.overview.subscribe, { capacity: 4 });
+      yield* Queue.take(queue);
+
+      for (let revision = 1; revision <= 8; revision++) {
+        const title = revision % 2 === 0 ? "x" : "y";
+        yield* exact.publish({
+          kind: "frame",
+          frame: {
+            kind: "project.updated",
+            target: remote,
+            sequence: revision,
+            project: project(remote, "mutable", title),
+          },
+        });
+        expect(yield* Queue.take(queue)).toMatchObject({ type: "patch", revision });
+      }
+      const revisionEight = yield* exact.overview.getSnapshot;
+      expect(encodedSnapshotBytes(revisionEight)).toBe(FACTORY_MAX_SNAPSHOT_BYTES);
+
+      yield* exact.publish({
+        kind: "frame",
+        frame: {
+          kind: "snapshot",
+          target: remote,
+          sequence: 9,
+          projects: [project(remote, "mutable", "z")],
+          threads: [{ ...existingThread, title: "thread large-thread" }],
+        },
+      });
+
+      const streamResult = yield* Effect.exit(
+        Effect.flip(Stream.runCollect(Stream.fromQueue(queue).pipe(Stream.take(1)))),
+      );
+      expect(Exit.isSuccess(streamResult)).toBe(true);
+      if (!Exit.isSuccess(streamResult)) return;
+      expect(streamResult.value).toMatchObject({ code: "overview-too-large" });
+      const snapshotResult = yield* Effect.exit(exact.overview.getSnapshot);
+      expect(Exit.isSuccess(snapshotResult)).toBe(true);
+      if (!Exit.isSuccess(snapshotResult)) return;
+      const recovery = snapshotResult.value;
+      expect(recovery.revision).toBe(8);
+      expect(encodedSnapshotBytes(recovery)).toBe(FACTORY_MAX_SNAPSHOT_BYTES);
+      expect(encodedSnapshotBytes({ ...recovery, revision: 10 })).toBe(
+        FACTORY_MAX_SNAPSHOT_BYTES + 1,
+      );
+      const recoveryQueue = yield* Stream.toQueue(exact.overview.subscribe, { capacity: 1 });
+      const recoveredEvent = yield* Queue.take(recoveryQueue);
+      expect(recoveredEvent.type).toBe("snapshot");
+      if (recoveredEvent.type === "snapshot") {
+        expect(recoveredEvent.snapshot.revision).toBe(8);
+        expect(encodedSnapshotBytes(recoveredEvent.snapshot)).toBe(FACTORY_MAX_SNAPSHOT_BYTES);
+      }
+    }),
+  );
 });

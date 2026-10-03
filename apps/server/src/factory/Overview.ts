@@ -202,10 +202,10 @@ const make = Effect.gen(function* () {
   let metadataRevision = -1;
   let started = false;
 
-  const snapshotBytes = () => {
+  const snapshotBytes = (snapshotRevision = revision) => {
     const emptySnapshot = {
       generation,
-      revision,
+      revision: snapshotRevision,
       environments: [],
       sourceFreshness: [],
       threads: [],
@@ -269,9 +269,10 @@ const make = Effect.gen(function* () {
 
   const publishPatches = (patches: ReadonlyArray<FactoryOverviewPatch>) =>
     Effect.gen(function* () {
+      const finalRevision = revision + (subscribers.size === 0 ? 0 : patches.length);
       const limits = checkOverviewLimits({
         threadCount: threads.values.size,
-        encodedBytes: snapshotBytes(),
+        encodedBytes: snapshotBytes(finalRevision),
       });
       if (!limits.ok) {
         yield* failSubscribers(tooLargeError());
