@@ -6,7 +6,7 @@ import { expect, it } from "vite-plus/test";
 
 const execFile = NodeUtil.promisify(NodeChildProcess.execFile);
 
-it.each(["prefix", "snapshot", "replay"])(
+it.each(["prefix", "snapshot", "replay", "factory-replay"])(
   "releases delivered %s history while RPC subscriptions remain open",
   async (mode) => {
     const root = NodeURL.fileURLToPath(new URL("../../../", import.meta.url));

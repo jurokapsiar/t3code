@@ -5,10 +5,12 @@ import {
   ThreadId,
   TurnItemId,
   type ApplicationStoredEvent,
+  type OrchestrationProjectShell,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2StoredEvent,
   type OrchestrationV2TurnItem,
   type OrchestrationV2ReplayResetReason,
+  type OrchestrationV2ShellStreamItem,
 } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
@@ -23,8 +25,12 @@ import type { OrchestrationEventStoreError } from "../persistence/Errors.ts";
 import * as OrchestrationEventStore from "../persistence/Services/OrchestrationEventStore.ts";
 import { OrchestrationEventStoreLive } from "../persistence/Layers/OrchestrationEventStore.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
-import { createFactoryReplayStream, threadReplayEncodedBytes } from "./ThreadStream.ts";
-import { toShellApplicationEvent, type ShellApplicationEvent } from "./ShellStream.ts";
+import {
+  chunkFactoryReplayPage,
+  createFactoryReplayStream,
+  threadReplayEncodedBytes,
+} from "./ThreadStream.ts";
+import { projectShellApplicationItems, toShellApplicationEvent } from "./ShellStream.ts";
 import { projectDomainEventForWire } from "./WireProjection.ts";
 
 const TestLayer = OrchestrationEventStoreLive.pipe(Layer.provideMerge(SqlitePersistenceMemory));
@@ -32,6 +38,18 @@ const layer = it.layer(TestLayer);
 const now = DateTime.makeUnsafe("2026-10-03T00:00:00.000Z");
 const providerInstanceId = ProviderInstanceId.make("codex");
 const projectId = ProjectId.make("project-factory-replay");
+
+function projectShell(id: ProjectId): OrchestrationProjectShell {
+  return {
+    id,
+    title: `Replay project ${id}`,
+    workspaceRoot: `/tmp/${id}`,
+    defaultModelSelection: null,
+    scripts: [],
+    createdAt: "2026-10-03T00:00:00.000Z",
+    updatedAt: "2026-10-03T00:00:00.000Z",
+  };
+}
 
 function createdEvent(threadId: ThreadId, index: number): OrchestrationV2DomainEvent {
   return {
@@ -67,7 +85,7 @@ function createdEvent(threadId: ThreadId, index: number): OrchestrationV2DomainE
 }
 
 type ReplayTestItem =
-  | ShellApplicationEvent
+  | OrchestrationV2ShellStreamItem
   | { readonly kind: "replay"; readonly sequence: number }
   | { readonly kind: "snapshot-reset"; readonly reason: string }
   | { readonly kind: "synchronized" }
@@ -79,8 +97,8 @@ layer("factory replay persistence", (it) => {
       const store = yield* OrchestrationEventStore.OrchestrationEventStore;
       const sql = yield* SqlClient.SqlClient;
       const payload =
-        '{"projectId":"factory-replay-project","title":"Replay project",' +
-        '"workspaceRoot":"/tmp/factory-replay-project","defaultModelSelection":null,' +
+        '{"projectId":"factory-replay-project-00001","title":"Replay project",' +
+        '"workspaceRoot":"/tmp/factory-replay-project-00001","defaultModelSelection":null,' +
         '"scripts":[],"createdAt":"2026-10-03T00:00:00.000Z",' +
         '"updatedAt":"2026-10-03T00:00:00.000Z"}';
       const payloadBytes = Buffer.byteLength(payload);
@@ -96,13 +114,16 @@ layer("factory replay persistence", (it) => {
           occurred_at, actor_kind, payload_json, metadata_json, application_event_version
         )
         SELECT
-          'factory-exact-replay-' || n, 'project', 'factory-replay-project', n,
-          'project.created', '2026-10-03T00:00:00.000Z', 'server', ${payload}, '{}', 2
+          'factory-exact-replay-' || n, 'project',
+          'factory-replay-project-' || printf('%05d', n), n,
+          'project.created', '2026-10-03T00:00:00.000Z', 'server',
+          replace(${payload}, 'factory-replay-project-00001',
+            'factory-replay-project-' || printf('%05d', n)), '{}', 2
         FROM event_rows
       `;
       const highWater = yield* store.latestApplicationSequence;
       const measuredPages: Array<{ count: number; rawBytes: number }> = [];
-      const measuredEncodedPages: number[] = [];
+      const measuredEncodedPages: Array<{ count: number; encodedBytes: number }> = [];
 
       for (const eventCount of [0, 128, 129, 1_000, 10_000, 10_001]) {
         const afterSequence = highWater - eventCount;
@@ -125,11 +146,27 @@ layer("factory replay persistence", (it) => {
                 ),
               ),
             );
-        const project = (events: ReadonlyArray<ApplicationStoredEvent>) => {
-          const projected = events.map(toShellApplicationEvent);
-          measuredEncodedPages.push(threadReplayEncodedBytes(projected));
-          return Effect.succeed<ReadonlyArray<ReplayTestItem>>(projected);
-        };
+        const project = (events: ReadonlyArray<ApplicationStoredEvent>) =>
+          projectShellApplicationItems({
+            events: events.map(toShellApplicationEvent),
+            getProjectShell: (id) => Effect.succeedSome(projectShell(id)),
+            getThreadShell: () => Effect.succeed(null),
+          }).pipe(
+            Effect.tap((items) =>
+              Effect.sync(() => {
+                const pages = chunkFactoryReplayPage(items);
+                if (pages.mode !== "pages") {
+                  throw new Error(`projected shell replay page was rejected: ${pages.reason}`);
+                }
+                for (const page of pages.pages) {
+                  measuredEncodedPages.push({
+                    count: page.length,
+                    encodedBytes: threadReplayEncodedBytes(page),
+                  });
+                }
+              }),
+            ),
+          );
         const reset = (reason: OrchestrationV2ReplayResetReason) => {
           const resetItems: ReadonlyArray<ReplayTestItem> = [
             { kind: "snapshot-reset", reason },
@@ -157,8 +194,8 @@ layer("factory replay persistence", (it) => {
 
         if (eventCount <= 10_000) {
           const replayed = items.filter(
-            (item): item is Extract<ShellApplicationEvent, { readonly sequence: number }> =>
-              "sequence" in item && !("kind" in item),
+            (item): item is Extract<ReplayTestItem, { readonly kind: "project.updated" }> =>
+              item.kind === "project.updated",
           );
           assert.equal(replayed.length, eventCount);
           assert.deepEqual(
@@ -181,8 +218,18 @@ layer("factory replay persistence", (it) => {
         assert.isAtMost(page.count, 128);
         assert.isAtMost(page.rawBytes, 1_048_576);
       }
-      assert.equal(measuredEncodedPages.length, measuredPages.length);
-      for (const pageBytes of measuredEncodedPages) assert.isAtMost(pageBytes, 1_048_576);
+      assert.equal(
+        measuredEncodedPages.length,
+        measuredPages.filter((page) => page.count > 0).length,
+      );
+      assert.equal(
+        measuredEncodedPages.reduce((total, page) => total + page.count, 0),
+        measuredPages.reduce((total, page) => total + page.count, 0),
+      );
+      for (const page of measuredEncodedPages) {
+        assert.isAtMost(page.count, 128);
+        assert.isAtMost(page.encodedBytes, 1_048_576);
+      }
     }),
   );
 

@@ -7,6 +7,8 @@ import type {
 import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
 
+import { rpcInitialItems } from "../rpcInitialItems.ts";
+
 import { buildBoundedThreadProjection } from "./threadHistoryPaging.ts";
 import { projectThreadProjectionForWire } from "./WireProjection.ts";
 
@@ -195,22 +197,45 @@ export function createFactoryReplayPages<
     Stream.unwrap(
       input.readPage(cursor, input.highWater).pipe(
         Effect.flatMap((page) => {
-          if (page.decodeFailed) return input.reset("decode-failure");
-          if (page.oversized) return input.reset("oversized-event");
-          return input.project(page.events).pipe(
+          let events = page.events;
+          const hasMore = page.hasMore;
+          const discardReadPage = () => {
+            // This Effect frame can remain reachable while the returned live tail waits.
+            page = { events: [], hasMore: false, oversized: false, decodeFailed: false };
+            events = [];
+          };
+          if (page.decodeFailed) {
+            discardReadPage();
+            return input.reset("decode-failure");
+          }
+          if (page.oversized) {
+            discardReadPage();
+            return input.reset("oversized-event");
+          }
+          return input.project(events).pipe(
             Effect.flatMap((items) => {
               const bounded = chunkFactoryReplayPage(items);
-              if (bounded.mode === "snapshot") return input.reset(bounded.reason);
-              if (page.hasMore && page.events.length === 0) return input.reset("invalid-cursor");
-              const nextCursor = page.events.at(-1)?.sequence;
+              if (bounded.mode === "snapshot") {
+                items = [];
+                discardReadPage();
+                return input.reset(bounded.reason);
+              }
+              if (hasMore && events.length === 0) {
+                items = [];
+                discardReadPage();
+                return input.reset("invalid-cursor");
+              }
+              const nextCursor = events.at(-1)?.sequence;
               const next =
-                page.hasMore && nextCursor !== undefined
+                hasMore && nextCursor !== undefined
                   ? replayPages(nextCursor)
                   : Stream.concat(input.completionMarker, input.live);
+              discardReadPage();
+              items = [];
               return Effect.succeed(
                 Stream.concat(
-                  Stream.fromIterable(bounded.pages).pipe(
-                    Stream.flatMap((batch) => Stream.fromIterable(batch)),
+                  rpcInitialItems(bounded.pages).pipe(
+                    Stream.flatMap((batch) => rpcInitialItems(batch)),
                   ),
                   next,
                 ),

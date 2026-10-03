@@ -13,11 +13,12 @@ const [Effect, Stream, Layer, Deferred, Fiber] = await Promise.all(
   ["Effect", "Stream", "Layer", "Deferred", "Fiber"].map(load),
 );
 const app = (file) => import(NodeURL.pathToFileURL(root + "/apps/server/src/" + file + ".ts"));
-const [Prefix, Ws, Threads, Events] = await Promise.all([
+const [Prefix, Ws, Threads, Events, ThreadStream] = await Promise.all([
   app("rpcInitialItems"),
   app("ws"),
   app("orchestration-v2/ThreadManagementService"),
   app("persistence/Services/OrchestrationEventStore"),
+  app("orchestration-v2/ThreadStream"),
 ]);
 const refs = [];
 const fibers = [];
@@ -71,11 +72,43 @@ function start(ready) {
   const stream =
     mode === "prefix"
       ? Effect.succeed(Stream.concat(Prefix.rpcInitialItems([history()]), live))
-      : Ws.subscribeOrchestrationV2Thread({
-          threadId: "synthetic-thread",
-          requestCompletionMarker: true,
-          ...(mode === "replay" ? { afterSequence: 0 } : {}),
-        }).pipe(Effect.provide(dependencies));
+      : mode === "factory-replay"
+        ? ThreadStream.createFactoryReplayStream({
+            afterSequence: 0,
+            highWater: 79,
+            getStats: () => Effect.succeed({ eventCount: 79, largestRawEventBytes: bytes * 2 }),
+            readPage: (cursor) =>
+              Effect.sync(() => {
+                const sequence = cursor + 1;
+                return {
+                  events: [
+                    {
+                      sequence,
+                      event: { type: "message.updated", payload: history() },
+                    },
+                  ],
+                  hasMore: sequence < 79,
+                  oversized: false,
+                  decodeFailed: false,
+                };
+              }),
+            project: (events) =>
+              Effect.succeed(
+                events.map((stored) => ({
+                  kind: "event",
+                  sequence: stored.sequence,
+                  event: stored.event,
+                })),
+              ),
+            reset: (reason) => Effect.succeed(Stream.make({ kind: "snapshot-reset", reason })),
+            completionMarker: Stream.make({ kind: "synchronized" }),
+            live,
+          })
+        : Ws.subscribeOrchestrationV2Thread({
+            threadId: "synthetic-thread",
+            requestCompletionMarker: true,
+            ...(mode === "replay" ? { afterSequence: 0 } : {}),
+          }).pipe(Effect.provide(dependencies));
   let delivered = 0;
   return stream.pipe(
     Effect.flatMap((stream) =>
@@ -84,9 +117,16 @@ function start(ready) {
           Effect.sync(() => {
             if (mode === "prefix") {
               NodeAssert.equal(item.text.length, bytes * 2);
+            } else if (mode === "factory-replay") {
+              if (item.kind === "event") {
+                NodeAssert.equal(item.event.payload.text.length, bytes * 2);
+              } else {
+                NodeAssert.equal(item.kind, "synchronized");
+              }
             } else if (delivered === 0) {
-              NodeAssert.equal(item.kind, mode === "replay" ? "event" : "snapshot");
-              const value = mode === "replay" ? item.event.payload : item.projection.messages[0];
+              const isReplay = mode === "replay";
+              NodeAssert.equal(item.kind, isReplay ? "event" : "snapshot");
+              const value = isReplay ? item.event.payload : item.projection.messages[0];
               NodeAssert.equal(value.text.length, bytes * 2);
             } else {
               NodeAssert.equal(item.kind, "synchronized");
@@ -107,7 +147,10 @@ const result = await Effect.runPromise(
       const ready = yield* Deferred.make();
       fibers.push(yield* start(ready));
       yield* Deferred.await(ready);
-      NodeAssert.equal(deliveredCounts[i], mode === "prefix" ? 1 : 2);
+      NodeAssert.equal(
+        deliveredCounts[i],
+        mode === "factory-replay" ? 80 : mode === "prefix" ? 1 : 2,
+      );
       if (i === Math.floor(count / 2) - 1 || i === count - 1) {
         yield* Effect.promise(async () => {
           for (let j = 0; j < 3; j++) {

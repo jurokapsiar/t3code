@@ -9,7 +9,13 @@ import type {
   OrchestrationV2ReplayResetReason,
   OrchestrationV2StoredEvent,
 } from "@t3tools/contracts";
-import { OrchestrationProjectShell as ProjectShellSchema } from "@t3tools/contracts";
+import {
+  OrchestrationProjectShell as ProjectShellSchema,
+  type ProjectId,
+  type ThreadId,
+} from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
@@ -64,6 +70,53 @@ export function coalesceShellApplicationEvents<A extends ShellApplicationEvent>(
   }
   return Array.from(latestByAggregate.values()).sort(
     (left, right) => left.sequence - right.sequence,
+  );
+}
+
+/** Project coalesced shell changes from the latest project and thread shells. */
+export function projectShellApplicationItems<EProject, RProject, EThread, RThread>(input: {
+  readonly events: ReadonlyArray<ShellApplicationEvent>;
+  readonly getProjectShell: (
+    projectId: ProjectId,
+  ) => Effect.Effect<Option.Option<OrchestrationProjectShell>, EProject, RProject>;
+  readonly getThreadShell: (
+    threadId: ThreadId,
+  ) => Effect.Effect<OrchestrationV2ThreadShell | null, EThread, RThread>;
+}): Effect.Effect<
+  ReadonlyArray<Exclude<OrchestrationV2ShellStreamItem, { readonly kind: "snapshot" }>>,
+  EProject | EThread,
+  RProject | RThread
+> {
+  return Effect.forEach(
+    coalesceShellApplicationEvents(input.events),
+    (stored) =>
+      Effect.gen(function* () {
+        if ("aggregateKind" in stored) {
+          if (stored.type === "project.deleted") {
+            return {
+              kind: "project.removed" as const,
+              sequence: stored.sequence,
+              projectId: stored.aggregateId,
+            };
+          }
+          const project = yield* input.getProjectShell(stored.aggregateId);
+          return Option.match(project, {
+            onNone: () => ({
+              kind: "project.removed" as const,
+              sequence: stored.sequence,
+              projectId: stored.aggregateId,
+            }),
+            onSome: (value) => ({
+              kind: "project.updated" as const,
+              sequence: stored.sequence,
+              project: value,
+            }),
+          });
+        }
+        const shell = yield* input.getThreadShell(stored.event.threadId);
+        return shellStreamItemFromThreadShell({ stored, shell });
+      }),
+    { concurrency: 8 },
   );
 }
 

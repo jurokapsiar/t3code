@@ -1,12 +1,14 @@
 import { describe, expect, it } from "@effect/vitest";
 import type {
   ApplicationStoredEvent,
+  OrchestrationProjectShell,
   OrchestrationV2ShellSnapshot,
   OrchestrationV2StoredEvent,
   OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import { ProjectId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 
 import {
@@ -16,11 +18,13 @@ import {
   coalesceStoredThreadEvents,
   composeShellStreamWithEnrichment,
   dedupeShellEnrichment,
+  projectShellApplicationItems,
   shellStreamItemFromEnrichmentRefresh,
   shellStreamItemFromThreadShell,
   shellStreamItemsFromInitialSnapshot,
   shellStreamItemsFromResumeSnapshot,
 } from "./ShellStream.ts";
+import type { ShellApplicationEvent } from "./ShellStream.ts";
 
 function project(sequence: number, id: string): ApplicationStoredEvent {
   return {
@@ -86,6 +90,73 @@ describe("coalesceShellApplicationEvents", () => {
       ]).map((event) => event.sequence),
     ).toEqual([4, 5, 6]);
   });
+});
+
+function shellProject(
+  sequence: number,
+  id: string,
+  type: "project.created" | "project.deleted",
+): ShellApplicationEvent {
+  return { sequence, aggregateKind: "project", aggregateId: ProjectId.make(id), type };
+}
+
+describe("projectShellApplicationItems", () => {
+  it.effect("projects coalesced project and thread changes from their current shells", () =>
+    Effect.gen(function* () {
+      const projectId = ProjectId.make("project-shell-project");
+      const shell: OrchestrationProjectShell = {
+        id: projectId,
+        title: "Project shell",
+        workspaceRoot: "/workspace/project-shell",
+        defaultModelSelection: null,
+        scripts: [],
+        createdAt: "2026-10-03T00:00:00.000Z",
+        updatedAt: "2026-10-03T00:00:00.000Z",
+      };
+      const thread = shellFixture({ id: ThreadId.make("thread-shell-project") });
+      const projectLookups: Array<ProjectId> = [];
+      const threadLookups: Array<string> = [];
+      const items = yield* projectShellApplicationItems({
+        events: [
+          shellProject(1, "project-shell-project", "project.created"),
+          shellProject(2, "project-shell-project", "project.created"),
+          shellProject(3, "project-shell-deleted", "project.deleted"),
+          shellProject(4, "project-shell-missing", "project.created"),
+          { sequence: 5, event: { threadId: ThreadId.make("thread-shell-project") } },
+        ],
+        getProjectShell: (id) => {
+          projectLookups.push(id);
+          return id === projectId ? Effect.succeedSome(shell) : Effect.succeed(Option.none());
+        },
+        getThreadShell: (id) => {
+          threadLookups.push(id);
+          return Effect.succeed(thread);
+        },
+      });
+
+      expect(items).toEqual([
+        { kind: "project.updated", sequence: 2, project: shell },
+        {
+          kind: "project.removed",
+          sequence: 3,
+          projectId: ProjectId.make("project-shell-deleted"),
+        },
+        {
+          kind: "project.removed",
+          sequence: 4,
+          projectId: ProjectId.make("project-shell-missing"),
+        },
+        {
+          kind: "thread.updated",
+          sequence: 5,
+          location: "active",
+          thread,
+        },
+      ]);
+      expect(projectLookups).toEqual([projectId, ProjectId.make("project-shell-missing")]);
+      expect(threadLookups).toEqual([thread.id]);
+    }),
+  );
 });
 
 function storedThreadEvent(
