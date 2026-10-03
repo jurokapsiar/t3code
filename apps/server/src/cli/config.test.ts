@@ -23,6 +23,43 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { deriveServerPaths } from "../config.ts";
 import { resolveServerConfig } from "./config.ts";
 
+it.layer(NodeServices.layer)("factory config", (it) => {
+  it.effect("is opt-in and lets the CLI flag override the environment", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-factory-config-" });
+      const flags = {
+        mode: Option.some("web" as const),
+        port: Option.some(0),
+        host: Option.none<string>(),
+        baseDir: Option.some(baseDir),
+        cwd: Option.none<string>(),
+        devUrl: Option.none<URL>(),
+        noBrowser: Option.none<boolean>(),
+        bootstrapFd: Option.none<number>(),
+        autoBootstrapProjectFromCwd: Option.none<boolean>(),
+        logWebSocketEvents: Option.none<boolean>(),
+        tailscaleServeEnabled: Option.none<boolean>(),
+        tailscaleServePort: Option.none<number>(),
+      };
+      const resolve = (factoryEnabled: Option.Option<boolean>, env: Record<string, string>) =>
+        resolveServerConfig({ ...flags, factoryEnabled }, Option.none()).pipe(
+          Effect.provide(
+            Layer.mergeAll(ConfigProvider.layer(ConfigProvider.fromEnv({ env })), NetService.layer),
+          ),
+        );
+
+      const disabled = yield* resolve(Option.none(), {});
+      const enabled = yield* resolve(Option.none(), { T3CODE_FACTORY_ENABLED: "true" });
+      const flagWins = yield* resolve(Option.some(false), { T3CODE_FACTORY_ENABLED: "true" });
+
+      expect(disabled).toMatchObject({ factoryEnabled: false });
+      expect(enabled).toMatchObject({ factoryEnabled: true });
+      expect(flagWins).toMatchObject({ factoryEnabled: false });
+    }),
+  );
+});
+
 const deriveExplicitServerPaths = (baseDir: string, devUrl: URL | undefined) =>
   deriveServerPaths(baseDir, devUrl, { baseDirIsExplicit: true });
 
@@ -47,6 +84,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
   const defaultObservabilityConfig = {
     traceMinLevel: "Info",
     traceTimingEnabled: true,
+    factoryEnabled: false,
     traceBatchWindowMs: 1_000,
     traceMaxBytes: 10 * 1024 * 1024,
     traceMaxFiles: 10,

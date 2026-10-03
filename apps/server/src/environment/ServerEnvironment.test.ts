@@ -1,5 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
+import { FACTORY_PROTOCOL_VERSION, ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
@@ -181,6 +181,29 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
       expect(second.capabilities.threadPullRequestLinking).toBe(true);
       expect(second.capabilities.serverResolvedCommandContext).toBe(true);
       expect(second.capabilities.agentActivityPublishing).toBe(false);
+      expect(second.capabilities.factory).toBeUndefined();
+      expect(second.factoryProtocolVersion).toBeUndefined();
+    }),
+  );
+
+  it.effect("advertises factory capability and protocol only when enabled", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-server-environment-factory-test-",
+      });
+      const serverConfig = yield* makeServerConfig(baseDir);
+      const factoryLayer = Layer.mergeAll(
+        ServerEnvironment.layer.pipe(Layer.provide(ServerSecretStore.layer)),
+        ServerSecretStore.layer,
+      ).pipe(Layer.provide(ServerConfig.layer({ ...serverConfig, factoryEnabled: true })));
+      const descriptor = yield* Effect.gen(function* () {
+        const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
+        return yield* serverEnvironment.getDescriptor;
+      }).pipe(Effect.provide(factoryLayer));
+
+      expect(descriptor.capabilities.factory).toBe(true);
+      expect(descriptor.factoryProtocolVersion).toBe(FACTORY_PROTOCOL_VERSION);
     }),
   );
 

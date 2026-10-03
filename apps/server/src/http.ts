@@ -544,7 +544,8 @@ const handleStaticAndDevRequest = Effect.fn("handleStaticAndDevRequest")(
       return HttpServerResponse.text("Not Found", { status: 404 });
     }
 
-    if (config.devUrl && isLoopbackHostname(url.value.hostname)) {
+    const preserveFactoryPairingPage = config.factoryEnabled && url.value.pathname === "/pair";
+    if (config.devUrl && isLoopbackHostname(url.value.hostname) && !preserveFactoryPairingPage) {
       return HttpServerResponse.redirect(resolveDevRedirectUrl(config.devUrl, url.value), {
         status: 302,
       });

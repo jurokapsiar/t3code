@@ -30,6 +30,15 @@ connection. Pull request diffs and provider settings keep working after the
 previous credential expires. A failed renewal affects that request; it does not
 disconnect an otherwise healthy conversation.
 
+## Factory mode
+
+Factory mode is opt-in. Start a server with `t3 serve --factory`, or set
+`T3CODE_FACTORY_ENABLED=true`. The CLI flag takes precedence over the setting.
+Without either, the server keeps its normal single-environment behavior.
+
+Factory hosting is still in development. It does not yet enroll source servers
+or combine their sessions, so do not use it to manage remote environments.
+
 ## Pair over a LAN or private network
 
 Use direct pairing when the other device can reach the host's network address.

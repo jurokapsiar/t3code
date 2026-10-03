@@ -7,6 +7,8 @@ import {
   AuthRelayWriteScope,
   AuthReviewWriteScope,
   AuthTerminalOperateScope,
+  FactoryRpcMethodScopes,
+  type FactoryRpcMethod,
   ORCHESTRATION_V2_WS_METHODS,
   type AuthEnvironmentScope,
   WS_METHODS,
@@ -202,6 +204,9 @@ export const RPC_REQUIRED_SCOPES = {
 } as const satisfies Readonly<Record<WsRpcMethod, AuthEnvironmentScope>>;
 
 export function requiredScopeForRpcMethod(method: string): AuthEnvironmentScope {
+  if (Object.hasOwn(FactoryRpcMethodScopes, method)) {
+    return FactoryRpcMethodScopes[method as FactoryRpcMethod];
+  }
   if (!Object.hasOwn(RPC_REQUIRED_SCOPES, method)) {
     throw new Error(`RPC method ${method} has no declared authorization scope.`);
   }

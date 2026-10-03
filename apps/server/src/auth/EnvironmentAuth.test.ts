@@ -1,5 +1,9 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { AuthAdministrativeScopes } from "@t3tools/contracts";
+import {
+  AuthAdministrativeScopes,
+  AuthFactoryScopes,
+  AuthStandardClientScopes,
+} from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -78,6 +82,24 @@ const requestMetadata = {
 };
 
 it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
+  it.effect("adds factory scopes to new standard pairings without changing old sessions", () =>
+    Effect.gen(function* () {
+      const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+      const oldSession = yield* serverAuth.issueSession({ scopes: AuthStandardClientScopes });
+      const pairing = yield* serverAuth.createPairingLink({ scopes: AuthStandardClientScopes });
+      const readOnlyPairing = yield* serverAuth.createPairingLink({
+        scopes: ["orchestration:read"],
+      });
+      const stillOld = yield* serverAuth.authenticateHttpRequest(
+        makeBearerRequest(oldSession.token),
+      );
+
+      expect(pairing.scopes).toEqual([...AuthStandardClientScopes, ...AuthFactoryScopes]);
+      expect(readOnlyPairing.scopes).toEqual(["orchestration:read"]);
+      expect(stillOld.scopes).toEqual(AuthStandardClientScopes);
+    }).pipe(Effect.provide(makeEnvironmentAuthLayer({ factoryEnabled: true }))),
+  );
+
   it.effect("uses the reusable dev cookie without overriding a normal scoped cookie", () =>
     Effect.gen(function* () {
       const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;

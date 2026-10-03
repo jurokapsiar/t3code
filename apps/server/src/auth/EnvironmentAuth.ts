@@ -2,6 +2,7 @@ import {
   AuthAccessTokenType,
   AuthAccessWriteScope,
   AuthAdministrativeScopes,
+  AuthFactoryScopes,
   AuthStandardClientScopes,
   type AuthAccessTokenResult,
   type AuthBrowserSessionResult,
@@ -607,6 +608,12 @@ export const make = Effect.gen(function* () {
   const descriptor = yield* policy.getDescriptor();
   const config = yield* ServerConfig.ServerConfig;
   const devAuth = resolveReusableDevAuth(config);
+  const addFactoryScopesToStandardPairing = (scopes: ReadonlyArray<AuthEnvironmentScope>) =>
+    config.factoryEnabled &&
+    scopes.length === AuthStandardClientScopes.length &&
+    AuthStandardClientScopes.every((scope) => scopes.includes(scope))
+      ? [...scopes, ...AuthFactoryScopes]
+      : scopes;
 
   const authenticateToken = (
     token: string,
@@ -886,8 +893,9 @@ export const make = Effect.gen(function* () {
   )(
     function* (input) {
       const createdAt = yield* DateTime.now;
+      const scopes = addFactoryScopesToStandardPairing(input?.scopes ?? AuthStandardClientScopes);
       const issued = yield* bootstrapCredentials.issueOneTimeToken({
-        scopes: input?.scopes ?? AuthStandardClientScopes,
+        scopes,
         subject: input?.subject ?? "one-time-token",
         ...(input?.ttl ? { ttl: input.ttl } : {}),
         ...(input?.label ? { label: input.label } : {}),
@@ -897,7 +905,7 @@ export const make = Effect.gen(function* () {
       return {
         id: issued.id,
         credential: issued.credential,
-        scopes: input?.scopes ?? AuthStandardClientScopes,
+        scopes,
         subject: input?.subject ?? "one-time-token",
         ...(issued.label ? { label: issued.label } : {}),
         createdAt: DateTime.toUtc(createdAt),
@@ -981,7 +989,7 @@ export const make = Effect.gen(function* () {
 
   const issuePairingCredential: EnvironmentAuth["Service"]["issuePairingCredential"] = (input) =>
     issuePairingCredentialForSubject({
-      scopes: input?.scopes ?? AuthStandardClientScopes,
+      scopes: addFactoryScopesToStandardPairing(input?.scopes ?? AuthStandardClientScopes),
       subject: "one-time-token",
       ...(input?.label ? { label: input.label } : {}),
     }).pipe(Effect.withSpan("EnvironmentAuth.issuePairingCredential"));
@@ -989,7 +997,9 @@ export const make = Effect.gen(function* () {
   const issueStartupPairingCredential: EnvironmentAuth["Service"]["issueStartupPairingCredential"] =
     () => {
       const fallback = issuePairingCredentialForSubject({
-        scopes: AuthAdministrativeScopes,
+        scopes: config.factoryEnabled
+          ? [...AuthAdministrativeScopes, ...AuthFactoryScopes]
+          : AuthAdministrativeScopes,
         subject: INTERNAL_ADMINISTRATIVE_BOOTSTRAP_SUBJECT,
         purpose: "startup",
       });

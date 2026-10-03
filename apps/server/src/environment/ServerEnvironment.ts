@@ -1,5 +1,6 @@
 import {
   EnvironmentId,
+  FACTORY_PROTOCOL_VERSION,
   ORCHESTRATION_PROTOCOL_VERSION,
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
   type ExecutionEnvironmentDescriptor,
@@ -213,6 +214,7 @@ export const make = Effect.gen(function* () {
     },
     serverVersion: packageJson.version,
     orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
+    ...(serverConfig.factoryEnabled ? { factoryProtocolVersion: FACTORY_PROTOCOL_VERSION } : {}),
     capabilities: {
       repositoryIdentity: true,
       connectionProbe: true,
@@ -245,6 +247,7 @@ export const make = Effect.gen(function* () {
       serverResolvedCommandContext: true,
       environmentIcon: true,
       projectCloneTracking: true,
+      ...(serverConfig.factoryEnabled ? { factory: true } : {}),
       ...(serverSelfUpdate === null ? {} : { serverSelfUpdate }),
       // V2 restart recovery uses the environment-owned opt-in. The old
       // per-update request flag is not wired into the V2 update RPC path.

@@ -1,8 +1,11 @@
 import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
+  AuthFactoryControlScope,
+  AuthFactoryReadScope,
   AuthRelayReadScope,
   AuthRelayWriteScope,
+  FactoryRpcMethods,
   WS_METHODS,
   WsRpcGroup,
 } from "@t3tools/contracts";
@@ -92,6 +95,15 @@ describe("RPC authorization scopes", () => {
     expect(requiredScopeForRpcMethod(WS_METHODS.pullRequestsRequestReviewers)).toBe(
       requiredScopeForRpcMethod(WS_METHODS.pullRequestsComment),
     );
+  });
+
+  it("keeps factory RPCs separate and scopes them without changing source scopes", () => {
+    expect(WsRpcGroup.requests.has(FactoryRpcMethods.groupsCreate)).toBe(false);
+    expect(requiredScopeForRpcMethod(FactoryRpcMethods.environmentsList)).toBe(
+      AuthFactoryReadScope,
+    );
+    expect(requiredScopeForRpcMethod(FactoryRpcMethods.groupsCreate)).toBe(AuthFactoryControlScope);
+    expect(requiredScopeForRpcMethod(WS_METHODS.serverGetConfig)).toBe(AuthOrchestrationReadScope);
   });
 
   it("rejects unknown RPC method names", () => {

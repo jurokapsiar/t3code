@@ -101,6 +101,7 @@ export class ServerConfig extends Context.Service<
     readonly logWebSocketEvents: boolean;
     readonly tailscaleServeEnabled: boolean;
     readonly tailscaleServePort: number;
+    readonly factoryEnabled?: boolean;
   }
 >()("t3/config/ServerConfig") {
   /** @deprecated Import and use `layerTest` from this module. */
@@ -228,6 +229,7 @@ const makeTest = Effect.fn("ServerConfig.makeTest")(function* (
     autoBootstrapProjectFromCwd: false,
     logWebSocketEvents: false,
     tailscaleServeEnabled: false,
+    factoryEnabled: false,
     tailscaleServePort: 443,
     port: 0,
     host: undefined,

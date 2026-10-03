@@ -82,6 +82,10 @@ const tailscaleServePortFlag = Flag.Int("tailscale-serve-port").pipe(
   Flag.optional,
 );
 
+const factoryEnabledFlag = Flag.Boolean("factory").pipe(
+  Flag.withDescription("Enable the opt-in T3 serve factory runtime."),
+  Flag.optional,
+);
 // Trace file location, shared by the server and `t3 trace summary`.
 export const traceFileConfig = Config.String("T3CODE_TRACE_FILE").pipe(
   Config.option,
@@ -158,6 +162,7 @@ const EnvServerConfig = Config.all({
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
+  factoryEnabled: Config.Boolean("T3CODE_FACTORY_ENABLED").pipe(Config.withDefault(false)),
   tailscaleServePort: Config.Port("T3CODE_TAILSCALE_SERVE_PORT").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
@@ -197,6 +202,7 @@ export interface CliServerFlags {
   readonly logWebSocketEvents: Option.Option<boolean>;
   readonly tailscaleServeEnabled: Option.Option<boolean>;
   readonly tailscaleServePort: Option.Option<number>;
+  readonly factoryEnabled?: Option.Option<boolean>;
 }
 
 export interface CliAuthLocationFlags {
@@ -231,6 +237,7 @@ export const sharedServerCommandFlags = {
   logWebSocketEvents: logWebSocketEventsFlag,
   tailscaleServeEnabled: tailscaleServeFlag,
   tailscaleServePort: tailscaleServePortFlag,
+  factoryEnabled: factoryEnabledFlag,
 } as const;
 
 const resolveOptionPrecedence = <Value>(
@@ -274,6 +281,7 @@ export const resolveServerConfig = (
       logWebSocketEvents: flags.logWebSocketEvents ?? Option.none(),
       tailscaleServeEnabled: flags.tailscaleServeEnabled ?? Option.none(),
       tailscaleServePort: flags.tailscaleServePort ?? Option.none(),
+      factoryEnabled: flags.factoryEnabled ?? Option.none(),
     } satisfies CliServerFlags;
     const bootstrapFd = Option.getOrUndefined(normalizedFlags.bootstrapFd) ?? env.bootstrapFd;
     const bootstrapEnvelope =
@@ -381,6 +389,10 @@ export const resolveServerConfig = (
       ),
       () => 443,
     );
+    const factoryEnabled = Option.getOrElse(
+      resolveOptionPrecedence(normalizedFlags.factoryEnabled, Option.some(env.factoryEnabled)),
+      () => false,
+    );
     const staticDir = devUrl ? undefined : yield* ServerConfig.resolveStaticDir();
     const host = Option.getOrElse(
       resolveOptionPrecedence(
@@ -458,6 +470,7 @@ export const resolveServerConfig = (
       logWebSocketEvents,
       tailscaleServeEnabled,
       tailscaleServePort,
+      factoryEnabled,
     };
 
     return config;
@@ -481,6 +494,7 @@ export const resolveCliAuthConfig = (
       logWebSocketEvents: Option.none(),
       tailscaleServeEnabled: Option.none(),
       tailscaleServePort: Option.none(),
+      factoryEnabled: Option.none(),
     },
     cliLogLevel,
   );

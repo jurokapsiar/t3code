@@ -85,6 +85,8 @@ import {
   PersistChatAttachmentsError,
   RpcClientId,
   EnvironmentAuthorizationError,
+  FactoryRpcGroup,
+  FactoryRpcMethods,
   type ProjectId,
   type ProviderDriverKind,
   type ProviderInstanceId,
@@ -108,6 +110,7 @@ import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as ServerConfig from "./config.ts";
+import * as FactoryRuntime from "./factory/runtimeLayer.ts";
 import * as EnvironmentTheme from "./environmentTheme.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
@@ -444,7 +447,11 @@ function projectFileFailureContext(
 
 const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 
-const ServerWsRpcGroup = WsRpcGroup;
+const FactoryMetadataRpcGroup = FactoryRpcGroup.omit(
+  FactoryRpcMethods.environmentsEnroll,
+  FactoryRpcMethods.overviewSubscribe,
+);
+const ServerWsRpcGroup = WsRpcGroup.merge(FactoryMetadataRpcGroup);
 // When a resuming client's cursor is more than this many events behind the
 // current head, skip the per-event catch-up replay and send a fresh shell
 // snapshot instead. Replaying each intervening event costs a shell refetch;
@@ -1091,6 +1098,7 @@ const makeWsRpcLayer = (
     Effect.gen(function* () {
       const currentSessionId = currentSession.sessionId;
       const sql = yield* SqlClient.SqlClient;
+      const factoryRuntime = yield* FactoryRuntime.FactoryRuntime;
       const threadManagement = yield* ThreadManagementService.ThreadManagementService;
       const intakeContext = yield* Effect.context<
         | ThreadManagementService.ThreadManagementService
@@ -2028,6 +2036,95 @@ const makeWsRpcLayer = (
             {
               "rpc.aggregate": "server",
             },
+          ),
+        [FactoryRpcMethods.environmentsList]: (_input) =>
+          observeRpcEffect(
+            FactoryRpcMethods.environmentsList,
+            factoryRuntime.getMetadata.pipe(
+              Effect.flatMap((metadata) => metadata.listEnvironments),
+            ),
+            { "rpc.aggregate": "factory" },
+          ),
+        [FactoryRpcMethods.environmentsUpdate]: (input) =>
+          observeRpcEffect(
+            FactoryRpcMethods.environmentsUpdate,
+            factoryRuntime.getMetadata.pipe(
+              Effect.flatMap((metadata) => metadata.updateEnvironment(input)),
+            ),
+            { "rpc.aggregate": "factory" },
+          ),
+        [FactoryRpcMethods.environmentsRemove]: (input) =>
+          observeRpcEffect(
+            FactoryRpcMethods.environmentsRemove,
+            factoryRuntime.getMetadata.pipe(
+              Effect.flatMap((metadata) => metadata.removeEnvironment(input)),
+            ),
+            { "rpc.aggregate": "factory" },
+          ),
+        [FactoryRpcMethods.groupsList]: (_input) =>
+          observeRpcEffect(
+            FactoryRpcMethods.groupsList,
+            factoryRuntime.getMetadata.pipe(
+              Effect.flatMap((metadata) => metadata.getSnapshot),
+              Effect.map(({ groups, memberships }) => ({ groups, memberships })),
+            ),
+            { "rpc.aggregate": "factory" },
+          ),
+        [FactoryRpcMethods.groupsCreate]: (input) =>
+          observeRpcEffect(
+            FactoryRpcMethods.groupsCreate,
+            factoryRuntime.getMetadata.pipe(
+              Effect.flatMap((metadata) => metadata.createGroup(input)),
+            ),
+            { "rpc.aggregate": "factory" },
+          ),
+        [FactoryRpcMethods.groupsUpdate]: (input) =>
+          observeRpcEffect(
+            FactoryRpcMethods.groupsUpdate,
+            factoryRuntime.getMetadata.pipe(
+              Effect.flatMap((metadata) => metadata.renameGroup(input)),
+            ),
+            { "rpc.aggregate": "factory" },
+          ),
+        [FactoryRpcMethods.groupsDelete]: (input) =>
+          observeRpcEffect(
+            FactoryRpcMethods.groupsDelete,
+            factoryRuntime.getMetadata.pipe(
+              Effect.flatMap((metadata) => metadata.deleteGroup(input)),
+            ),
+            { "rpc.aggregate": "factory" },
+          ),
+        [FactoryRpcMethods.groupsAssign]: (input) =>
+          observeRpcEffect(
+            FactoryRpcMethods.groupsAssign,
+            factoryRuntime.getMetadata.pipe(
+              Effect.flatMap((metadata) => metadata.assignProject(input)),
+            ),
+            { "rpc.aggregate": "factory" },
+          ),
+        [FactoryRpcMethods.groupsUnassign]: (input) =>
+          observeRpcEffect(
+            FactoryRpcMethods.groupsUnassign,
+            factoryRuntime.getMetadata.pipe(
+              Effect.flatMap((metadata) => metadata.unassignProject(input)),
+            ),
+            { "rpc.aggregate": "factory" },
+          ),
+        [FactoryRpcMethods.favoritesSet]: (input) =>
+          observeRpcEffect(
+            FactoryRpcMethods.favoritesSet,
+            factoryRuntime.getMetadata.pipe(
+              Effect.flatMap((metadata) => metadata.setFavorite(input)),
+            ),
+            { "rpc.aggregate": "factory" },
+          ),
+        [FactoryRpcMethods.favoritesReorder]: (input) =>
+          observeRpcEffect(
+            FactoryRpcMethods.favoritesReorder,
+            factoryRuntime.getMetadata.pipe(
+              Effect.flatMap((metadata) => metadata.reorderFavorites(input)),
+            ),
+            { "rpc.aggregate": "factory" },
           ),
         [WS_METHODS.serverSearchAcpRegistry]: (input) =>
           observeRpcEffect(
