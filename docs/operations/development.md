@@ -111,6 +111,16 @@ Use `vp run lint:mobile` for native mobile changes. CI owns the full suite; see
 The [manual Windows lane](../../.github/workflows/windows-tests.yml) is available for focused
 Windows investigation while that suite is not a required gate.
 
+### Factory contracts artifact
+
+Build the public factory contracts package from the repository root:
+
+```sh
+node scripts/pack-factory-contracts.ts --output-dir /absolute/path
+```
+
+The package version comes from `packages/contracts/package.json`. The Effect peer version comes from the workspace catalog. The package exports four built entry points: factory schemas, factory RPCs, the source RPC group, and HTTP contracts. This pack does not change workspace exports or dependencies. Build a new artifact after changing a public contract. Consumers must install the exact Effect peer version.
+
 ### Unused code
 
 `vp run knip:check` checks unused files and dependencies across the repo, then

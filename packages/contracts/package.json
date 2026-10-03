@@ -22,7 +22,8 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vp test run --config ../../vite.config.ts --dir ."
+    "test": "vp test run --config ../../vite.config.ts --dir .",
+    "pack:factory": "node ../../scripts/pack-factory-contracts.ts"
   },
   "dependencies": {
     "effect": "catalog:"
