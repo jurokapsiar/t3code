@@ -18,6 +18,7 @@ import * as Stream from "effect/Stream";
 
 import * as ServerConfig from "../config.ts";
 import * as CredentialStore from "./CredentialStore.ts";
+import * as CredentialMutations from "./CredentialMutations.ts";
 import * as Enrollment from "./Enrollment.ts";
 import * as Metadata from "./Metadata.ts";
 
@@ -59,6 +60,7 @@ const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const metadata = yield* Metadata.Metadata;
   const credentials = yield* CredentialStore.CredentialStore;
+  const mutations = yield* CredentialMutations.CredentialMutations;
   const source = yield* Enrollment.SourceCredentialExchange;
   const schedules = yield* Ref.make(new Map<FactoryRegistrationId, ScheduleEntry>());
   const retries = yield* Ref.make(new Map<FactoryRegistrationId, RetryEntry>());
@@ -191,6 +193,7 @@ const make = Effect.gen(function* () {
       }
       const cleanCredential = withoutCleanup(input.credential);
       const saved = yield* credentials.set(input.itemKey, cleanCredential).pipe(
+        Effect.uninterruptible,
         Effect.as(true),
         Effect.catchTag("CredentialStoreError", () => Effect.succeed(false)),
       );
@@ -264,6 +267,7 @@ const make = Effect.gen(function* () {
         ...(cleanupPermitted ? { predecessorCleanupId: input.credential.sourceSessionId } : {}),
       };
       const saved = yield* credentials.set(input.itemKey, storedReplacement).pipe(
+        Effect.uninterruptible,
         Effect.as(true),
         Effect.catchTag("CredentialStoreError", () => Effect.succeed(false)),
       );
@@ -290,95 +294,109 @@ const make = Effect.gen(function* () {
       });
     });
 
-  const processReference = (reference: Metadata.EnrollmentReference, nowMs: number) =>
-    Effect.gen(function* () {
-      const { environment, credentialStorage, credentialItemKey } = reference;
-      if (
-        !environment.enabled ||
-        environment.state === "pending" ||
-        environment.state === "removing"
-      ) {
-        return;
-      }
-      if (credentialStorage !== selectedStorage || credentialItemKey === null) {
-        yield* updateStatus(environment.registrationId, "failed");
-        return;
-      }
-      const stored = yield* credentials.get(credentialItemKey).pipe(
-        Effect.map((value) => ({ kind: "found" as const, value })),
-        Effect.catchTag("CredentialStoreError", () => Effect.succeed({ kind: "failed" as const })),
-      );
-      if (stored.kind === "failed") {
-        yield* updateStatus(environment.registrationId, "failed");
-        return;
-      }
-      if (Option.isNone(stored.value)) {
-        yield* updateStatus(environment.registrationId, "expired");
-        return;
-      }
-      const credential = stored.value.value;
-      const expiresAtMs = DateTime.toEpochMillis(credential.expiresAt);
-      if (expiresAtMs <= nowMs) {
-        yield* clearSchedule(environment.registrationId);
-        yield* clearRetry(environment.registrationId);
-        yield* updateStatus(environment.registrationId, "expired", credential.expiresAt);
-        return;
-      }
-      const cleanupPending =
-        credential.predecessorCleanupPending === true ||
-        credential.predecessorCleanupId !== undefined;
-      const cleanupRetryPermitted =
-        credential.predecessorCleanupId !== undefined &&
-        credential.scopes.includes(AuthAccessWriteScope);
-      if (cleanupRetryPermitted) {
-        yield* cleanupPredecessor({
+  const processReference = (observed: Metadata.EnrollmentReference) =>
+    mutations.withLock(
+      observed.environment.registrationId,
+      Effect.gen(function* () {
+        const reference = yield* metadata.getEnrollmentReference(
+          observed.environment.registrationId,
+        );
+        if (reference === undefined) return;
+        const nowMs = yield* Clock.currentTimeMillis;
+        const { environment, credentialStorage, credentialItemKey } = reference;
+        if (
+          !environment.enabled ||
+          environment.state === "pending" ||
+          environment.state === "removing"
+        ) {
+          return;
+        }
+        if (credentialStorage !== selectedStorage || credentialItemKey === null) {
+          yield* updateStatus(environment.registrationId, "failed");
+          return;
+        }
+        const stored = yield* credentials.get(credentialItemKey).pipe(
+          Effect.map((value) => ({ kind: "found" as const, value })),
+          Effect.catchTag("CredentialStoreError", () =>
+            Effect.succeed({ kind: "failed" as const }),
+          ),
+        );
+        if (stored.kind === "failed") {
+          yield* updateStatus(environment.registrationId, "failed");
+          return;
+        }
+        if (Option.isNone(stored.value)) {
+          yield* updateStatus(environment.registrationId, "expired");
+          return;
+        }
+        const credential = stored.value.value;
+        const expiresAtMs = DateTime.toEpochMillis(credential.expiresAt);
+        if (expiresAtMs <= nowMs) {
+          yield* clearSchedule(environment.registrationId);
+          yield* clearRetry(environment.registrationId);
+          yield* updateStatus(environment.registrationId, "expired", credential.expiresAt);
+          return;
+        }
+        const cleanupPending =
+          credential.predecessorCleanupPending === true ||
+          credential.predecessorCleanupId !== undefined;
+        const cleanupRetryPermitted =
+          credential.predecessorCleanupId !== undefined &&
+          credential.scopes.includes(AuthAccessWriteScope);
+        if (cleanupRetryPermitted) {
+          yield* cleanupPredecessor({
+            registrationId: environment.registrationId,
+            endpoint: environment.endpoint,
+            itemKey: credentialItemKey,
+            credential,
+            nowMs,
+          });
+          return;
+        }
+        if (credential.renewalSupported !== true) {
+          yield* updateStatus(
+            environment.registrationId,
+            "unsupported",
+            credential.expiresAt,
+            cleanupPending,
+          );
+          return;
+        }
+        const schedule = yield* getSchedule({
+          registrationId: environment.registrationId,
+          issuedAtMs: DateTime.toEpochMillis(credential.issuedAt),
+          expiresAtMs,
+        });
+        if (schedule.dueAtMs > nowMs) {
+          yield* updateStatus(
+            environment.registrationId,
+            "ready",
+            credential.expiresAt,
+            cleanupPending,
+          );
+          return;
+        }
+        yield* updateStatus(
+          environment.registrationId,
+          "due",
+          credential.expiresAt,
+          cleanupPending,
+        );
+        yield* renewCredential({
           registrationId: environment.registrationId,
           endpoint: environment.endpoint,
           itemKey: credentialItemKey,
           credential,
           nowMs,
+          cleanupPending,
         });
-        return;
-      }
-      if (credential.renewalSupported !== true) {
-        yield* updateStatus(
-          environment.registrationId,
-          "unsupported",
-          credential.expiresAt,
-          cleanupPending,
-        );
-        return;
-      }
-      const schedule = yield* getSchedule({
-        registrationId: environment.registrationId,
-        issuedAtMs: DateTime.toEpochMillis(credential.issuedAt),
-        expiresAtMs,
-      });
-      if (schedule.dueAtMs > nowMs) {
-        yield* updateStatus(
-          environment.registrationId,
-          "ready",
-          credential.expiresAt,
-          cleanupPending,
-        );
-        return;
-      }
-      yield* updateStatus(environment.registrationId, "due", credential.expiresAt, cleanupPending);
-      yield* renewCredential({
-        registrationId: environment.registrationId,
-        endpoint: environment.endpoint,
-        itemKey: credentialItemKey,
-        credential,
-        nowMs,
-        cleanupPending,
-      });
-    });
+      }),
+    );
 
   const runOnce = Effect.gen(function* () {
-    const nowMs = yield* Clock.currentTimeMillis;
     const references = yield* metadata.listEnrollmentReferences;
-    yield* Effect.forEach(references, (reference) => processReference(reference, nowMs), {
-      concurrency: 1,
+    yield* Effect.forEach(references, processReference, {
+      concurrency: 8,
     });
   });
 

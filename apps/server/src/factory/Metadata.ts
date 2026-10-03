@@ -179,6 +179,9 @@ export class Metadata extends Context.Service<
       readonly itemKey: string;
     } | null>;
     readonly listEnrollmentReferences: Effect.Effect<ReadonlyArray<EnrollmentReference>>;
+    readonly getEnrollmentReference: (
+      registrationId: FactoryRegistrationId,
+    ) => Effect.Effect<EnrollmentReference | undefined>;
     readonly createGroup: (input: GroupCreateInput) => Effect.Effect<FactoryGroup, FactoryError>;
     readonly renameGroup: (input: GroupUpdateInput) => Effect.Effect<FactoryGroup, FactoryError>;
     readonly deleteGroup: (
@@ -443,6 +446,17 @@ const make = Effect.gen(function* () {
     subscribeWithSnapshot,
     getCredentialReference,
     listEnrollmentReferences,
+    getEnrollmentReference: (registrationId) =>
+      Effect.gen(function* () {
+        const environment = yield* findEnvironment(registrationId);
+        if (environment === undefined) return undefined;
+        const reference = yield* getCredentialReference(registrationId);
+        return {
+          environment,
+          credentialStorage: reference?.storage ?? null,
+          credentialItemKey: reference?.itemKey ?? null,
+        };
+      }),
 
     createEnvironment: (input) =>
       withCommit(

@@ -3,6 +3,8 @@ import * as NodeBuffer from "node:buffer";
 import { afterEach, assert, it, vi } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import * as Effect from "effect/Effect";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
@@ -12,7 +14,10 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
+import * as Queue from "effect/Queue";
+import * as Stream from "effect/Stream";
 import * as Scope from "effect/Scope";
+import * as TestClock from "effect/testing/TestClock";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -27,10 +32,13 @@ import {
   AuthTokenExchangeGrantType,
   EnvironmentId,
   FactoryEnvironmentEnrollInput,
+  FactoryRegistrationId,
 } from "@t3tools/contracts";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as CredentialStore from "./CredentialStore.ts";
+import * as CredentialMutations from "./CredentialMutations.ts";
+import * as CredentialRenewal from "./CredentialRenewal.ts";
 import * as Enrollment from "./Enrollment.ts";
 import * as Metadata from "./Metadata.ts";
 import { makeSqlitePersistenceLive } from "../persistence/Layers/Sqlite.ts";
@@ -70,24 +78,47 @@ const makeEnrollmentHarness = (options: {
     };
     const credentials = new Map<string, CredentialStore.StoredCredential>();
     const failRemoval = yield* Ref.make(options.failCredentialRemoval ?? false);
+    const failWrite = yield* Ref.make(options.failCredentialWrite);
     const supervisorStartsRef = yield* Ref.make(0);
     const issuedAt = yield* DateTime.now;
     const expiresAt = DateTime.add(issuedAt, { days: 1 });
     let metadataForExchange: Metadata.Metadata["Service"] | undefined;
     let advanceRevisionOnNextExchange = false;
+    let exchangeGate:
+      | { entered: Deferred.Deferred<void>; release: Deferred.Deferred<void> }
+      | undefined;
+    let nextMutation: Deferred.Deferred<void> | undefined;
+    const renewedTokens: string[] = [];
+    const observedMutationsLayer = Layer.effect(
+      CredentialMutations.CredentialMutations,
+      Effect.gen(function* () {
+        const mutations = yield* CredentialMutations.CredentialMutations;
+        return CredentialMutations.CredentialMutations.of({
+          withLock: (registrationId, operation) =>
+            Effect.suspend(() => {
+              const signal = nextMutation;
+              nextMutation = undefined;
+              return (
+                signal === undefined ? Effect.void : Deferred.succeed(signal, undefined)
+              ).pipe(Effect.andThen(mutations.withLock(registrationId, operation)));
+            }),
+        });
+      }),
+    ).pipe(Layer.provide(CredentialMutations.layer));
     const storeLayer = Layer.succeed(
       CredentialStore.CredentialStore,
       CredentialStore.CredentialStore.of({
         get: (reference) => Effect.succeed(Option.fromNullishOr(credentials.get(reference))),
         set: (reference, credential) =>
-          options.failCredentialWrite
-            ? Effect.fail(
-                new CredentialStore.CredentialStoreError({
-                  operation: "write",
-                  backend: "secure-vault",
-                }),
-              )
-            : Effect.sync(() => void credentials.set(reference, credential)),
+          Effect.gen(function* () {
+            if (yield* Ref.get(failWrite)) {
+              return yield* new CredentialStore.CredentialStoreError({
+                operation: "write",
+                backend: "secure-vault",
+              });
+            }
+            credentials.set(reference, credential);
+          }),
         remove: (reference) =>
           Effect.gen(function* () {
             if (yield* Ref.get(failRemoval)) {
@@ -113,6 +144,12 @@ const makeEnrollmentHarness = (options: {
           }),
         exchange: ({ credential }) =>
           Effect.gen(function* () {
+            const gate = exchangeGate;
+            exchangeGate = undefined;
+            if (gate !== undefined) {
+              yield* Deferred.succeed(gate.entered, undefined);
+              yield* Deferred.await(gate.release);
+            }
             if (advanceRevisionOnNextExchange && metadataForExchange !== undefined) {
               advanceRevisionOnNextExchange = false;
               const current = (yield* metadataForExchange.listEnvironments)[0];
@@ -142,8 +179,21 @@ const makeEnrollmentHarness = (options: {
               renewalSupported: options.renewalSupported ?? false,
             };
           }),
-        renew: () =>
-          Effect.fail(new Enrollment.SourceCredentialExchangeError({ operation: "renew" })),
+        renew: ({ credential }) =>
+          Effect.gen(function* () {
+            renewedTokens.push(credential.token);
+            const gate = exchangeGate;
+            exchangeGate = undefined;
+            if (gate !== undefined) {
+              yield* Deferred.succeed(gate.entered, undefined);
+              yield* Deferred.await(gate.release);
+            }
+            return {
+              ...credential,
+              token: credential.token + ":renewed",
+              issuedAt: yield* DateTime.now,
+            };
+          }),
         revoke: () =>
           Effect.fail(new Enrollment.SourceCredentialExchangeError({ operation: "revoke" })),
       }),
@@ -166,12 +216,15 @@ const makeEnrollmentHarness = (options: {
       ServerEnvironment.identityLayer,
     ).pipe(Layer.provideMerge(infrastructureLayer));
     const enrollmentDependenciesLayer = Layer.mergeAll(
+      observedMutationsLayer,
       storeLayer,
       sourceLayer,
       lifecycleLayer,
     ).pipe(Layer.provideMerge(metadataAndIdentityLayer));
     const services = yield* Layer.buildWithScope(
-      Enrollment.layer.pipe(Layer.provideMerge(enrollmentDependenciesLayer)),
+      Layer.mergeAll(Enrollment.layer, CredentialRenewal.layer).pipe(
+        Layer.provideMerge(enrollmentDependenciesLayer),
+      ),
       scope,
     );
     const enrollment = Context.get(services, Enrollment.Enrollment);
@@ -196,6 +249,34 @@ const makeEnrollmentHarness = (options: {
       enrollment,
       sql,
       failRemoval,
+      failWrite,
+      renewedTokens,
+      assertCredentialFree: (value: unknown) =>
+        Effect.gen(function* () {
+          const snapshot = yield* metadata.getSnapshot;
+          const database = yield* fileSystem.readFile(isolatedConfig.dbPath);
+          const walPath = `${isolatedConfig.dbPath}-wal`;
+          const wal = (yield* fileSystem.exists(walPath))
+            ? yield* fileSystem.readFile(walPath)
+            : new Uint8Array();
+          const persisted = NodeBuffer.Buffer.concat([database, wal]).toString("utf8");
+          for (const secret of [sourceCredential, storedCredential, "private-"]) {
+            assert.notInclude(encodeJson({ value, snapshot }), secret);
+            assert.notInclude(persisted, secret);
+          }
+        }),
+      renewal: Context.get(services, CredentialRenewal.CredentialRenewal),
+      holdNextExchange: Effect.gen(function* () {
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        exchangeGate = { entered, release };
+        return { entered: Deferred.await(entered), release: Deferred.succeed(release, undefined) };
+      }),
+      observeNextMutation: Effect.gen(function* () {
+        const signal = yield* Deferred.make<void>();
+        nextMutation = signal;
+        return { attempted: Deferred.await(signal) };
+      }),
       advanceRevisionOnNextExchange: () => {
         advanceRevisionOnNextExchange = true;
       },
@@ -530,6 +611,195 @@ it.layer(
     Layer.provideMerge(NodeServices.layer),
   ),
 )("factory enrollment", (it) => {
+  it.effect("serializes overlapping re-enrollments without restoring a stale credential", () =>
+    Effect.gen(function* () {
+      const h = yield* makeEnrollmentHarness({ failCredentialWrite: false });
+      yield* h.enroll();
+      const gate = yield* h.holdNextExchange;
+      const first = yield* h
+        .enroll("first-private-bootstrap")
+        .pipe(Effect.exit, Effect.forkChild({ startImmediately: true }));
+      yield* gate.entered;
+      const read = yield* h.observeNextMutation;
+      const second = yield* h
+        .enroll("second-private-bootstrap")
+        .pipe(Effect.exit, Effect.forkChild({ startImmediately: true }));
+      yield* read.attempted;
+      yield* gate.release;
+      const results = [yield* Fiber.join(first), yield* Fiber.join(second)];
+      assert.isTrue(results.every(Exit.isSuccess));
+      assert.equal(
+        [...h.credentials.values()][0]?.token,
+        storedCredential + ":second-private-bootstrap",
+      );
+      assert.equal(h.credentials.size, 1);
+      yield* h.assertCredentialFree(results);
+    }),
+  );
+
+  it.effect("does not recreate a removed credential during rejected re-enrollment rollback", () =>
+    Effect.gen(function* () {
+      const h = yield* makeEnrollmentHarness({ failCredentialWrite: false });
+      const registered = yield* h.enroll();
+      const gate = yield* h.holdNextExchange;
+      const replacement = yield* h
+        .enroll("private-removal-bootstrap")
+        .pipe(Effect.exit, Effect.forkChild({ startImmediately: true }));
+      yield* gate.entered;
+      const edited = yield* h.metadata.updateEnvironment({
+        registrationId: registered.registrationId,
+        revision: registered.revision,
+        label: "Concurrent edit",
+      });
+      const read = yield* h.observeNextMutation;
+      const removal = yield* h.enrollment
+        .remove({ registrationId: edited.registrationId, revision: edited.revision })
+        .pipe(Effect.forkChild({ startImmediately: true }));
+      yield* read.attempted;
+      const whileExchanging = yield* h.metadata.getSnapshot;
+      yield* gate.release;
+      assert.isTrue(Exit.isFailure(yield* Fiber.join(replacement)));
+      assert.isTrue((yield* Fiber.join(removal)).removed);
+      assert.equal(h.credentials.size, 0);
+      assert.deepEqual((yield* h.metadata.getSnapshot).environments, []);
+      assert.equal(whileExchanging.environments[0]?.state, "offline");
+      yield* h.assertCredentialFree(whileExchanging);
+    }),
+  );
+
+  it.effect("serializes renewal with re-enrollment on the same credential reference", () =>
+    Effect.gen(function* () {
+      const h = yield* makeEnrollmentHarness({
+        failCredentialWrite: false,
+        renewalSupported: true,
+      });
+      yield* h.enroll();
+      yield* TestClock.adjust("18 hours");
+      const gate = yield* h.holdNextExchange;
+      const renewal = yield* h.renewal.runOnce.pipe(Effect.forkChild({ startImmediately: true }));
+      yield* gate.entered;
+      const read = yield* h.observeNextMutation;
+      const enrollment = yield* h
+        .enroll("private-post-renewal-bootstrap")
+        .pipe(Effect.exit, Effect.forkChild({ startImmediately: true }));
+      yield* read.attempted;
+      yield* gate.release;
+      yield* Fiber.join(renewal);
+      assert.isTrue(Exit.isFailure(yield* Fiber.join(enrollment)));
+      assert.equal([...h.credentials.values()][0]?.token, storedCredential + ":renewed");
+      assert.equal(h.credentials.size, 1);
+      yield* h.assertCredentialFree(yield* h.metadata.getSnapshot);
+    }),
+  );
+
+  it.effect(
+    "renewal reads the successful re-enrollment credential after waiting for its mutation",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* makeEnrollmentHarness({
+          failCredentialWrite: false,
+          renewalSupported: true,
+        });
+        yield* h.enroll();
+        yield* TestClock.adjust("18 hours");
+        const gate = yield* h.holdNextExchange;
+        const enrollment = yield* h
+          .enroll("private-before-renewal-bootstrap")
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* gate.entered;
+        const read = yield* h.observeNextMutation;
+        const renewal = yield* h.renewal.runOnce.pipe(Effect.forkChild({ startImmediately: true }));
+        yield* read.attempted;
+        yield* gate.release;
+        yield* Fiber.join(enrollment);
+        yield* Fiber.join(renewal);
+        assert.deepEqual(h.renewedTokens, [storedCredential + ":private-before-renewal-bootstrap"]);
+        assert.equal(
+          [...h.credentials.values()][0]?.token,
+          storedCredential + ":private-before-renewal-bootstrap:renewed",
+        );
+        assert.equal(h.credentials.size, 1);
+      }),
+  );
+
+  it.effect(
+    "preserves the enrolled credential and revision when replacement store write fails",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* makeEnrollmentHarness({ failCredentialWrite: false });
+        const original = yield* h.enroll();
+        yield* Ref.set(h.failWrite, true);
+        const result = yield* h.enroll("private-failed-write-bootstrap").pipe(Effect.exit);
+        assert.isTrue(Exit.isFailure(result));
+        assert.equal((yield* h.readRegistration).revision, original.revision);
+        assert.equal([...h.credentials.values()][0]?.token, storedCredential);
+        assert.notInclude(encodeJson(result), "private-failed-write-bootstrap");
+      }),
+  );
+
+  it.effect("releases credential mutation ownership when a source exchange is interrupted", () =>
+    Effect.gen(function* () {
+      const h = yield* makeEnrollmentHarness({ failCredentialWrite: false });
+      yield* h.enroll();
+      const gate = yield* h.holdNextExchange;
+      const canceled = yield* h
+        .enroll("private-canceled-bootstrap")
+        .pipe(Effect.forkChild({ startImmediately: true }));
+      yield* gate.entered;
+      yield* Fiber.interrupt(canceled);
+      assert.equal([...h.credentials.values()][0]?.token, storedCredential);
+      yield* h.enroll("private-after-cancel-bootstrap");
+      assert.equal(
+        [...h.credentials.values()][0]?.token,
+        storedCredential + ":private-after-cancel-bootstrap",
+      );
+    }),
+  );
+
+  it.effect("renews another source while re-enrollment holds a registration's mutation lock", () =>
+    Effect.gen(function* () {
+      const h = yield* makeEnrollmentHarness({
+        failCredentialWrite: false,
+        renewalSupported: true,
+      });
+      const first = yield* h.enroll();
+      const secondId = FactoryRegistrationId.make("parallel-registration");
+      const second = yield* h.metadata.createEnvironment({
+        ...first,
+        registrationId: secondId,
+        environmentId: EnvironmentId.make("parallel-environment"),
+        endpoint: "https://parallel.example",
+        label: "Parallel source",
+        enabled: false,
+        state: "pending",
+        credentialStorage: null,
+        credentialExpiresAt: null,
+        revision: 0,
+      });
+      const credential = [...h.credentials.values()][0]!;
+      h.credentials.set("parallel-reference", credential);
+      yield* h.metadata.markEnrollment({
+        registrationId: second.registrationId,
+        credentialStorage: "secure-vault",
+        credentialItemKey: "parallel-reference",
+        credentialExpiresAt: credential.expiresAt,
+      });
+      const renewed = yield* Stream.toQueue(h.renewal.subscribeRenewals, { capacity: 8 });
+      yield* TestClock.adjust("18 hours");
+      const gate = yield* h.holdNextExchange;
+      const enrollment = yield* h
+        .enroll("private-slow-bootstrap")
+        .pipe(Effect.forkChild({ startImmediately: true }));
+      yield* gate.entered;
+      const scan = yield* h.renewal.runOnce.pipe(Effect.forkChild({ startImmediately: true }));
+      assert.equal(yield* Queue.take(renewed), secondId);
+      assert.equal(h.credentials.get("parallel-reference")?.token, storedCredential + ":renewed");
+      yield* gate.release;
+      yield* Fiber.join(enrollment);
+      yield* Fiber.join(scan);
+    }),
+  );
+
   it.effect("re-enrolls an existing source with the same registration identity", () =>
     Effect.gen(function* () {
       const harness = yield* makeEnrollmentHarness({ failCredentialWrite: false });

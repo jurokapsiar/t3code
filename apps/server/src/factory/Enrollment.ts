@@ -38,6 +38,7 @@ import { parseOAuthScope } from "@t3tools/shared/oauthScope";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as CredentialStore from "./CredentialStore.ts";
+import * as CredentialMutations from "./CredentialMutations.ts";
 import * as Metadata from "./Metadata.ts";
 
 const AuthSessionClaims = Schema.Struct({ sid: AuthSessionId });
@@ -378,6 +379,7 @@ const make = Effect.gen(function* () {
   const identity = yield* ServerEnvironment.ServerEnvironmentIdentity;
   const metadata = yield* Metadata.Metadata;
   const credentials = yield* CredentialStore.CredentialStore;
+  const mutations = yield* CredentialMutations.CredentialMutations;
   const source = yield* SourceCredentialExchange;
   const lifecycle = yield* RegistrationLifecycle;
   const crypto = yield* Crypto.Crypto;
@@ -415,7 +417,6 @@ const make = Effect.gen(function* () {
             ? "ready"
             : "unsupported";
       const current = yield* metadata.setRenewalStatus(input.registrationId, renewal);
-      yield* lifecycle.enabled(current);
       return current;
     });
 
@@ -431,7 +432,6 @@ const make = Effect.gen(function* () {
 
       const current = yield* metadata.listEnvironments;
       const existing = current.find((entry) => entry.environmentId === discovered.environmentId);
-      const reEnrollment = existing !== undefined && existing.state !== "pending";
       if (
         existing !== undefined &&
         (existing.endpoint !== input.endpoint ||
@@ -449,9 +449,8 @@ const make = Effect.gen(function* () {
         FactoryRegistrationId.make(
           yield* crypto.randomUUIDv4.pipe(Effect.mapError(internalFailure)),
         );
-      const pending =
-        existing ??
-        (yield* metadata.createEnvironment({
+      if (existing === undefined) {
+        yield* metadata.createEnvironment({
           registrationId,
           environmentId: discovered.environmentId,
           endpoint: input.endpoint,
@@ -465,83 +464,113 @@ const make = Effect.gen(function* () {
           cleanupPending: false,
           lastSeenAt: null,
           revision: 0,
-        }));
-      const knownReference = yield* metadata.getCredentialReference(registrationId);
-      if (knownReference !== null) yield* ensureSelectedStorage(knownReference.storage);
-      const generatedReference = yield* makeCredentialReference(
-        crypto,
-        installationId,
-        registrationId,
-      );
-      const reference =
-        reEnrollment && knownReference !== null ? knownReference.itemKey : generatedReference;
-      const previousCredential =
-        reEnrollment && knownReference !== null
-          ? yield* credentials.get(knownReference.itemKey)
-          : Option.none<CredentialStore.StoredCredential>();
-
-      if (knownReference !== null && !reEnrollment) {
-        const stored = yield* credentials.get(knownReference.itemKey);
-        if (Option.isSome(stored)) {
-          return yield* completeEnrollment({
-            registrationId,
-            credential: stored.value,
-            credentialItemKey: knownReference.itemKey,
-            storage: knownReference.storage,
-          });
-        }
-      }
-
-      if (!reEnrollment) {
-        yield* metadata.markPendingEnrollment({
-          registrationId,
-          credentialStorage: selectedStorage,
-          credentialItemKey: reference,
         });
       }
-      const credential = yield* source.exchange({
-        endpoint: input.endpoint,
-        credential: input.sourceCredential,
-        environmentId: pending.environmentId,
-      });
-      yield* credentials.set(reference, credential);
-      if (reEnrollment) {
-        const replacement = yield* metadata
-          .replaceEnrollment({
-            registrationId,
-            revision: pending.revision,
-            credentialStorage: selectedStorage,
-            credentialItemKey: reference,
-            credentialExpiresAt: credential.expiresAt,
-          })
-          .pipe(Effect.exit);
-        if (Exit.isFailure(replacement)) {
-          if (Option.isSome(previousCredential)) {
-            yield* credentials.set(reference, previousCredential.value);
-          }
-          return yield* Effect.failCause(replacement.cause);
-        }
-        const now = yield* DateTime.now;
-        const renewal =
-          DateTime.toEpochMillis(credential.expiresAt) <= DateTime.toEpochMillis(now)
-            ? "expired"
-            : credential.renewalSupported === true
-              ? "ready"
-              : "unsupported";
-        const updated = yield* metadata.setRenewalStatus(
-          registrationId,
-          renewal,
-          credential.expiresAt,
-        );
-        yield* lifecycle.enabled(updated);
-        return updated;
-      }
-      return yield* completeEnrollment({
+      return yield* mutations.withLock(
         registrationId,
-        credential,
-        credentialItemKey: reference,
-        storage: selectedStorage,
-      });
+        Effect.gen(function* () {
+          const latest = yield* metadata.getEnrollmentReference(registrationId);
+          if (latest === undefined) {
+            return yield* new FactoryError({
+              code: "not-found",
+              message: "The source environment does not exist.",
+            });
+          }
+          const pending = latest.environment;
+          if (
+            pending.endpoint !== input.endpoint ||
+            pending.state === "removing" ||
+            pending.cleanupPending
+          ) {
+            return yield* new FactoryError({
+              code: "conflict",
+              message: "This source environment is already registered.",
+            });
+          }
+          const reEnrollment = pending.state !== "pending";
+          const knownReference = yield* metadata.getCredentialReference(registrationId);
+          if (knownReference !== null) yield* ensureSelectedStorage(knownReference.storage);
+          const generatedReference = yield* makeCredentialReference(
+            crypto,
+            installationId,
+            registrationId,
+          );
+          const reference =
+            reEnrollment && knownReference !== null ? knownReference.itemKey : generatedReference;
+          const previousCredential =
+            reEnrollment && knownReference !== null
+              ? yield* credentials.get(knownReference.itemKey)
+              : Option.none<CredentialStore.StoredCredential>();
+
+          if (knownReference !== null && !reEnrollment) {
+            const stored = yield* credentials.get(knownReference.itemKey);
+            if (Option.isSome(stored)) {
+              return yield* completeEnrollment({
+                registrationId,
+                credential: stored.value,
+                credentialItemKey: knownReference.itemKey,
+                storage: knownReference.storage,
+              }).pipe(Effect.tap(lifecycle.enabled));
+            }
+          }
+
+          if (!reEnrollment) {
+            yield* metadata.markPendingEnrollment({
+              registrationId,
+              credentialStorage: selectedStorage,
+              credentialItemKey: reference,
+            });
+          }
+          const credential = yield* source.exchange({
+            endpoint: input.endpoint,
+            credential: input.sourceCredential,
+            environmentId: pending.environmentId,
+          });
+          return yield* Effect.uninterruptible(
+            Effect.gen(function* () {
+              yield* credentials.set(reference, credential);
+              if (reEnrollment) {
+                const replacement = yield* metadata
+                  .replaceEnrollment({
+                    registrationId,
+                    revision: pending.revision,
+                    credentialStorage: selectedStorage,
+                    credentialItemKey: reference,
+                    credentialExpiresAt: credential.expiresAt,
+                  })
+                  .pipe(Effect.exit);
+                if (Exit.isFailure(replacement)) {
+                  if (Option.isSome(previousCredential)) {
+                    yield* credentials.set(reference, previousCredential.value);
+                  } else {
+                    yield* credentials.remove(reference);
+                  }
+                  return yield* Effect.failCause(replacement.cause);
+                }
+                const now = yield* DateTime.now;
+                const renewal =
+                  DateTime.toEpochMillis(credential.expiresAt) <= DateTime.toEpochMillis(now)
+                    ? "expired"
+                    : credential.renewalSupported === true
+                      ? "ready"
+                      : "unsupported";
+                const updated = yield* metadata.setRenewalStatus(
+                  registrationId,
+                  renewal,
+                  credential.expiresAt,
+                );
+                return updated;
+              }
+              return yield* completeEnrollment({
+                registrationId,
+                credential,
+                credentialItemKey: reference,
+                storage: selectedStorage,
+              });
+            }),
+          ).pipe(Effect.tap(lifecycle.enabled));
+        }),
+      );
     });
 
   const remove: Enrollment["Service"]["remove"] = (input) =>
@@ -556,70 +585,84 @@ const make = Effect.gen(function* () {
           message: "The source environment does not exist.",
         });
       }
-      const removing = yield* metadata.markRemoving({
-        registrationId: input.registrationId,
-        revision: input.revision,
-      });
-      yield* lifecycle.removing(removing);
+      return yield* mutations.withLock(
+        input.registrationId,
+        Effect.gen(function* () {
+          const removing = yield* metadata.markRemoving({
+            registrationId: input.registrationId,
+            revision: input.revision,
+          });
+          yield* lifecycle.removing(removing);
 
-      const reference = yield* metadata.getCredentialReference(input.registrationId);
-      if (reference !== null) {
-        yield* ensureSelectedStorage(reference.storage);
-        yield* credentials.remove(reference.itemKey);
-        yield* metadata.clearCredentialReference(input.registrationId);
-      }
+          const reference = yield* metadata.getCredentialReference(input.registrationId);
+          if (reference !== null) {
+            yield* ensureSelectedStorage(reference.storage);
+            yield* credentials.remove(reference.itemKey).pipe(Effect.uninterruptible);
+            yield* metadata.clearCredentialReference(input.registrationId);
+          }
 
-      return yield* metadata.removeEnvironment({
-        registrationId: input.registrationId,
-        revision: (yield* metadata.getSnapshot).environments.find(
-          (entry) => entry.registrationId === input.registrationId,
-        )!.revision,
-      });
+          return yield* metadata.removeEnvironment({
+            registrationId: input.registrationId,
+            revision: (yield* metadata.getSnapshot).environments.find(
+              (entry) => entry.registrationId === input.registrationId,
+            )!.revision,
+          });
+        }),
+      );
     });
 
   const reconcile: Enrollment["Service"]["reconcile"] = Effect.gen(function* () {
     const references = yield* metadata.listEnrollmentReferences;
-    for (const reference of references) {
-      const environment = reference.environment;
-      if (environment.state === "removing") {
-        yield* lifecycle.removing(environment);
-        const hasCredentialReference =
-          reference.credentialStorage !== null && reference.credentialItemKey !== null;
-        if (hasCredentialReference) {
+    for (const observed of references) {
+      yield* mutations.withLock(
+        observed.environment.registrationId,
+        Effect.gen(function* () {
+          const reference = yield* metadata.getEnrollmentReference(
+            observed.environment.registrationId,
+          );
+          if (reference === undefined) return;
+          const environment = reference.environment;
+          if (environment.state === "removing") {
+            yield* lifecycle.removing(environment);
+            const hasCredentialReference =
+              reference.credentialStorage !== null && reference.credentialItemKey !== null;
+            if (hasCredentialReference) {
+              yield* ensureSelectedStorage(reference.credentialStorage);
+              yield* credentials.remove(reference.credentialItemKey).pipe(Effect.uninterruptible);
+              yield* metadata.clearCredentialReference(environment.registrationId);
+            }
+            const latest = (yield* metadata.getSnapshot).environments.find(
+              (entry) => entry.registrationId === environment.registrationId,
+            );
+            if (latest !== undefined) {
+              yield* metadata.removeEnvironment({
+                registrationId: latest.registrationId,
+                revision: latest.revision,
+              });
+            }
+            return;
+          }
+
+          if (
+            environment.state !== "pending" ||
+            reference.credentialStorage === null ||
+            reference.credentialItemKey === null
+          ) {
+            return;
+          }
+
           yield* ensureSelectedStorage(reference.credentialStorage);
-          yield* credentials.remove(reference.credentialItemKey);
-          yield* metadata.clearCredentialReference(environment.registrationId);
-        }
-        const latest = (yield* metadata.getSnapshot).environments.find(
-          (entry) => entry.registrationId === environment.registrationId,
-        );
-        if (latest !== undefined) {
-          yield* metadata.removeEnvironment({
-            registrationId: latest.registrationId,
-            revision: latest.revision,
-          });
-        }
-        continue;
-      }
-
-      if (
-        environment.state !== "pending" ||
-        reference.credentialStorage === null ||
-        reference.credentialItemKey === null
-      ) {
-        continue;
-      }
-
-      yield* ensureSelectedStorage(reference.credentialStorage);
-      const stored = yield* credentials.get(reference.credentialItemKey);
-      if (Option.isSome(stored)) {
-        yield* completeEnrollment({
-          registrationId: environment.registrationId,
-          credential: stored.value,
-          credentialItemKey: reference.credentialItemKey,
-          storage: reference.credentialStorage,
-        });
-      }
+          const stored = yield* credentials.get(reference.credentialItemKey);
+          if (Option.isSome(stored)) {
+            yield* completeEnrollment({
+              registrationId: environment.registrationId,
+              credential: stored.value,
+              credentialItemKey: reference.credentialItemKey,
+              storage: reference.credentialStorage,
+            }).pipe(Effect.tap(lifecycle.enabled));
+          }
+        }),
+      );
     }
   });
 

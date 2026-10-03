@@ -26,6 +26,7 @@ import {
 import * as ServerConfig from "../config.ts";
 import { makeSqlitePersistenceLive } from "../persistence/Layers/Sqlite.ts";
 import * as CredentialStore from "./CredentialStore.ts";
+import * as CredentialMutations from "./CredentialMutations.ts";
 import * as CredentialRenewal from "./CredentialRenewal.ts";
 import * as Enrollment from "./Enrollment.ts";
 import * as Metadata from "./Metadata.ts";
@@ -182,6 +183,7 @@ const makeHarness = (
       makeSqlitePersistenceLive(isolatedConfig.dbPath),
     ).pipe(Layer.provideMerge(NodeServices.layer));
     const dependenciesLayer = Layer.mergeAll(
+      CredentialMutations.layer,
       Metadata.layer,
       Layer.succeed(CredentialStore.CredentialStore, store),
       Layer.succeed(Enrollment.SourceCredentialExchange, source),
@@ -195,6 +197,7 @@ const makeHarness = (
     const renewal = Context.get(services, CredentialRenewal.CredentialRenewal);
     const metadata = Context.get(services, Metadata.Metadata);
     const sql = Context.get(services, SqlClient.SqlClient);
+    const mutations = Context.get(services, CredentialMutations.CredentialMutations);
     const fileEnvironment = decodeEnvironment({
       registrationId,
       environmentId: "source-environment",
@@ -230,6 +233,7 @@ const makeHarness = (
           Layer.provide(
             Layer.mergeAll(
               ServerConfig.layer(isolatedConfig),
+              Layer.succeed(CredentialMutations.CredentialMutations, mutations),
               Layer.succeed(Metadata.Metadata, metadata),
               Layer.succeed(CredentialStore.CredentialStore, store),
               Layer.succeed(Enrollment.SourceCredentialExchange, source),

@@ -74,6 +74,36 @@ const project = (environmentId: string, projectId: string) =>
   decodeProject({ environmentId, projectId });
 
 metadataLayer("Factory metadata", (it) => {
+  it.effect("reads the current enrollment reference and forgets it after removal", () =>
+    Effect.gen(function* () {
+      const metadata = yield* Metadata.Metadata;
+      const pending = environment("reference-registration", "reference-environment");
+      assert.isUndefined(yield* metadata.getEnrollmentReference(pending.registrationId));
+      yield* metadata.createEnvironment(pending);
+      const enrolled = yield* metadata.markEnrollment({
+        registrationId: pending.registrationId,
+        credentialStorage: "secure-vault",
+        credentialItemKey: "current-reference",
+        credentialExpiresAt: null,
+      });
+      assert.deepEqual(yield* metadata.getEnrollmentReference(pending.registrationId), {
+        environment: enrolled,
+        credentialStorage: "secure-vault",
+        credentialItemKey: "current-reference",
+      });
+      yield* metadata.markRemoving({
+        registrationId: enrolled.registrationId,
+        revision: enrolled.revision,
+      });
+      const cleared = yield* metadata.clearCredentialReference(enrolled.registrationId);
+      yield* metadata.removeEnvironment({
+        registrationId: cleared.registrationId,
+        revision: cleared.revision,
+      });
+      assert.isUndefined(yield* metadata.getEnrollmentReference(enrolled.registrationId));
+    }),
+  );
+
   it.effect("keeps metadata after closing and reopening the SQLite database", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

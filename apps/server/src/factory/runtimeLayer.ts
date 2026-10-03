@@ -6,6 +6,7 @@ import * as Layer from "effect/Layer";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as CredentialStore from "./CredentialStore.ts";
+import * as CredentialMutations from "./CredentialMutations.ts";
 import * as CredentialRenewal from "./CredentialRenewal.ts";
 import * as Enrollment from "./Enrollment.ts";
 import * as Metadata from "./Metadata.ts";
@@ -56,6 +57,7 @@ export const layer = ({
       }
 
       const sharedDependenciesLayer = Layer.mergeAll(
+        CredentialMutations.layer,
         CredentialStore.layer.pipe(Layer.provideMerge(CredentialStore.keyringLayer)),
         Enrollment.sourceLayer,
         sourceTransportLayer,

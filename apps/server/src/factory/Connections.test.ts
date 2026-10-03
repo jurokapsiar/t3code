@@ -26,6 +26,7 @@ import * as Identity from "../environment/ServerEnvironment.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import * as Connections from "./Connections.ts";
 import * as CredentialStore from "./CredentialStore.ts";
+import * as CredentialMutations from "./CredentialMutations.ts";
 import * as CredentialRenewal from "./CredentialRenewal.ts";
 import * as Metadata from "./Metadata.ts";
 import * as FakeSource from "./testkit/FakeSource.ts";
@@ -46,6 +47,7 @@ const harness = Effect.gen(function* () {
   const scope = yield* Scope.make();
   yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
   const dependencies = Layer.mergeAll(
+    CredentialMutations.layer,
     Metadata.layer.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
     fake.layer,
     Layer.succeed(Identity.ServerEnvironmentIdentity, {
