@@ -22,6 +22,7 @@ export const make = Effect.gen(function* () {
     readonly failShell: (reason: Connections.SourceFailure["reason"]) => Effect.Effect<boolean>;
     readonly closed: Effect.Effect<void>;
     readonly shellCalls: Queue.Queue<OrchestrationV2SubscribeShellInput>;
+    readonly shellCancellations: Queue.Queue<void>;
   }>();
   const calls: Parameters<Connections.SourceTransport["Service"]["connect"]>[0][] = [];
   const layer = Layer.succeed(
@@ -37,6 +38,7 @@ export const make = Effect.gen(function* () {
           const configs = yield* PubSub.unbounded<ServerConfigStreamEvent>();
           const shell = yield* PubSub.unbounded<OrchestrationV2ShellStreamItem>();
           const shellCalls = yield* Queue.unbounded<OrchestrationV2SubscribeShellInput>();
+          const shellCancellations = yield* Queue.unbounded<void>();
           yield* Effect.addFinalizer(() => Deferred.succeed(closed, undefined).pipe(Effect.asVoid));
           yield* Queue.offer(attempts, {
             input,
@@ -48,6 +50,7 @@ export const make = Effect.gen(function* () {
               Deferred.fail(shellFailed, new Connections.SourceFailure({ reason })),
             closed: Deferred.await(closed),
             shellCalls,
+            shellCancellations,
           });
           return {
             configs: Stream.concat(
@@ -71,6 +74,7 @@ export const make = Effect.gen(function* () {
                     Stream.merge(Stream.fromEffect(Deferred.await(shellFailed)), {
                       haltStrategy: "either",
                     }),
+                    Stream.ensuring(Queue.offer(shellCancellations, undefined)),
                   );
                 }),
               ),

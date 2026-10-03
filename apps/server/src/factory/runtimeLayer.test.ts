@@ -2,6 +2,7 @@ import { expect, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
@@ -12,6 +13,7 @@ import {
   EnvironmentId,
   FactoryEnvironmentView,
   FactoryRegistrationId,
+  OrchestrationV2ShellStreamItem,
   ServerConfig as importedServerConfig,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -31,6 +33,8 @@ import * as Stream from "effect/Stream";
 import * as Scope from "effect/Scope";
 import * as Exit from "effect/Exit";
 import { config as sourceConfig } from "./testkit/sourceConfig.ts";
+
+const encodeShellStreamItem = Schema.encodeEffect(OrchestrationV2ShellStreamItem);
 
 it.layer(
   ServerConfig.layerTest(process.cwd(), { prefix: "t3-factory-runtime-" }).pipe(
@@ -113,6 +117,9 @@ it.layer(
         );
         const runtime = Context.get(services, FactoryRuntime);
         const connections = yield* runtime.getConnections;
+        const sourceShell = yield* runtime.getSourceShell;
+        const shellUpdates = yield* Stream.toQueue(sourceShell.subscribe, { capacity: 16 });
+        yield* Queue.take(shellUpdates);
         const states = yield* Stream.toQueue(connections.subscribeStates, { capacity: 16 });
         const upstream = yield* Queue.take(socket.sockets);
         const frame = yield* Queue.take(socket.frames);
@@ -139,6 +146,42 @@ it.layer(
           _tag: "Some",
           value: { target: { environmentId: "node-env" } },
         });
+        const shellFrame = yield* Stream.fromQueue(socket.frames).pipe(
+          Stream.filter(
+            (message) =>
+              message._tag === "Request" && message.tag === "orchestration.subscribeShell",
+          ),
+          Stream.runHead,
+        );
+        expect(shellFrame._tag).toBe("Some");
+        const shellRequest = Option.getOrThrow(shellFrame);
+        upstream.message({
+          _tag: "Chunk",
+          requestId: shellRequest.id,
+          values: [
+            yield* encodeShellStreamItem({
+              kind: "snapshot",
+              snapshot: {
+                schemaVersion: 1,
+                snapshotSequence: 4,
+                projects: [],
+                threads: [],
+                archivedThreads: [],
+              },
+            }),
+          ],
+        });
+        const applied = yield* Stream.fromQueue(shellUpdates).pipe(
+          Stream.filter((update) => update.kind === "frame" && update.frame.kind === "snapshot"),
+          Stream.runHead,
+        );
+        expect(applied).toMatchObject({
+          _tag: "Some",
+          value: { frame: { target: { environmentId: "node-env" }, sequence: 4 } },
+        });
+        expect(yield* sourceShell.getStates).toMatchObject([
+          { target: { environmentId: "node-env" }, appliedCursor: 4, projects: [], threads: [] },
+        ]);
         yield* Scope.close(scope, Exit.void);
         yield* socket.closed;
         const current = (yield* metadata.listEnvironments).find(
@@ -261,6 +304,9 @@ it.layer(
       expect(yield* Effect.flip(factory.getConnections)).toMatchObject({
         code: "feature-disabled",
       });
+      expect(yield* Effect.flip(factory.getSourceShell)).toMatchObject({
+        code: "feature-disabled",
+      });
       expect(transportBuilds).toBe(0);
     }),
   );
@@ -279,6 +325,7 @@ it.layer(
       expect(factory.enabled).toBe(true);
       expect(typeof metadata.createGroup).toBe("function");
       expect(yield* factory.getConnections).toBeDefined();
+      expect(yield* factory.getSourceShell).toBeDefined();
       expect(fake.calls).toHaveLength(0);
     }),
   );

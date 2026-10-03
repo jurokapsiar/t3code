@@ -11,6 +11,7 @@ import * as Enrollment from "./Enrollment.ts";
 import * as Metadata from "./Metadata.ts";
 import * as Connections from "./Connections.ts";
 import * as NodeSource from "./NodeSource.ts";
+import * as SourceShell from "./SourceShell.ts";
 
 export class FactoryRuntime extends Context.Service<
   FactoryRuntime,
@@ -18,6 +19,7 @@ export class FactoryRuntime extends Context.Service<
     readonly enabled: boolean;
     readonly getMetadata: Effect.Effect<Metadata.Metadata["Service"], FactoryError>;
     readonly getConnections: Effect.Effect<Connections.Connections["Service"], FactoryError>;
+    readonly getSourceShell: Effect.Effect<SourceShell.SourceShell["Service"], FactoryError>;
     readonly getEnrollment: Effect.Effect<
       Enrollment.Enrollment["Service"],
       FactoryError | CredentialStore.CredentialStoreError | Enrollment.SourceCredentialExchangeError
@@ -45,6 +47,7 @@ export const layer = ({
           enabled: false,
           getMetadata: Effect.fail(disabledError),
           getConnections: Effect.fail(disabledError),
+          getSourceShell: Effect.fail(disabledError),
           getEnrollment: Effect.fail(disabledError),
         });
       }
@@ -60,9 +63,10 @@ export const layer = ({
         Layer.provideMerge(sharedDependenciesLayer),
       );
       const connectionsLayer = Connections.layer.pipe(Layer.provideMerge(renewalDependenciesLayer));
+      const sourceShellLayer = SourceShell.layer.pipe(Layer.provideMerge(connectionsLayer));
       const enrollmentLayer = Enrollment.layer.pipe(
         Layer.provideMerge(
-          Connections.registrationLifecycleLayer.pipe(Layer.provideMerge(connectionsLayer)),
+          Connections.registrationLifecycleLayer.pipe(Layer.provideMerge(sourceShellLayer)),
         ),
       );
 
@@ -72,7 +76,9 @@ export const layer = ({
           const enrollment = yield* Enrollment.Enrollment;
           const renewal = yield* CredentialRenewal.CredentialRenewal;
           const connections = yield* Connections.Connections;
+          const sourceShell = yield* SourceShell.SourceShell;
           yield* connections.start;
+          yield* sourceShell.start;
           yield* enrollment.reconcile.pipe(
             Effect.catchTags({
               CredentialStoreError: (error) => Effect.logWarning(error.message),
@@ -85,6 +91,7 @@ export const layer = ({
             enabled: true,
             getMetadata: Effect.succeed(metadata),
             getConnections: Effect.succeed(connections),
+            getSourceShell: Effect.succeed(sourceShell),
             getEnrollment: Effect.succeed(enrollment),
           };
         }),
