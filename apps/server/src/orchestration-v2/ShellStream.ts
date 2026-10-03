@@ -6,6 +6,7 @@ import type {
   OrchestrationV2ThreadShell,
   OrchestrationV2ThreadShellSnapshot,
   OrchestrationV2ShellStreamItem,
+  OrchestrationV2ReplayResetReason,
   OrchestrationV2StoredEvent,
 } from "@t3tools/contracts";
 import { OrchestrationProjectShell as ProjectShellSchema } from "@t3tools/contracts";
@@ -153,10 +154,12 @@ export function shellStreamItemFromEnrichmentRefresh(input: {
 export function shellStreamItemsFromInitialSnapshot(input: {
   readonly snapshot: OrchestrationV2ShellSnapshot;
   readonly resolvedRepositoryIdentityRoots: ReadonlyArray<string>;
+  readonly resetReason?: OrchestrationV2ReplayResetReason;
 }): ReadonlyArray<Extract<OrchestrationV2ShellStreamItem, { readonly kind: "snapshot" }>> {
   const authoritative = {
     kind: "snapshot" as const,
     snapshot: input.snapshot,
+    ...(input.resetReason === undefined ? {} : { resetReason: input.resetReason }),
   };
   if (input.resolvedRepositoryIdentityRoots.length === 0) {
     return [authoritative];

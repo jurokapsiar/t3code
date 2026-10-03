@@ -260,6 +260,27 @@ describe("shellStreamItemsFromInitialSnapshot", () => {
     expect(JSON.stringify(items[1]).length).toBeLessThan(JSON.stringify(items[0]).length);
   });
 
+  it("keeps reset metadata on the authoritative frame, not equal-sequence enrichment", () => {
+    const snapshot = {
+      ...emptyShellSnapshot,
+      snapshotSequence: 7,
+    } as OrchestrationV2ShellSnapshot;
+    expect(
+      shellStreamItemsFromInitialSnapshot({
+        snapshot,
+        resolvedRepositoryIdentityRoots: ["/workspace/a"],
+        resetReason: "event-limit",
+      }),
+    ).toEqual([
+      { kind: "snapshot", snapshot, resetReason: "event-limit" },
+      {
+        kind: "snapshot",
+        snapshot: { ...snapshot, projects: [], threads: [], archivedThreads: [] },
+        resolvedRepositoryIdentityRoots: ["/workspace/a"],
+      },
+    ]);
+  });
+
   it("emits unmarked authoritative then same-sequence marked enrichment when roots resolved", () => {
     const snapshot = {
       ...emptyShellSnapshot,

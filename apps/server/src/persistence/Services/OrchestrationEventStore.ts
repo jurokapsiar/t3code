@@ -61,6 +61,39 @@ export interface OrchestrationEventStoreShape {
     readonly limit?: number;
   }) => Stream.Stream<OrchestrationV2StoredEvent, OrchestrationEventStoreError>;
 
+  /** Read one raw-byte-preflighted replay page. Oversized rows are not decoded; decode failures request a reset. */
+  readonly readAgentReplayPage: (input: {
+    readonly threadId: ThreadId;
+    readonly afterSequence: number;
+    readonly throughSequence: number;
+    readonly maxEvents: number;
+    readonly maxRawPayloadBytes: number;
+  }) => Effect.Effect<
+    {
+      readonly events: ReadonlyArray<OrchestrationV2StoredEvent>;
+      readonly hasMore: boolean;
+      readonly oversized: boolean;
+      readonly decodeFailed: boolean;
+    },
+    OrchestrationEventStoreError
+  >;
+
+  /** Read one raw-byte-preflighted application page; decode failures request a reset. */
+  readonly readApplicationReplayPage: (input: {
+    readonly afterSequence: number;
+    readonly throughSequence: number;
+    readonly maxEvents: number;
+    readonly maxRawPayloadBytes: number;
+  }) => Effect.Effect<
+    {
+      readonly events: ReadonlyArray<ApplicationStoredEvent>;
+      readonly hasMore: boolean;
+      readonly oversized: boolean;
+      readonly decodeFailed: boolean;
+    },
+    OrchestrationEventStoreError
+  >;
+
   /** Measure one thread's bounded replay without loading or decoding its payloads. */
   readonly getAgentReplayStats: (input: {
     readonly threadId: ThreadId;
@@ -72,6 +105,7 @@ export interface OrchestrationEventStoreShape {
       readonly eventCount: number;
       /** UTF-8 bytes in persisted payload JSON before decoding or wire projection. */
       readonly rawPayloadBytes: number;
+      readonly largestRawEventBytes: number;
       readonly hasCreateEvent: boolean;
     },
     OrchestrationEventStoreError
@@ -84,11 +118,13 @@ export interface OrchestrationEventStoreShape {
   readonly getReplayStats: (input: {
     readonly afterSequence: number;
     readonly throughSequence: number;
+    readonly maxEvents?: number;
   }) => Effect.Effect<
     {
       readonly eventCount: number;
       /** UTF-8 bytes in persisted payload JSON before decoding or wire projection. */
       readonly rawPayloadBytes: number;
+      readonly largestRawEventBytes: number;
     },
     OrchestrationEventStoreError
   >;

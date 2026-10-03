@@ -11,6 +11,8 @@ import * as DateTime from "effect/DateTime";
 
 import {
   buildBoundedThreadStreamSnapshot,
+  chunkFactoryReplayPage,
+  decideFactoryReplay,
   decideThreadResume,
   isThreadReplayRawPayloadSafe,
   threadReplayEncodedBytes,
@@ -26,6 +28,53 @@ const LARGE_PROJECTABLE_OUTPUT_BYTES = 10 * 1_048_576;
 const LARGE_PROJECTABLE_RAW_PAYLOAD_BYTES = 10_486_214;
 // The first projected replay measured 821 bytes; leave room for small envelope additions.
 const MAX_PROJECTED_DYNAMIC_REPLAY_BYTES = 2_048;
+
+describe("decideFactoryReplay", () => {
+  const replay = {
+    negotiated: true,
+    afterSequence: 10,
+    highWater: 1_010,
+    eventCount: 1_000,
+    largestRawEventBytes: 512,
+    largestEncodedEventBytes: 512,
+  } as const;
+
+  it("allows a long catch-up as bounded pages", () => {
+    expect(decideFactoryReplay(replay)).toEqual({ mode: "replay", pageEvents: 128 });
+  });
+
+  it.each([0, 128, 129, 1_000, 10_000])(
+    "accepts %i events within the negotiated total",
+    (eventCount) => {
+      expect(decideFactoryReplay({ ...replay, eventCount })).toMatchObject({ mode: "replay" });
+    },
+  );
+
+  it("resets when the total or cursor is outside the negotiated bounds", () => {
+    expect(decideFactoryReplay({ ...replay, eventCount: 10_001 })).toEqual({
+      mode: "snapshot",
+      reason: "event-limit",
+    });
+    expect(decideFactoryReplay({ ...replay, afterSequence: 1_011 })).toEqual({
+      mode: "snapshot",
+      reason: "invalid-cursor",
+    });
+  });
+
+  it.each(["raw", "encoded"] as const)(
+    "resets before replay for one oversized %s event",
+    (size) => {
+      expect(
+        decideFactoryReplay({
+          ...replay,
+          ...(size === "raw"
+            ? { largestRawEventBytes: 1_048_577 }
+            : { largestEncodedEventBytes: 1_048_577 }),
+        }),
+      ).toEqual({ mode: "snapshot", reason: "oversized-event" });
+    },
+  );
+});
 
 function timelineProjection(itemCount: number): OrchestrationV2ThreadProjection {
   const visibleTurnItems: OrchestrationV2ProjectedTurnItem[] = Array.from(
@@ -107,6 +156,31 @@ function timelineProjection(itemCount: number): OrchestrationV2ThreadProjection 
     updatedAt: NOW,
   } as unknown as OrchestrationV2ThreadProjection;
 }
+
+describe("chunkFactoryReplayPage", () => {
+  it("splits after wire projection at the encoded-byte boundary", () => {
+    const first = { sequence: 1, text: "a" };
+    const second = { sequence: 2, text: "b" };
+    const maxEncodedBytes = Buffer.byteLength(JSON.stringify(first));
+    expect(chunkFactoryReplayPage([first, second], { maxEncodedBytes })).toEqual({
+      mode: "pages",
+      pages: [[first], [second]],
+    });
+  });
+
+  it("allows an exact page byte boundary and resets for a single larger item", () => {
+    const item = { value: "🦊" };
+    const bytes = Buffer.byteLength(JSON.stringify(item));
+    expect(chunkFactoryReplayPage([item], { maxEncodedBytes: bytes })).toEqual({
+      mode: "pages",
+      pages: [[item]],
+    });
+    expect(chunkFactoryReplayPage([item], { maxEncodedBytes: bytes - 1 })).toEqual({
+      mode: "snapshot",
+      reason: "oversized-event",
+    });
+  });
+});
 
 describe("decideThreadResume", () => {
   it("replays when the gap is zero", () => {

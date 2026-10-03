@@ -26,10 +26,11 @@ it("accepts only the current orchestration protocol before websocket RPC setup",
   );
 });
 
-it("keeps full thread snapshot fallback unless the client opts into bounded history", () => {
+it("bounds thread snapshot fallbacks for bounded-history or batched-replay clients", () => {
   assert.isFalse(shouldUseBoundedThreadSnapshot({}));
   assert.isFalse(shouldUseBoundedThreadSnapshot({ acceptBoundedSnapshot: false }));
   assert.isTrue(shouldUseBoundedThreadSnapshot({ acceptBoundedSnapshot: true }));
+  assert.isTrue(shouldUseBoundedThreadSnapshot({ batchedReplay: true }));
 });
 
 it.effect("does not block server config when editor discovery never resolves", () =>

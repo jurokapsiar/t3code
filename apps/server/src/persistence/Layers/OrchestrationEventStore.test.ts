@@ -364,11 +364,13 @@ layer("OrchestrationEventStore", (it) => {
       assert.deepEqual(yield* store.getAgentReplayStats(range), {
         eventCount: 2,
         rawPayloadBytes: Buffer.byteLength(unicodePayload) + Buffer.byteLength(oversizedPayload),
+        largestRawEventBytes: Buffer.byteLength(oversizedPayload),
         hasCreateEvent: true,
       });
       assert.deepEqual(yield* store.getAgentReplayStats({ ...range, afterSequence: first }), {
         eventCount: 1,
         rawPayloadBytes: Buffer.byteLength(oversizedPayload),
+        largestRawEventBytes: Buffer.byteLength(oversizedPayload),
         hasCreateEvent: false,
       });
       assert.equal(
@@ -379,6 +381,7 @@ layer("OrchestrationEventStore", (it) => {
       assert.deepEqual(yield* store.getAgentReplayStats({ ...range, afterSequence: later }), {
         eventCount: 0,
         rawPayloadBytes: 0,
+        largestRawEventBytes: 0,
         hasCreateEvent: false,
       });
       // The application range skips V1 rows, which a shell resume never replays.
@@ -388,6 +391,7 @@ layer("OrchestrationEventStore", (it) => {
           eventCount: 3,
           rawPayloadBytes:
             Buffer.byteLength(unicodePayload) + 2 * Buffer.byteLength(oversizedPayload),
+          largestRawEventBytes: Buffer.byteLength(oversizedPayload),
         },
       );
     }),

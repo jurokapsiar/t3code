@@ -1783,6 +1783,15 @@ export const OrchestrationV2ShellSnapshot = Schema.Struct({
 });
 export type OrchestrationV2ShellSnapshot = typeof OrchestrationV2ShellSnapshot.Type;
 
+export const OrchestrationV2ReplayResetReason = Schema.Literals([
+  "invalid-cursor",
+  "event-limit",
+  "oversized-event",
+  "decode-failure",
+  "thread-recreated",
+]);
+export type OrchestrationV2ReplayResetReason = typeof OrchestrationV2ReplayResetReason.Type;
+
 export const OrchestrationV2ShellStreamItem = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("synchronized"),
@@ -1796,6 +1805,7 @@ export const OrchestrationV2ShellStreamItem = Schema.Union([
      * snapshots. Older clients ignore the field.
      */
     resolvedRepositoryIdentityRoots: Schema.optionalKey(Schema.Array(Schema.String)),
+    resetReason: Schema.optionalKey(OrchestrationV2ReplayResetReason),
   }),
   Schema.Struct({
     kind: Schema.Literal("project.updated"),
@@ -3000,6 +3010,8 @@ export const OrchestrationV2SubscribeShellInput = Schema.Struct({
   afterSequence: Schema.optionalKey(NonNegativeInt),
   /** Requests a marker between initial catch-up and live delivery. */
   requestCompletionMarker: Schema.optionalKey(Schema.Boolean),
+  /** Requests bounded replay pages for retained event gaps. */
+  batchedReplay: Schema.optionalKey(Schema.Boolean),
 });
 export type OrchestrationV2SubscribeShellInput = typeof OrchestrationV2SubscribeShellInput.Type;
 
@@ -3017,6 +3029,8 @@ export const OrchestrationV2SubscribeThreadInput = Schema.Struct({
   requestCompletionMarker: Schema.optionalKey(Schema.Boolean),
   /** Allows snapshot fallbacks to contain a bounded, pageable history window. */
   acceptBoundedSnapshot: Schema.optionalKey(Schema.Boolean),
+  /** Requests bounded replay pages for retained event gaps. */
+  batchedReplay: Schema.optionalKey(Schema.Boolean),
 });
 export type OrchestrationV2SubscribeThreadInput = typeof OrchestrationV2SubscribeThreadInput.Type;
 
@@ -3126,6 +3140,7 @@ export const OrchestrationV2ThreadStreamItem = Schema.Union([
     hasMoreHistory: Schema.optionalKey(Schema.Boolean),
     latestLocalTurnOrdinal: Schema.optionalKey(Schema.NullOr(NonNegativeInt)),
     payloadBudgetExceeded: Schema.optionalKey(Schema.Boolean),
+    resetReason: Schema.optionalKey(OrchestrationV2ReplayResetReason),
   }),
   Schema.Struct({
     kind: Schema.Literal("event"),

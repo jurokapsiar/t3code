@@ -32,6 +32,8 @@ import {
   OrchestrationV2ProviderThreadJson,
   OrchestrationV2RpcSchemas,
   OrchestrationV2ShellSnapshot,
+  OrchestrationV2ShellStreamItem,
+  OrchestrationV2SubscribeShellInput,
   OrchestrationV2SubscribeThreadInput,
   OrchestrationV2Subagent,
   OrchestrationV2ThreadProjection,
@@ -87,6 +89,12 @@ const decodeOrchestrationV2ProviderCapabilities = Schema.decodeUnknownSync(
 
 const decodeOrchestrationV2SubscribeThreadInput = Schema.decodeUnknownSync(
   OrchestrationV2SubscribeThreadInput,
+);
+const decodeOrchestrationV2SubscribeShellInput = Schema.decodeUnknownSync(
+  OrchestrationV2SubscribeShellInput,
+);
+const decodeOrchestrationV2ShellStreamItem = Schema.decodeUnknownSync(
+  OrchestrationV2ShellStreamItem,
 );
 
 describe("orchestration V2 contracts", () => {
@@ -193,6 +201,48 @@ describe("orchestration V2 contracts", () => {
     });
     expect(legacyDecoded.afterSequence).toBe(12);
     expect("acceptBoundedSnapshot" in legacyDecoded).toBe(false);
+  });
+
+  it("negotiates batched replay and carries an explicit shell reset reason", () => {
+    expect(
+      decodeOrchestrationV2SubscribeThreadInput({
+        threadId: "thread-1",
+        batchedReplay: true,
+      }).batchedReplay,
+    ).toBe(true);
+    expect(
+      decodeOrchestrationV2SubscribeThreadInput({ threadId: "thread-1" }).batchedReplay,
+    ).toBeUndefined();
+    expect(decodeOrchestrationV2SubscribeShellInput({}).batchedReplay).toBeUndefined();
+    expect(decodeOrchestrationV2SubscribeShellInput({ batchedReplay: true }).batchedReplay).toBe(
+      true,
+    );
+
+    const reset = decodeOrchestrationV2ShellStreamItem({
+      kind: "snapshot",
+      snapshot: {
+        schemaVersion: 1,
+        snapshotSequence: 12,
+        projects: [],
+        threads: [],
+        archivedThreads: [],
+      },
+      resetReason: "event-limit",
+    });
+    expect(reset).toMatchObject({ kind: "snapshot", resetReason: "event-limit" });
+    expect(
+      decodeOrchestrationV2ShellStreamItem({
+        kind: "snapshot",
+        snapshot: {
+          schemaVersion: 1,
+          snapshotSequence: 12,
+          projects: [],
+          threads: [],
+          archivedThreads: [],
+        },
+        resetReason: "decode-failure",
+      }),
+    ).toMatchObject({ kind: "snapshot", resetReason: "decode-failure" });
   });
 
   it("decodes persisted capability snapshots that predate runtimePolicy", () => {
@@ -851,6 +901,7 @@ describe("orchestration V2 contracts", () => {
       hasMoreHistory: true,
       latestLocalTurnOrdinal: 1,
       payloadBudgetExceeded: false,
+      resetReason: "thread-recreated",
     });
     expect(boundedSnapshot).toMatchObject({
       kind: "snapshot",
@@ -858,6 +909,7 @@ describe("orchestration V2 contracts", () => {
       hasMoreHistory: true,
       latestLocalTurnOrdinal: 1,
       payloadBudgetExceeded: false,
+      resetReason: "thread-recreated",
     });
   });
 

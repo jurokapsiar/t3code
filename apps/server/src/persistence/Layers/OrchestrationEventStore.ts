@@ -436,16 +436,157 @@ const makeEventStore = Effect.gen(function* () {
     );
   };
 
+  const readAgentReplayPage: OrchestrationEventStore.OrchestrationEventStoreShape["readAgentReplayPage"] =
+    (input) =>
+      Effect.gen(function* () {
+        const maxEvents = Math.max(0, Math.floor(input.maxEvents));
+        const candidates = yield* sql<{
+          readonly sequence: number;
+          readonly rawPayloadBytes: number;
+        }>`
+          SELECT sequence, octet_length(payload_json) AS "rawPayloadBytes"
+          FROM orchestration_events
+          WHERE aggregate_kind = 'thread'
+            AND stream_id = ${input.threadId}
+            AND application_event_version = 2
+            AND sequence > ${input.afterSequence}
+            AND sequence <= ${input.throughSequence}
+          ORDER BY sequence ASC
+          LIMIT ${maxEvents + 1}
+        `.pipe(
+          Effect.mapError(
+            toPersistenceSqlError("OrchestrationEventStore.readAgentReplayPage:preflight"),
+          ),
+        );
+        let eventCount = 0;
+        let rawPayloadBytes = 0;
+        let oversized = false;
+        for (const candidate of candidates.slice(0, maxEvents)) {
+          if (candidate.rawPayloadBytes > input.maxRawPayloadBytes) {
+            oversized = eventCount === 0;
+            break;
+          }
+          if (rawPayloadBytes + candidate.rawPayloadBytes > input.maxRawPayloadBytes) break;
+          eventCount++;
+          rawPayloadBytes += candidate.rawPayloadBytes;
+        }
+        const rows =
+          eventCount === 0
+            ? []
+            : yield* readApplicationRows({
+                afterSequence: input.afterSequence,
+                throughSequence: input.throughSequence,
+                threadId: input.threadId,
+                onlyAgentEvents: true,
+                limit: eventCount,
+              }).pipe(
+                Effect.mapError(
+                  toPersistenceSqlError("OrchestrationEventStore.readAgentReplayPage:query"),
+                ),
+              );
+        const decoded = yield* Effect.forEach(
+          rows,
+          (row) =>
+            rowToV2StoredEvent(row).pipe(
+              Effect.mapError(
+                toPersistenceDecodeError("OrchestrationEventStore.readAgentReplayPage:decode"),
+              ),
+            ),
+          { concurrency: 1 },
+        ).pipe(Effect.result);
+        if (decoded._tag === "Failure") {
+          return { events: [], hasMore: true, oversized: false, decodeFailed: true };
+        }
+        return {
+          events: decoded.success,
+          hasMore: oversized || candidates.length > eventCount,
+          oversized,
+          decodeFailed: false,
+        };
+      });
+
+  const readApplicationReplayPage: OrchestrationEventStore.OrchestrationEventStoreShape["readApplicationReplayPage"] =
+    (input) =>
+      Effect.gen(function* () {
+        const maxEvents = Math.max(0, Math.floor(input.maxEvents));
+        const candidates = yield* sql<{
+          readonly sequence: number;
+          readonly rawPayloadBytes: number;
+        }>`
+          SELECT sequence, octet_length(payload_json) AS "rawPayloadBytes"
+          FROM orchestration_events INDEXED BY idx_orchestration_events_application_high_water
+          WHERE sequence > ${input.afterSequence}
+            AND sequence <= ${input.throughSequence}
+            AND (
+              aggregate_kind = 'project'
+              OR (application_event_version = 2 AND aggregate_kind = 'thread')
+            )
+          ORDER BY sequence ASC
+          LIMIT ${maxEvents + 1}
+        `.pipe(
+          Effect.mapError(
+            toPersistenceSqlError("OrchestrationEventStore.readApplicationReplayPage:preflight"),
+          ),
+        );
+        let eventCount = 0;
+        let rawPayloadBytes = 0;
+        let oversized = false;
+        for (const candidate of candidates.slice(0, maxEvents)) {
+          if (candidate.rawPayloadBytes > input.maxRawPayloadBytes) {
+            oversized = eventCount === 0;
+            break;
+          }
+          if (rawPayloadBytes + candidate.rawPayloadBytes > input.maxRawPayloadBytes) break;
+          eventCount++;
+          rawPayloadBytes += candidate.rawPayloadBytes;
+        }
+        const rows =
+          eventCount === 0
+            ? []
+            : yield* readApplicationRows({
+                afterSequence: input.afterSequence,
+                throughSequence: input.throughSequence,
+                limit: eventCount,
+              }).pipe(
+                Effect.mapError(
+                  toPersistenceSqlError("OrchestrationEventStore.readApplicationReplayPage:query"),
+                ),
+              );
+        const decoded = yield* Effect.forEach(
+          rows,
+          (row) =>
+            rowToApplicationStoredEvent(row).pipe(
+              Effect.mapError(
+                toPersistenceDecodeError(
+                  "OrchestrationEventStore.readApplicationReplayPage:decode",
+                ),
+              ),
+            ),
+          { concurrency: 1 },
+        ).pipe(Effect.result);
+        if (decoded._tag === "Failure") {
+          return { events: [], hasMore: true, oversized: false, decodeFailed: true };
+        }
+        return {
+          events: decoded.success,
+          hasMore: oversized || candidates.length > eventCount,
+          oversized,
+          decodeFailed: false,
+        };
+      });
+
   const getAgentReplayStats: OrchestrationEventStore.OrchestrationEventStoreShape["getAgentReplayStats"] =
     (input) =>
       sql<{
         readonly eventCount: number;
         readonly rawPayloadBytes: number;
+        readonly largestRawEventBytes: number;
         readonly hasCreateEvent: number;
       }>`
       SELECT
         COUNT(*) AS "eventCount",
         COALESCE(SUM(octet_length(payload_json)), 0) AS "rawPayloadBytes",
+        COALESCE(MAX(octet_length(payload_json)), 0) AS "largestRawEventBytes",
         COALESCE(MAX(event_type = 'thread.created'), 0) AS "hasCreateEvent"
       FROM (
         SELECT payload_json, event_type
@@ -463,6 +604,7 @@ const makeEventStore = Effect.gen(function* () {
         Effect.map((rows) => ({
           eventCount: rows[0]?.eventCount ?? 0,
           rawPayloadBytes: rows[0]?.rawPayloadBytes ?? 0,
+          largestRawEventBytes: rows[0]?.largestRawEventBytes ?? 0,
           hasCreateEvent: (rows[0]?.hasCreateEvent ?? 0) !== 0,
         })),
       );
@@ -470,22 +612,33 @@ const makeEventStore = Effect.gen(function* () {
   const getReplayStats: OrchestrationEventStore.OrchestrationEventStoreShape["getReplayStats"] = (
     input,
   ) =>
-    sql<{ readonly eventCount: number; readonly rawPayloadBytes: number }>`
+    sql<{
+      readonly eventCount: number;
+      readonly rawPayloadBytes: number;
+      readonly largestRawEventBytes: number;
+    }>`
       SELECT
         COUNT(*) AS "eventCount",
-        COALESCE(SUM(octet_length(payload_json)), 0) AS "rawPayloadBytes"
-      FROM orchestration_events INDEXED BY idx_orchestration_events_application_high_water
-      WHERE sequence > ${input.afterSequence}
-        AND sequence <= ${input.throughSequence}
-        AND (
-          aggregate_kind = 'project'
-          OR (application_event_version = 2 AND aggregate_kind = 'thread')
-        )
+        COALESCE(SUM(rawPayloadBytes), 0) AS "rawPayloadBytes",
+        COALESCE(MAX(rawPayloadBytes), 0) AS "largestRawEventBytes"
+      FROM (
+        SELECT octet_length(payload_json) AS rawPayloadBytes
+        FROM orchestration_events INDEXED BY idx_orchestration_events_application_high_water
+        WHERE sequence > ${input.afterSequence}
+          AND sequence <= ${input.throughSequence}
+          AND (
+            aggregate_kind = 'project'
+            OR (application_event_version = 2 AND aggregate_kind = 'thread')
+          )
+        ORDER BY sequence ASC
+        LIMIT ${input.maxEvents === undefined ? Number.MAX_SAFE_INTEGER : Math.max(0, Math.floor(input.maxEvents)) + 1}
+      )
     `.pipe(
       Effect.mapError(toPersistenceSqlError("OrchestrationEventStore.getReplayStats:query")),
       Effect.map((rows) => ({
         eventCount: rows[0]?.eventCount ?? 0,
         rawPayloadBytes: rows[0]?.rawPayloadBytes ?? 0,
+        largestRawEventBytes: rows[0]?.largestRawEventBytes ?? 0,
       })),
     );
 
@@ -595,6 +748,8 @@ const makeEventStore = Effect.gen(function* () {
     appendProjectEvent,
     appendAgentEvents,
     readAgentEvents,
+    readAgentReplayPage,
+    readApplicationReplayPage,
     getAgentReplayStats,
     getReplayStats,
     latestAgentSequence,

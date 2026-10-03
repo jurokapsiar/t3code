@@ -183,6 +183,44 @@ describe("replayAndBufferLiveEvents", () => {
     ),
   );
 
+  it.effect("delivers events published while a bounded replay page is blocked", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const pubsub = yield* PubSub.unbounded<Event>();
+        const pageStarted = yield* Deferred.make<void>();
+        const releasePage = yield* Deferred.make<void>();
+        const page = [
+          { sequence: 1, text: "first" },
+          { sequence: 2, text: "second" },
+        ];
+        const reader = yield* replayAndBufferLiveEvents(
+          {
+            subscribe: PubSub.subscribe(pubsub),
+            latestSequence: Effect.succeed(2),
+            replay: () =>
+              Stream.unwrap(
+                Deferred.succeed(pageStarted, undefined).pipe(
+                  Effect.andThen(Deferred.await(releasePage)),
+                  Effect.as(Stream.fromIterable(page)),
+                ),
+              ),
+          },
+          { maxItems: 4 },
+        ).pipe(Stream.take(3), Stream.runCollect, Effect.forkScoped);
+
+        yield* Deferred.await(pageStarted);
+        yield* PubSub.publish(pubsub, { sequence: 3, text: "published during page" });
+        yield* Deferred.succeed(releasePage, undefined);
+        expect(yield* Fiber.join(reader)).toEqual([
+          { sequence: 1, text: "first" },
+          { sequence: 2, text: "second" },
+          { sequence: 3, text: "published during page" },
+        ]);
+        expect(yield* PubSub.size(pubsub)).toBe(0);
+      }),
+    ),
+  );
+
   it.effect(
     "filters unrelated events before buffering and deduplicates the replay/live overlap",
     () =>

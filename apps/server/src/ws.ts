@@ -60,6 +60,9 @@ import {
   OrchestrationV2ThreadLaunchError,
   type OrchestrationProjectShell,
   type OrchestrationV2ShellSnapshot,
+  type OrchestrationV2ThreadStreamItem,
+  type OrchestrationV2ShellStreamItem,
+  type OrchestrationV2ReplayResetReason,
   type ProjectEntriesFailure,
   type ProjectFileFailure,
   type ProjectFileOperation,
@@ -142,9 +145,14 @@ import { bufferLiveStream } from "./orchestration-v2/LiveStreamBudget.ts";
 import { coalesceThreadLiveStream } from "./orchestration-v2/ThreadLiveEventCoalescer.ts";
 import {
   buildBoundedThreadStreamSnapshot,
+  chunkFactoryReplayPage,
+  decideFactoryReplay,
   decideThreadResume,
   isThreadReplayRawPayloadSafe,
   threadReplayEncodedBytes,
+  FACTORY_REPLAY_MAX_EVENTS,
+  FACTORY_REPLAY_PAGE_EVENTS,
+  FACTORY_REPLAY_PAGE_RAW_BYTES,
   THREAD_RESUME_MAX_REPLAY_EVENTS,
 } from "./orchestration-v2/ThreadStream.ts";
 import {
@@ -536,8 +544,9 @@ export function hasCompatibleOrchestrationProtocol(url: URL): boolean {
 
 export function shouldUseBoundedThreadSnapshot(input: {
   readonly acceptBoundedSnapshot?: boolean;
+  readonly batchedReplay?: boolean;
 }): boolean {
-  return input.acceptBoundedSnapshot === true;
+  return input.acceptBoundedSnapshot === true || input.batchedReplay === true;
 }
 
 // Optional client identity announced on the /ws upgrade URL next to wsTicket.
@@ -673,6 +682,7 @@ export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subs
     readonly afterSequence?: number;
     readonly requestCompletionMarker?: boolean;
     readonly acceptBoundedSnapshot?: boolean;
+    readonly batchedReplay?: boolean;
   }) {
     const threadManagement = yield* ThreadManagementService.ThreadManagementService;
     const applicationEvents = yield* OrchestrationEventStore.OrchestrationEventStore;
@@ -745,7 +755,9 @@ export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subs
         ? Stream.make({ kind: "synchronized" as const })
         : Stream.empty;
 
-    const snapshotThenLive = Effect.fn("ws.orchestrationV2.threadSnapshotThenLive")(function* () {
+    const snapshotThenLive = Effect.fn("ws.orchestrationV2.threadSnapshotThenLive")(function* (
+      resetReason?: OrchestrationV2ReplayResetReason,
+    ) {
       const useBoundedSnapshot = shouldUseBoundedThreadSnapshot(input);
       const snapshot = yield* (
         useBoundedSnapshot
@@ -772,8 +784,10 @@ export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subs
             snapshotSequence,
             projection: projectThreadProjectionForWire(snapshot.projection),
           };
+      const snapshotItemWithResetReason =
+        resetReason === undefined ? snapshotItem : { ...snapshotItem, resetReason };
       return Stream.concat(
-        Stream.concat(rpcInitialItems([snapshotItem]), completionMarker),
+        Stream.concat(rpcInitialItems([snapshotItemWithResetReason]), completionMarker),
         eventStreamFrom(snapshotSequence),
       );
     });
@@ -797,7 +811,102 @@ export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subs
         ),
       );
       if (input.afterSequence > highWater) {
-        return yield* snapshotThenLive();
+        return yield* snapshotThenLive(input.batchedReplay === true ? "invalid-cursor" : undefined);
+      }
+      if (input.batchedReplay === true) {
+        const stats = yield* applicationEvents
+          .getAgentReplayStats({
+            threadId: input.threadId,
+            afterSequence: input.afterSequence,
+            throughSequence: highWater,
+            maxEvents: FACTORY_REPLAY_MAX_EVENTS,
+          })
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new OrchestrationV2GetThreadProjectionError({
+                  threadId: input.threadId,
+                  message: `Failed to measure orchestration V2 thread ${input.threadId} replay`,
+                  cause,
+                }),
+            ),
+          );
+        const plan = decideFactoryReplay({
+          negotiated: true,
+          afterSequence: input.afterSequence,
+          highWater,
+          eventCount: stats.eventCount,
+          largestRawEventBytes: stats.largestRawEventBytes,
+          largestEncodedEventBytes: 0,
+        });
+        if (plan.mode === "snapshot") return yield* snapshotThenLive(plan.reason);
+        if (stats.hasCreateEvent) {
+          const shell = yield* threadManagement.getThreadShell(input.threadId).pipe(
+            Effect.mapError(
+              (cause) =>
+                new OrchestrationV2GetThreadProjectionError({
+                  threadId: input.threadId,
+                  message: `Failed to locate recreated orchestration V2 thread ${input.threadId}`,
+                  cause,
+                }),
+            ),
+          );
+          if (shell !== null) return yield* snapshotThenLive("thread-recreated");
+        }
+        const replayPages = (
+          cursor: number,
+        ): Stream.Stream<
+          OrchestrationV2ThreadStreamItem,
+          OrchestrationV2GetThreadProjectionError
+        > =>
+          Stream.unwrap(
+            applicationEvents
+              .readAgentReplayPage({
+                threadId: input.threadId,
+                afterSequence: cursor,
+                throughSequence: highWater,
+                maxEvents: FACTORY_REPLAY_PAGE_EVENTS,
+                maxRawPayloadBytes: FACTORY_REPLAY_PAGE_RAW_BYTES,
+              })
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationV2GetThreadProjectionError({
+                      threadId: input.threadId,
+                      message: `Failed while replaying orchestration V2 thread ${input.threadId}`,
+                      cause,
+                    }),
+                ),
+                Effect.flatMap((page) => {
+                  if (page.decodeFailed) return snapshotThenLive("decode-failure");
+                  if (page.oversized) return snapshotThenLive("oversized-event");
+                  const items = page.events.map((stored) => ({
+                    kind: "event" as const,
+                    sequence: stored.sequence,
+                    event: projectDomainEventForWire(stored.event),
+                  }));
+                  const bounded = chunkFactoryReplayPage(items);
+                  if (bounded.mode === "snapshot") return snapshotThenLive(bounded.reason);
+                  if (page.hasMore && page.events.length === 0) {
+                    return snapshotThenLive("invalid-cursor");
+                  }
+                  const nextCursor = page.events.at(-1)?.sequence ?? cursor;
+                  const next = page.hasMore ? replayPages(nextCursor) : Stream.empty;
+                  return Effect.succeed(
+                    Stream.concat(
+                      Stream.fromIterable(bounded.pages).pipe(
+                        Stream.flatMap((items) => rpcInitialItems(items)),
+                      ),
+                      next,
+                    ),
+                  );
+                }),
+              ),
+          );
+        return Stream.concat(
+          Stream.concat(replayPages(input.afterSequence), completionMarker),
+          eventStreamFrom(highWater),
+        );
       }
       const stats = yield* applicationEvents
         .getAgentReplayStats({
@@ -863,6 +972,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
   function* (input: {
     readonly afterSequence?: number;
     readonly requestCompletionMarker?: boolean;
+    readonly batchedReplay?: boolean;
   }) {
     const sql = yield* SqlClient.SqlClient;
     const threadManagement = yield* ThreadManagementService.ThreadManagementService;
@@ -1022,14 +1132,18 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
       input.requestCompletionMarker === true
         ? Stream.make({ kind: "synchronized" as const })
         : Stream.empty;
-    const initialSnapshotItems = (loaded: {
-      readonly snapshot: OrchestrationV2ShellSnapshot;
-      readonly resolvedRepositoryIdentityRoots: ReadonlyArray<string>;
-    }) =>
+    const initialSnapshotItems = (
+      loaded: {
+        readonly snapshot: OrchestrationV2ShellSnapshot;
+        readonly resolvedRepositoryIdentityRoots: ReadonlyArray<string>;
+      },
+      resetReason?: OrchestrationV2ReplayResetReason,
+    ) =>
       rpcInitialItems(
         shellStreamItemsFromInitialSnapshot({
           snapshot: loaded.snapshot,
           resolvedRepositoryIdentityRoots: loaded.resolvedRepositoryIdentityRoots,
+          ...(resetReason === undefined ? {} : { resetReason }),
         }),
       );
     const initialEnrichmentItems = (loaded: {
@@ -1059,6 +1173,110 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
       }
 
       const highWater = yield* applicationEvents.latestApplicationSequence;
+      if (input.batchedReplay === true) {
+        const stats = yield* applicationEvents.getReplayStats({
+          afterSequence: input.afterSequence,
+          throughSequence: highWater,
+          maxEvents: FACTORY_REPLAY_MAX_EVENTS,
+        });
+        const plan = decideFactoryReplay({
+          negotiated: true,
+          afterSequence: input.afterSequence,
+          highWater,
+          eventCount: stats.eventCount,
+          largestRawEventBytes: stats.largestRawEventBytes,
+          largestEncodedEventBytes: 0,
+        });
+        const resetToSnapshot = (reason: OrchestrationV2ReplayResetReason) =>
+          loadSnapshot().pipe(
+            Effect.map((loaded) =>
+              Stream.concat(
+                initialSnapshotItems(loaded, reason),
+                completionThenLive(loaded.snapshot.snapshotSequence),
+              ).pipe(
+                Stream.mapError(
+                  (cause) =>
+                    new OrchestrationV2GetShellSnapshotError({
+                      message: "Failed while streaming after an orchestration shell reset",
+                      cause,
+                    }),
+                ),
+              ),
+            ),
+            Effect.mapError(
+              (cause) =>
+                new OrchestrationV2GetShellSnapshotError({
+                  message: "Failed to load an orchestration shell reset snapshot",
+                  cause,
+                }),
+            ),
+          );
+        if (plan.mode === "snapshot") return yield* resetToSnapshot(plan.reason);
+        const replayPages = (
+          cursor: number,
+        ): Stream.Stream<
+          OrchestrationV2ShellStreamItem,
+          OrchestrationV2GetShellSnapshotError,
+          ProjectEnrichmentService.ProjectEnrichmentService
+        > =>
+          Stream.unwrap(
+            applicationEvents
+              .readApplicationReplayPage({
+                afterSequence: cursor,
+                throughSequence: highWater,
+                maxEvents: FACTORY_REPLAY_PAGE_EVENTS,
+                maxRawPayloadBytes: FACTORY_REPLAY_PAGE_RAW_BYTES,
+              })
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationV2GetShellSnapshotError({
+                      message: "Failed while reading an orchestration shell replay page",
+                      cause,
+                    }),
+                ),
+                Effect.flatMap((page) => {
+                  if (page.decodeFailed) return resetToSnapshot("decode-failure");
+                  if (page.oversized) return resetToSnapshot("oversized-event");
+                  return projectShellItems(Array.from(page.events)).pipe(
+                    Effect.mapError(
+                      (cause) =>
+                        new OrchestrationV2GetShellSnapshotError({
+                          message: "Failed while projecting an orchestration shell replay page",
+                          cause,
+                        }),
+                    ),
+                    Effect.flatMap((items) => {
+                      const bounded = chunkFactoryReplayPage(items);
+                      if (bounded.mode === "snapshot") return resetToSnapshot(bounded.reason);
+                      if (page.hasMore && page.events.length === 0) {
+                        return resetToSnapshot("invalid-cursor");
+                      }
+                      const nextCursor = page.events.at(-1)?.sequence ?? cursor;
+                      const next = page.hasMore ? replayPages(nextCursor) : Stream.empty;
+                      return Effect.succeed(
+                        Stream.concat(
+                          Stream.fromIterable(bounded.pages).pipe(
+                            Stream.flatMap((items) => rpcInitialItems(items)),
+                          ),
+                          next,
+                        ),
+                      );
+                    }),
+                  );
+                }),
+              ),
+          );
+        const loaded = yield* loadProjectMetadataSnapshot(highWater);
+        return composeShellStreamWithEnrichment({
+          initial: initialEnrichmentItems(loaded),
+          tail: Stream.concat(
+            Stream.concat(replayPages(input.afterSequence), completionMarker),
+            liveFrom(highWater),
+          ),
+          enrichment: enrichmentRefreshes,
+        });
+      }
       if (!(yield* canReplayPersistedRange(input.afterSequence, highWater, SHELL_RESUME_MAX_GAP))) {
         const loaded = yield* loadSnapshot();
         return composeShellStreamWithEnrichment({
