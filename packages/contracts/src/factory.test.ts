@@ -50,6 +50,15 @@ const threadSummary = {
   updatedAt: DateTime.makeUnsafe("2026-10-03T10:00:00.000Z"),
 } as const;
 
+const projectSummary = {
+  key: { environmentId: "source-a", projectId: "project-empty" },
+  target: { registrationId: "registration-a", environmentId: "source-a" },
+  title: "Empty workspace",
+  workspaceRoot: "/work/empty",
+  createdAt: "2026-10-03T09:00:00.000Z",
+  updatedAt: "2026-10-03T10:00:00.000Z",
+} as const;
+
 describe("factory contracts", () => {
   it("decodes compact thread summaries with distinct source and factory status", () => {
     expect(decodeThreadSummary(threadSummary)).toEqual(threadSummary);
@@ -101,6 +110,7 @@ describe("factory contracts", () => {
         environments: [],
         sourceFreshness: [],
         threads: Array.from({ length: FACTORY_MAX_THREADS + 1 }, () => threadSummary),
+        projects: [],
         groups: [],
         memberships: [],
         favorites: [],
@@ -115,11 +125,13 @@ describe("factory contracts", () => {
       environments: [],
       sourceFreshness: [],
       threads: [threadSummary],
+      projects: [projectSummary],
       groups: [],
       memberships: [],
       favorites: [],
     });
     expect(snapshot.revision).toBe(0);
+    expect(snapshot.projects).toEqual([projectSummary]);
 
     const upsert = decodeOverviewEvent({
       generation: "generation-a",
@@ -144,6 +156,54 @@ describe("factory contracts", () => {
         },
       }),
     ).toThrow();
+  });
+
+  it("decodes standalone project summaries and keyed upsert/removal patches", () => {
+    const snapshot = decodeOverviewSnapshot({
+      generation: "generation-a",
+      revision: 0,
+      environments: [],
+      sourceFreshness: [],
+      threads: [],
+      projects: [projectSummary],
+      groups: [],
+      memberships: [],
+      favorites: [],
+    });
+    expect(snapshot.threads).toEqual([]);
+    expect(snapshot.projects).toEqual([projectSummary]);
+
+    expect(
+      decodeOverviewEvent({
+        type: "patch",
+        generation: "generation-a",
+        revision: 1,
+        patch: { kind: "projects", upserts: [projectSummary], removals: [] },
+      }),
+    ).toMatchObject({ type: "patch", patch: { kind: "projects", upserts: [projectSummary] } });
+    expect(
+      decodeOverviewEvent({
+        type: "patch",
+        generation: "generation-a",
+        revision: 2,
+        patch: {
+          kind: "projects",
+          upserts: [],
+          removals: [{ key: projectSummary.key, target: projectSummary.target }],
+        },
+      }),
+    ).toMatchObject({
+      type: "patch",
+      patch: {
+        kind: "projects",
+        removals: [
+          {
+            key: projectSummary.key,
+            target: projectSummary.target,
+          },
+        ],
+      },
+    });
   });
 
   it("keeps factory grants opt-in and legacy server descriptors feature-disabled", () => {

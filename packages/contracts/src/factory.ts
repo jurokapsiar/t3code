@@ -2,6 +2,7 @@ import * as Schema from "effect/Schema";
 
 import {
   EnvironmentId,
+  IsoDateTime,
   NonNegativeInt,
   ProjectId,
   ThreadId,
@@ -41,6 +42,22 @@ export const FactoryProjectKey = Schema.Struct({
   projectId: ProjectId,
 });
 export type FactoryProjectKey = typeof FactoryProjectKey.Type;
+
+export const FactoryProjectSummary = Schema.Struct({
+  key: FactoryProjectKey,
+  target: FactoryRemoteTarget,
+  title: TrimmedNonEmptyString,
+  workspaceRoot: TrimmedNonEmptyString,
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+export type FactoryProjectSummary = typeof FactoryProjectSummary.Type;
+
+export const FactoryProjectReference = Schema.Struct({
+  key: FactoryProjectKey,
+  target: FactoryRemoteTarget,
+});
+export type FactoryProjectReference = typeof FactoryProjectReference.Type;
 
 export const FactoryThreadKey = Schema.Struct({
   environmentId: EnvironmentId,
@@ -175,6 +192,7 @@ export const FactoryOverviewSnapshot = Schema.Struct({
   environments: Schema.Array(FactoryEnvironmentView),
   sourceFreshness: Schema.Array(FactorySourceFreshness),
   threads: Schema.Array(FactoryThreadSummary).check(Schema.isMaxLength(FACTORY_MAX_THREADS)),
+  projects: Schema.Array(FactoryProjectSummary),
   groups: Schema.Array(FactoryGroup),
   memberships: Schema.Array(FactoryMembership),
   favorites: Schema.Array(FactoryFavorite),
@@ -187,6 +205,13 @@ export const FactoryOverviewThreadPatch = Schema.Struct({
   removals: Schema.Array(FactoryThreadKey),
 });
 export type FactoryOverviewThreadPatch = typeof FactoryOverviewThreadPatch.Type;
+
+export const FactoryOverviewProjectPatch = Schema.Struct({
+  kind: Schema.Literal("projects"),
+  upserts: Schema.Array(FactoryProjectSummary),
+  removals: Schema.Array(FactoryProjectReference),
+});
+export type FactoryOverviewProjectPatch = typeof FactoryOverviewProjectPatch.Type;
 
 export const FactoryOverviewEnvironmentPatch = Schema.Struct({
   kind: Schema.Literal("environments"),
@@ -212,6 +237,7 @@ export type FactoryOverviewMetadataPatch = typeof FactoryOverviewMetadataPatch.T
 
 export const FactoryOverviewPatch = Schema.Union([
   FactoryOverviewThreadPatch,
+  FactoryOverviewProjectPatch,
   FactoryOverviewEnvironmentPatch,
   FactoryOverviewFreshnessPatch,
   FactoryOverviewMetadataPatch,
