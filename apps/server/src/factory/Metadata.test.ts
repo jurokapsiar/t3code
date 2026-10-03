@@ -1,12 +1,14 @@
 import { assert, expect, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Queue from "effect/Queue";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Scope from "effect/Scope";
+import * as Stream from "effect/Stream";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Schema from "effect/Schema";
 
@@ -224,6 +226,22 @@ metadataLayer("Factory metadata", (it) => {
           (item) => item.target.kind === "group" && item.target.groupId === group.id,
         ),
       ).toBe(false);
+    }),
+  );
+
+  it.effect("subscribes atomically with a metadata snapshot and observes later commits", () =>
+    Effect.gen(function* () {
+      const metadata = yield* Metadata.Metadata;
+      const before = yield* metadata.createGroup({ name: "Before watch" });
+      const watch = yield* metadata.subscribeWithSnapshot;
+      const queue = yield* Stream.toQueue(watch.changes, { capacity: 1 });
+      const after = yield* metadata.createGroup({ name: "After watch" });
+      const commit = yield* Queue.take(queue);
+
+      expect(watch.initial.snapshot.groups).toContainEqual(before);
+      expect(watch.initial.snapshot.groups).not.toContainEqual(after);
+      expect(commit.revision).toBe(watch.initial.revision + 1);
+      expect(commit.snapshot.groups).toContainEqual(after);
     }),
   );
 

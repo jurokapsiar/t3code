@@ -6,6 +6,8 @@ import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlError from "effect/unstable/sql/SqlError";
@@ -94,6 +96,11 @@ export interface FactoryMetadataCommit {
   readonly snapshot: FactoryMetadataSnapshot;
 }
 
+export interface FactoryMetadataWatch {
+  readonly initial: FactoryMetadataCommit;
+  readonly changes: Stream.Stream<FactoryMetadataCommit>;
+}
+
 export interface MarkEnrollmentInput {
   readonly registrationId: FactoryRegistrationId;
   readonly credentialStorage: FactoryCredentialStorage;
@@ -135,6 +142,7 @@ export class Metadata extends Context.Service<
     readonly listEnvironments: Effect.Effect<ReadonlyArray<FactoryEnvironmentView>>;
     readonly getSnapshot: Effect.Effect<FactoryMetadataSnapshot>;
     readonly subscribeChanges: Stream.Stream<FactoryMetadataCommit>;
+    readonly subscribeWithSnapshot: Effect.Effect<FactoryMetadataWatch, never, Scope.Scope>;
     readonly createEnvironment: (
       input: FactoryEnvironmentView,
     ) => Effect.Effect<FactoryEnvironmentView, FactoryError>;
@@ -197,6 +205,7 @@ const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const revision = yield* Ref.make(0);
   const changes = yield* PubSub.unbounded<FactoryMetadataCommit>();
+  const commitLock = yield* Semaphore.make(1);
 
   const selectEnvironments = SqlSchema.findAll({
     Request: Schema.Struct({ registrationId: Schema.optional(FactoryRegistrationId) }),
@@ -320,23 +329,27 @@ const make = Effect.gen(function* () {
     );
 
   const withCommit = <A>(body: Effect.Effect<A, FactoryError>): Effect.Effect<A, FactoryError> =>
-    sql
-      .withTransaction(
-        Effect.gen(function* () {
-          const value = yield* body;
-          return { value, snapshot: yield* readSnapshot };
-        }),
-      )
-      .pipe(
-        Effect.catchIf(SqlError.isSqlError, Effect.die),
-        Effect.flatMap(({ value, snapshot }) =>
-          Ref.updateAndGet(revision, (current) => current + 1).pipe(
-            Effect.flatMap((nextRevision) =>
-              PubSub.publish(changes, { revision: nextRevision, snapshot }).pipe(Effect.as(value)),
+    commitLock.withPermit(
+      sql
+        .withTransaction(
+          Effect.gen(function* () {
+            const value = yield* body;
+            return { value, snapshot: yield* readSnapshot };
+          }),
+        )
+        .pipe(
+          Effect.catchIf(SqlError.isSqlError, Effect.die),
+          Effect.flatMap(({ value, snapshot }) =>
+            Ref.updateAndGet(revision, (current) => current + 1).pipe(
+              Effect.flatMap((nextRevision) =>
+                PubSub.publish(changes, { revision: nextRevision, snapshot }).pipe(
+                  Effect.as(value),
+                ),
+              ),
             ),
           ),
         ),
-      );
+    );
 
   const requireGroupRevision = (groupId: FactoryGroupId, expectedRevision: number) =>
     Effect.gen(function* () {
@@ -368,11 +381,26 @@ const make = Effect.gen(function* () {
       return environment;
     });
 
-  const snapshotWithRevision = Effect.gen(function* () {
-    const snapshot = yield* readSnapshot;
-    const currentRevision = yield* Ref.get(revision);
-    return { ...snapshot, revision: currentRevision };
-  });
+  const snapshotWithRevision = commitLock.withPermit(
+    Effect.gen(function* () {
+      const snapshot = yield* readSnapshot;
+      const currentRevision = yield* Ref.get(revision);
+      return { ...snapshot, revision: currentRevision };
+    }),
+  );
+  const subscribeWithSnapshot = commitLock.withPermit(
+    Effect.gen(function* () {
+      const subscription = yield* PubSub.subscribe(changes);
+      const snapshot = yield* readSnapshot;
+      const currentRevision = yield* Ref.get(revision);
+      return {
+        initial: { revision: currentRevision, snapshot },
+        changes: Stream.fromSubscription(subscription).pipe(
+          Stream.filter((commit) => commit.revision > currentRevision),
+        ),
+      } satisfies FactoryMetadataWatch;
+    }),
+  );
 
   const getCredentialReference = (registrationId: FactoryRegistrationId) =>
     selectCredentialReferences({ registrationId }).pipe(
@@ -409,6 +437,7 @@ const make = Effect.gen(function* () {
     listEnvironments: readEnvironments(),
     getSnapshot: snapshotWithRevision,
     subscribeChanges: Stream.fromPubSub(changes),
+    subscribeWithSnapshot,
     getCredentialReference,
     listEnrollmentReferences,
 

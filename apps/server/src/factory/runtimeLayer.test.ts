@@ -307,6 +307,9 @@ it.layer(
       expect(yield* Effect.flip(factory.getSourceShell)).toMatchObject({
         code: "feature-disabled",
       });
+      expect(yield* Effect.flip(factory.getOverview)).toMatchObject({
+        code: "feature-disabled",
+      });
       expect(transportBuilds).toBe(0);
     }),
   );
@@ -326,6 +329,10 @@ it.layer(
       expect(typeof metadata.createGroup).toBe("function");
       expect(yield* factory.getConnections).toBeDefined();
       expect(yield* factory.getSourceShell).toBeDefined();
+      const overview = yield* factory.getOverview;
+      const snapshot = yield* overview.getSnapshot;
+      expect(snapshot.projects).toEqual([]);
+      expect(snapshot.threads).toEqual([]);
       expect(fake.calls).toHaveLength(0);
     }),
   );

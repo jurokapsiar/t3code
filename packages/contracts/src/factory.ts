@@ -271,6 +271,7 @@ export const FactoryErrorCode = Schema.Literals([
   "conflict",
   "invalid-request",
   "overview-too-large",
+  "overview-stream-overflow",
   "operation-failed",
 ]);
 export type FactoryErrorCode = typeof FactoryErrorCode.Type;

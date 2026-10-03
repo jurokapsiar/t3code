@@ -457,8 +457,7 @@ function projectFileFailureContext(
 
 const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 
-const FactoryMetadataRpcGroup = FactoryRpcGroup.omit(FactoryRpcMethods.overviewSubscribe);
-const ServerWsRpcGroup = WsRpcGroup.merge(FactoryMetadataRpcGroup);
+const ServerWsRpcGroup = WsRpcGroup.merge(FactoryRpcGroup);
 const isFactoryError = Schema.is(FactoryError);
 
 const safeFactoryEnrollmentError = (
@@ -2193,6 +2192,12 @@ const makeWsRpcLayer = (
             {
               "rpc.aggregate": "server",
             },
+          ),
+        [FactoryRpcMethods.overviewSubscribe]: (_input) =>
+          observeRpcStreamEffect(
+            FactoryRpcMethods.overviewSubscribe,
+            factoryRuntime.getOverview.pipe(Effect.map((overview) => overview.subscribe)),
+            { "rpc.aggregate": "factory" },
           ),
         [FactoryRpcMethods.environmentsEnroll]: (input) =>
           observeRpcEffect(
