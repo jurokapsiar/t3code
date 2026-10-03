@@ -18,6 +18,15 @@ const decodeEnrollmentInputExit = Schema.decodeUnknownExit(
 );
 
 describe("FactoryRpcGroup", () => {
+  it("requires administrator scope for an explicit source reconnect", () => {
+    expect(FactoryRpcGroup.requests.has("factory.environments.retry")).toBe(true);
+    expect(
+      Object.entries(FactoryRpcMethodScopes).find(
+        ([method]) => method === "factory.environments.retry",
+      )?.[1],
+    ).toBe("factory:admin");
+  });
+
   it("declares factory-owned metadata, enrollment, favorites, and overview methods", () => {
     const requests = FactoryRpcGroup.requests;
 

@@ -338,11 +338,6 @@ export class RegistrationLifecycle extends Context.Service<
   }
 >()("t3/factory/Enrollment/RegistrationLifecycle") {}
 
-export const registrationLifecycleLayer = Layer.succeed(
-  RegistrationLifecycle,
-  RegistrationLifecycle.of({ enabled: () => Effect.void, removing: () => Effect.void }),
-);
-
 export class Enrollment extends Context.Service<
   Enrollment,
   {

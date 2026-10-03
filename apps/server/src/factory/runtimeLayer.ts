@@ -9,12 +9,15 @@ import * as CredentialStore from "./CredentialStore.ts";
 import * as CredentialRenewal from "./CredentialRenewal.ts";
 import * as Enrollment from "./Enrollment.ts";
 import * as Metadata from "./Metadata.ts";
+import * as Connections from "./Connections.ts";
+import * as NodeSource from "./NodeSource.ts";
 
 export class FactoryRuntime extends Context.Service<
   FactoryRuntime,
   {
     readonly enabled: boolean;
     readonly getMetadata: Effect.Effect<Metadata.Metadata["Service"], FactoryError>;
+    readonly getConnections: Effect.Effect<Connections.Connections["Service"], FactoryError>;
     readonly getEnrollment: Effect.Effect<
       Enrollment.Enrollment["Service"],
       FactoryError | CredentialStore.CredentialStoreError | Enrollment.SourceCredentialExchangeError
@@ -23,8 +26,7 @@ export class FactoryRuntime extends Context.Service<
 >()("t3/factory/runtimeLayer/FactoryRuntime") {}
 
 export interface FactoryRuntimeOptions {
-  readonly startConnections?: () => Effect.Effect<void>;
-  readonly registrationLifecycleLayer?: Layer.Layer<Enrollment.RegistrationLifecycle>;
+  readonly sourceTransportLayer?: Layer.Layer<Connections.SourceTransport>;
 }
 
 const disabledError = new FactoryError({
@@ -33,8 +35,7 @@ const disabledError = new FactoryError({
 });
 
 export const layer = ({
-  startConnections = () => Effect.void,
-  registrationLifecycleLayer = Enrollment.registrationLifecycleLayer,
+  sourceTransportLayer = NodeSource.nodeLayer,
 }: FactoryRuntimeOptions = {}) =>
   Layer.unwrap(
     Effect.gen(function* () {
@@ -43,34 +44,47 @@ export const layer = ({
         return Layer.succeed(FactoryRuntime, {
           enabled: false,
           getMetadata: Effect.fail(disabledError),
+          getConnections: Effect.fail(disabledError),
           getEnrollment: Effect.fail(disabledError),
         });
       }
 
-      const enrollmentDependenciesLayer = Layer.mergeAll(
+      const sharedDependenciesLayer = Layer.mergeAll(
         CredentialStore.layer.pipe(Layer.provideMerge(CredentialStore.keyringLayer)),
         Enrollment.sourceLayer,
-        registrationLifecycleLayer,
+        sourceTransportLayer,
         Metadata.layer,
         ServerEnvironment.identityLayer,
       );
       const renewalDependenciesLayer = CredentialRenewal.layer.pipe(
-        Layer.provideMerge(enrollmentDependenciesLayer),
+        Layer.provideMerge(sharedDependenciesLayer),
       );
-      const enrollmentLayer = Enrollment.layer.pipe(Layer.provideMerge(renewalDependenciesLayer));
+      const connectionsLayer = Connections.layer.pipe(Layer.provideMerge(renewalDependenciesLayer));
+      const enrollmentLayer = Enrollment.layer.pipe(
+        Layer.provideMerge(
+          Connections.registrationLifecycleLayer.pipe(Layer.provideMerge(connectionsLayer)),
+        ),
+      );
 
       return Layer.effect(
         FactoryRuntime,
         Effect.gen(function* () {
           const enrollment = yield* Enrollment.Enrollment;
           const renewal = yield* CredentialRenewal.CredentialRenewal;
-          yield* enrollment.reconcile;
-          yield* startConnections();
+          const connections = yield* Connections.Connections;
+          yield* connections.start;
+          yield* enrollment.reconcile.pipe(
+            Effect.catchTags({
+              CredentialStoreError: (error) => Effect.logWarning(error.message),
+              FactoryError: (error) => Effect.logWarning(error.message),
+            }),
+          );
           yield* renewal.start;
           const metadata = yield* Metadata.Metadata;
           return {
             enabled: true,
             getMetadata: Effect.succeed(metadata),
+            getConnections: Effect.succeed(connections),
             getEnrollment: Effect.succeed(enrollment),
           };
         }),

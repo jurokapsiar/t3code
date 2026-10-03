@@ -2214,8 +2214,8 @@ const makeWsRpcLayer = (
         [FactoryRpcMethods.environmentsUpdate]: (input) =>
           observeRpcEffect(
             FactoryRpcMethods.environmentsUpdate,
-            factoryRuntime.getMetadata.pipe(
-              Effect.flatMap((metadata) => metadata.updateEnvironment(input)),
+            factoryRuntime.getConnections.pipe(
+              Effect.flatMap((connections) => connections.updateEnvironment(input)),
             ),
             { "rpc.aggregate": "factory" },
           ),
@@ -2228,6 +2228,26 @@ const makeWsRpcLayer = (
             ),
             { "rpc.aggregate": "factory" },
           ),
+        [FactoryRpcMethods.environmentsRetry]: (input) =>
+          observeRpcEffect(
+            FactoryRpcMethods.environmentsRetry,
+            factoryRuntime.getConnections.pipe(
+              Effect.flatMap((connections) =>
+                connections.retry(input.registrationId).pipe(
+                  Effect.mapError(
+                    () =>
+                      new FactoryError({
+                        code: "operation-failed",
+                        message: "Enable the source before retrying its connection.",
+                      }),
+                  ),
+                ),
+              ),
+              Effect.as({ requested: true }),
+            ),
+            { "rpc.aggregate": "factory" },
+          ),
+
         [FactoryRpcMethods.groupsList]: (_input) =>
           observeRpcEffect(
             FactoryRpcMethods.groupsList,

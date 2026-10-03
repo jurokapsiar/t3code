@@ -45,10 +45,13 @@ A missing or invalid configured build stops startup. Without a UI directory,
 Factory UI requests return an explicit error; they do not show T3 Code instead.
 When Factory mode is off, the UI directory is not opened.
 
-Factory mode can store a source enrollment and its scoped access credential. It
-does not yet open source sessions or combine their projects and threads.
-Enrolled sources stay offline until source supervision is available. Do not
-treat a stored enrollment as a live connection.
+Factory mode connects to enabled, enrolled sources with their stored credentials.
+Each source connects on its own. Network failures reconnect automatically.
+Authentication, credential-store, identity, and protocol failures require an
+administrator retry after the problem is resolved. Disabling or removing a source
+closes the Factory connection; it does not stop work running on that source.
+An online connection does not mean its project and thread summaries are current.
+The combined overview is not yet available.
 
 ### Factory source credentials
 

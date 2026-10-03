@@ -141,6 +141,10 @@ export class Metadata extends Context.Service<
     readonly updateEnvironment: (
       input: EnvironmentUpdateInput,
     ) => Effect.Effect<FactoryEnvironmentView, FactoryError>;
+    readonly setConnectionState: (
+      registrationId: FactoryRegistrationId,
+      state: "online" | "offline" | "blocked",
+    ) => Effect.Effect<void, FactoryError>;
     readonly setRenewalStatus: (
       registrationId: FactoryRegistrationId,
       status: FactoryRenewalState,
@@ -456,10 +460,20 @@ const make = Effect.gen(function* () {
       withCommit(
         Effect.gen(function* () {
           const current = yield* requireEnvironmentRevision(input.registrationId, input.revision);
+          if (
+            input.enabled === true &&
+            (current.state === "pending" ||
+              current.state === "removing" ||
+              current.credentialStorage === null)
+          ) {
+            return yield* factoryError("conflict", "Enroll the source before enabling it.");
+          }
           yield* sql`
             UPDATE factory_environments
             SET endpoint = ${input.endpoint ?? current.endpoint},
                 label = ${input.label ?? current.label},
+                enabled = ${(input.enabled ?? current.enabled) ? 1 : 0},
+                state = ${input.enabled === false && current.state !== "pending" && current.state !== "removing" ? "offline" : current.state},
                 revision = revision + 1
             WHERE registration_id = ${input.registrationId}
           `.pipe(Effect.orDie);
@@ -470,6 +484,28 @@ const make = Effect.gen(function* () {
                 : Effect.succeed(row),
             ),
           );
+        }),
+      ),
+
+    setConnectionState: (registrationId, state) =>
+      withCommit(
+        Effect.gen(function* () {
+          const current = yield* findEnvironment(registrationId);
+          if (current === undefined)
+            return yield* factoryError("not-found", "The source environment does not exist.");
+          if (
+            !current.enabled ||
+            current.state === "pending" ||
+            current.state === "removing" ||
+            current.state === state
+          )
+            return;
+          const now = yield* DateTime.now;
+          yield* sql`
+        UPDATE factory_environments SET state = ${state},
+          last_seen_at = ${state === "online" ? DateTime.formatIso(now) : current.lastSeenAt === null ? null : DateTime.formatIso(current.lastSeenAt)}
+        WHERE registration_id = ${registrationId}
+      `.pipe(Effect.orDie);
         }),
       ),
 

@@ -29,6 +29,7 @@ export const FactoryRpcMethods = {
   environmentsEnroll: "factory.environments.enroll",
   environmentsUpdate: "factory.environments.update",
   environmentsRemove: "factory.environments.remove",
+  environmentsRetry: "factory.environments.retry",
   groupsList: "factory.groups.list",
   groupsCreate: "factory.groups.create",
   groupsUpdate: "factory.groups.update",
@@ -56,6 +57,7 @@ export const FactoryRpcMethodScopes = {
   [FactoryRpcMethods.environmentsEnroll]: AuthFactoryAdminScope,
   [FactoryRpcMethods.environmentsUpdate]: AuthFactoryAdminScope,
   [FactoryRpcMethods.environmentsRemove]: AuthFactoryAdminScope,
+  [FactoryRpcMethods.environmentsRetry]: AuthFactoryAdminScope,
   [FactoryRpcMethods.groupsList]: AuthFactoryReadScope,
   [FactoryRpcMethods.groupsCreate]: AuthFactoryControlScope,
   [FactoryRpcMethods.groupsUpdate]: AuthFactoryControlScope,
@@ -104,6 +106,7 @@ export const FactoryEnvironmentsUpdateRpc = Rpc.make(FactoryRpcMethods.environme
     registrationId: FactoryRegistrationId,
     endpoint: Schema.optional(FactoryEndpoint),
     label: Schema.optional(TrimmedNonEmptyString),
+    enabled: Schema.optional(Schema.Boolean),
     ...FactoryRevisionInput.fields,
   }),
   success: FactoryEnvironmentView,
@@ -111,11 +114,16 @@ export const FactoryEnvironmentsUpdateRpc = Rpc.make(FactoryRpcMethods.environme
 });
 
 export const FactoryEnvironmentsRemoveRpc = Rpc.make(FactoryRpcMethods.environmentsRemove, {
+  payload: Schema.Struct({ registrationId: FactoryRegistrationId, ...FactoryRevisionInput.fields }),
+  success: Schema.Struct({ removed: Schema.Boolean }),
+  error: FactoryRpcError,
+});
+
+export const FactoryEnvironmentsRetryRpc = Rpc.make(FactoryRpcMethods.environmentsRetry, {
   payload: Schema.Struct({
     registrationId: FactoryRegistrationId,
-    ...FactoryRevisionInput.fields,
   }),
-  success: Schema.Struct({ removed: Schema.Boolean }),
+  success: Schema.Struct({ requested: Schema.Boolean }),
   error: FactoryRpcError,
 });
 
@@ -192,6 +200,7 @@ export const FactoryRpcGroup = RpcGroup.make(
   FactoryEnvironmentsEnrollRpc,
   FactoryEnvironmentsUpdateRpc,
   FactoryEnvironmentsRemoveRpc,
+  FactoryEnvironmentsRetryRpc,
   FactoryGroupsListRpc,
   FactoryGroupsCreateRpc,
   FactoryGroupsUpdateRpc,
