@@ -27,7 +27,6 @@ import {
   CommandId,
   AuthAccessStreamError,
   type AuthAccessStreamEvent,
-  type AuthEnvironmentScope,
   AuthSessionId,
   ClientConnectionMethod,
   ClientDeviceType,
@@ -86,10 +85,7 @@ import {
   ChatAttachmentId,
   PersistChatAttachmentsError,
   RpcClientId,
-  EnvironmentAuthorizationError,
-  FactoryError,
   FactoryRpcGroup,
-  FactoryRpcMethods,
   type ProjectId,
   type ProviderDriverKind,
   type ProviderInstanceId,
@@ -114,8 +110,7 @@ import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as ServerConfig from "./config.ts";
 import * as FactoryRuntime from "./factory/runtimeLayer.ts";
-import * as CredentialStore from "./factory/CredentialStore.ts";
-import * as Enrollment from "./factory/Enrollment.ts";
+import { makeFactoryRpcHandlers } from "./factory/rpcHandlers.ts";
 import * as EnvironmentTheme from "./environmentTheme.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
@@ -218,7 +213,12 @@ import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as RemoteOpenTargets from "./environment/RemoteOpenTargets.ts";
 import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
-import { requiredScopeForRpcMethod, requiredScopeForDeviceList } from "./auth/RpcAuthorization.ts";
+import {
+  authorizeRpcEffect,
+  authorizeRpcStream,
+  requiredScopeForRpcMethod,
+  requiredScopeForDeviceList,
+} from "./auth/RpcAuthorization.ts";
 import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
 import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts";
 import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
@@ -458,21 +458,6 @@ function projectFileFailureContext(
 const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 
 const ServerWsRpcGroup = WsRpcGroup.merge(FactoryRpcGroup);
-const isFactoryError = Schema.is(FactoryError);
-
-const safeFactoryEnrollmentError = (
-  error:
-    | FactoryError
-    | CredentialStore.CredentialStoreError
-    | Enrollment.SourceCredentialExchangeError,
-) =>
-  isFactoryError(error)
-    ? error
-    : new FactoryError({
-        code: "operation-failed",
-        message:
-          "Factory could not complete this operation. Verify the source and credential store, then retry.",
-      });
 // When a resuming client's cursor is more than this many events behind the
 // current head, skip the per-event catch-up replay and send a fresh shell
 // snapshot instead. Replaying each intervening event costs a shell refetch;
@@ -1383,25 +1368,6 @@ const makeWsRpcLayer = (
       const processResourceMonitor = yield* ProcessResourceMonitor.ProcessResourceMonitor;
       const resourceTelemetry = yield* ResourceTelemetry.ResourceTelemetry;
       const relayClient = yield* RelayClient.RelayClient;
-      const authorizationError = (requiredScope: AuthEnvironmentScope) =>
-        new EnvironmentAuthorizationError({
-          message: `The authenticated token is missing required scope: ${requiredScope}.`,
-          requiredScope,
-        });
-      const authorizeEffect = <A, E, R>(
-        requiredScope: AuthEnvironmentScope,
-        effect: Effect.Effect<A, E, R>,
-      ): Effect.Effect<A, E | EnvironmentAuthorizationError, R> =>
-        currentSession.scopes.includes(requiredScope)
-          ? effect
-          : Effect.fail(authorizationError(requiredScope));
-      const authorizeStream = <A, E, R>(
-        requiredScope: AuthEnvironmentScope,
-        stream: Stream.Stream<A, E, R>,
-      ): Stream.Stream<A, E | EnvironmentAuthorizationError, R> =>
-        currentSession.scopes.includes(requiredScope)
-          ? stream
-          : Stream.fail(authorizationError(requiredScope));
 
       const acpRegistryProject = Effect.fn("ws.acpRegistry.project")(function* (
         projectId: ProjectId,
@@ -1731,7 +1697,7 @@ const makeWsRpcLayer = (
       ) =>
         instrumentRpcEffect(
           method,
-          authorizeEffect(requiredScopeForRpcMethod(method), effect),
+          authorizeRpcEffect(currentSession.scopes, requiredScopeForRpcMethod(method), effect),
           traceAttributes,
         );
       const observeRpcStream = <A, E, R>(
@@ -1741,7 +1707,7 @@ const makeWsRpcLayer = (
       ) =>
         instrumentRpcStream(
           method,
-          authorizeStream(requiredScopeForRpcMethod(method), stream),
+          authorizeRpcStream(currentSession.scopes, requiredScopeForRpcMethod(method), stream),
           traceAttributes,
         );
       const observeRpcStreamEffect = <A, StreamError, StreamContext, EffectError, EffectContext>(
@@ -1755,7 +1721,7 @@ const makeWsRpcLayer = (
       ) =>
         instrumentRpcStreamEffect(
           method,
-          authorizeEffect(requiredScopeForRpcMethod(method), effect),
+          authorizeRpcEffect(currentSession.scopes, requiredScopeForRpcMethod(method), effect),
           traceAttributes,
         );
       const loadAuthAccessSnapshot = () =>
@@ -2193,131 +2159,7 @@ const makeWsRpcLayer = (
               "rpc.aggregate": "server",
             },
           ),
-        [FactoryRpcMethods.overviewSubscribe]: (_input) =>
-          observeRpcStreamEffect(
-            FactoryRpcMethods.overviewSubscribe,
-            factoryRuntime.getOverview.pipe(Effect.map((overview) => overview.subscribe)),
-            { "rpc.aggregate": "factory" },
-          ),
-        [FactoryRpcMethods.environmentsEnroll]: (input) =>
-          observeRpcEffect(
-            FactoryRpcMethods.environmentsEnroll,
-            factoryRuntime.getEnrollment.pipe(
-              Effect.flatMap((enrollment) => enrollment.enroll(input)),
-              Effect.mapError(safeFactoryEnrollmentError),
-            ),
-            { "rpc.aggregate": "factory" },
-          ),
-        [FactoryRpcMethods.environmentsList]: (_input) =>
-          observeRpcEffect(
-            FactoryRpcMethods.environmentsList,
-            factoryRuntime.getMetadata.pipe(
-              Effect.flatMap((metadata) => metadata.listEnvironments),
-            ),
-            { "rpc.aggregate": "factory" },
-          ),
-        [FactoryRpcMethods.environmentsUpdate]: (input) =>
-          observeRpcEffect(
-            FactoryRpcMethods.environmentsUpdate,
-            factoryRuntime.getConnections.pipe(
-              Effect.flatMap((connections) => connections.updateEnvironment(input)),
-            ),
-            { "rpc.aggregate": "factory" },
-          ),
-        [FactoryRpcMethods.environmentsRemove]: (input) =>
-          observeRpcEffect(
-            FactoryRpcMethods.environmentsRemove,
-            factoryRuntime.getEnrollment.pipe(
-              Effect.flatMap((enrollment) => enrollment.remove(input)),
-              Effect.mapError(safeFactoryEnrollmentError),
-            ),
-            { "rpc.aggregate": "factory" },
-          ),
-        [FactoryRpcMethods.environmentsRetry]: (input) =>
-          observeRpcEffect(
-            FactoryRpcMethods.environmentsRetry,
-            factoryRuntime.getConnections.pipe(
-              Effect.flatMap((connections) =>
-                connections.retry(input.registrationId).pipe(
-                  Effect.mapError(
-                    () =>
-                      new FactoryError({
-                        code: "operation-failed",
-                        message: "Enable the source before retrying its connection.",
-                      }),
-                  ),
-                ),
-              ),
-              Effect.as({ requested: true }),
-            ),
-            { "rpc.aggregate": "factory" },
-          ),
-
-        [FactoryRpcMethods.groupsList]: (_input) =>
-          observeRpcEffect(
-            FactoryRpcMethods.groupsList,
-            factoryRuntime.getMetadata.pipe(
-              Effect.flatMap((metadata) => metadata.getSnapshot),
-              Effect.map(({ groups, memberships }) => ({ groups, memberships })),
-            ),
-            { "rpc.aggregate": "factory" },
-          ),
-        [FactoryRpcMethods.groupsCreate]: (input) =>
-          observeRpcEffect(
-            FactoryRpcMethods.groupsCreate,
-            factoryRuntime.getMetadata.pipe(
-              Effect.flatMap((metadata) => metadata.createGroup(input)),
-            ),
-            { "rpc.aggregate": "factory" },
-          ),
-        [FactoryRpcMethods.groupsUpdate]: (input) =>
-          observeRpcEffect(
-            FactoryRpcMethods.groupsUpdate,
-            factoryRuntime.getMetadata.pipe(
-              Effect.flatMap((metadata) => metadata.renameGroup(input)),
-            ),
-            { "rpc.aggregate": "factory" },
-          ),
-        [FactoryRpcMethods.groupsDelete]: (input) =>
-          observeRpcEffect(
-            FactoryRpcMethods.groupsDelete,
-            factoryRuntime.getMetadata.pipe(
-              Effect.flatMap((metadata) => metadata.deleteGroup(input)),
-            ),
-            { "rpc.aggregate": "factory" },
-          ),
-        [FactoryRpcMethods.groupsAssign]: (input) =>
-          observeRpcEffect(
-            FactoryRpcMethods.groupsAssign,
-            factoryRuntime.getMetadata.pipe(
-              Effect.flatMap((metadata) => metadata.assignProject(input)),
-            ),
-            { "rpc.aggregate": "factory" },
-          ),
-        [FactoryRpcMethods.groupsUnassign]: (input) =>
-          observeRpcEffect(
-            FactoryRpcMethods.groupsUnassign,
-            factoryRuntime.getMetadata.pipe(
-              Effect.flatMap((metadata) => metadata.unassignProject(input)),
-            ),
-            { "rpc.aggregate": "factory" },
-          ),
-        [FactoryRpcMethods.favoritesSet]: (input) =>
-          observeRpcEffect(
-            FactoryRpcMethods.favoritesSet,
-            factoryRuntime.getMetadata.pipe(
-              Effect.flatMap((metadata) => metadata.setFavorite(input)),
-            ),
-            { "rpc.aggregate": "factory" },
-          ),
-        [FactoryRpcMethods.favoritesReorder]: (input) =>
-          observeRpcEffect(
-            FactoryRpcMethods.favoritesReorder,
-            factoryRuntime.getMetadata.pipe(
-              Effect.flatMap((metadata) => metadata.reorderFavorites(input)),
-            ),
-            { "rpc.aggregate": "factory" },
-          ),
+        ...makeFactoryRpcHandlers(currentSession, factoryRuntime),
         [WS_METHODS.serverSearchAcpRegistry]: (input) =>
           observeRpcEffect(
             WS_METHODS.serverSearchAcpRegistry,
@@ -3754,7 +3596,8 @@ const makeWsRpcLayer = (
             WS_METHODS.deviceList,
             input.inspectOnly && !input.updateTool
               ? deviceService.inspect
-              : authorizeEffect(
+              : authorizeRpcEffect(
+                  currentSession.scopes,
                   requiredScopeForDeviceList(input),
                   input.updateTool
                     ? deviceService.updateTool(input.updateTool)

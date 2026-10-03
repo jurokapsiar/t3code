@@ -7,6 +7,7 @@ import {
   AuthRelayWriteScope,
   AuthReviewWriteScope,
   AuthTerminalOperateScope,
+  EnvironmentAuthorizationError,
   FactoryRpcMethodScopes,
   type FactoryRpcMethod,
   ORCHESTRATION_V2_WS_METHODS,
@@ -15,6 +16,8 @@ import {
   WsRpcGroup,
 } from "@t3tools/contracts";
 import type * as RpcGroup from "effect/unstable/rpc/RpcGroup";
+import * as Effect from "effect/Effect";
+import * as Stream from "effect/Stream";
 
 type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
 
@@ -216,6 +219,26 @@ export function requiredScopeForRpcMethod(method: string): AuthEnvironmentScope 
   }
   return requiredScope;
 }
+
+const authorizationError = (requiredScope: AuthEnvironmentScope) =>
+  new EnvironmentAuthorizationError({
+    message: `The authenticated token is missing required scope: ${requiredScope}.`,
+    requiredScope,
+  });
+
+export const authorizeRpcEffect = <A, E, R>(
+  scopes: ReadonlyArray<AuthEnvironmentScope>,
+  requiredScope: AuthEnvironmentScope,
+  effect: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E | EnvironmentAuthorizationError, R> =>
+  scopes.includes(requiredScope) ? effect : Effect.fail(authorizationError(requiredScope));
+
+export const authorizeRpcStream = <A, E, R>(
+  scopes: ReadonlyArray<AuthEnvironmentScope>,
+  requiredScope: AuthEnvironmentScope,
+  stream: Stream.Stream<A, E, R>,
+): Stream.Stream<A, E | EnvironmentAuthorizationError, R> =>
+  scopes.includes(requiredScope) ? stream : Stream.fail(authorizationError(requiredScope));
 
 /** Retrying can install or restart tools even though ordinary listing is readable. */
 export const requiredScopeForDeviceList = (input: DeviceListInput): AuthEnvironmentScope =>

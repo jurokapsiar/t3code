@@ -1,19 +1,19 @@
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
+import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   AuthAccessTokenType,
   AuthEnvironmentBootstrapTokenType,
   AuthFactoryControlScope,
   AuthFactoryReadScope,
-  AuthOrchestrationReadScope,
-  AuthSessionId,
+  type AuthEnvironmentScope,
   AuthStandardClientScopes,
-  EnvironmentAuthenticatedPrincipal,
   EnvironmentId,
   EnvironmentAuthorizationError,
-  EnvironmentScopeRequiredError,
   FactoryEnvironmentEnrollInput,
   FactoryEnvironmentView,
+  FactoryGroupsCreateRpc,
+  FactoryRpcMethods,
   FactoryOverviewEvent,
   FactoryOverviewSnapshot,
   FactoryRegistrationId,
@@ -48,6 +48,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
+import * as RpcClient from "effect/unstable/rpc/RpcClient";
 import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization";
 import * as RpcServer from "effect/unstable/rpc/RpcServer";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
@@ -57,15 +58,19 @@ import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import * as UrlParams from "effect/unstable/http/UrlParams";
 import * as NetAddress from "effect/unstable/net/NetAddress";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
+import * as Socket from "effect/unstable/socket/Socket";
+import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
-import { requireEnvironmentScope } from "../auth/http.ts";
-import { requiredScopeForRpcMethod } from "../auth/RpcAuthorization.ts";
 import * as SqlitePersistence from "../persistence/Layers/Sqlite.ts";
 import * as FactoryRuntime from "./runtimeLayer.ts";
 import * as SourceShell from "./SourceShell.ts";
+import { makeFactoryRpcHandlers } from "./rpcHandlers.ts";
 import { config as sourceConfig } from "./testkit/sourceConfig.ts";
 
 const date = DateTime.makeUnsafe("2026-10-03T00:00:00.000Z");
+const factoryRpcBoundaryGroup = RpcGroup.make(FactoryGroupsCreateRpc);
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const sourceShellRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.subscribeShell, {
   payload: OrchestrationV2SubscribeShellInput,
@@ -368,6 +373,44 @@ const startFactory = (baseDir: string, enabled = true) =>
     };
   });
 
+const startFactoryRpcBoundaryServer = <HandlersOut, HandlersError, HandlersIn>(
+  serverAuth: EnvironmentAuth.EnvironmentAuth["Service"],
+  handlersForSession: (
+    session: EnvironmentAuth.AuthenticatedSession,
+  ) => Layer.Layer<HandlersOut, HandlersError, HandlersIn>,
+) =>
+  Effect.gen(function* () {
+    const routes = Layer.effectDiscard(
+      Effect.gen(function* () {
+        const router = yield* HttpRouter.HttpRouter;
+        yield* router.add("GET", "/ws", (request) =>
+          Effect.gen(function* () {
+            const session = yield* serverAuth.authenticateWebSocketUpgrade(request);
+            const { protocol, httpEffect } = yield* RpcServer.makeProtocolWithHttpEffectWebsocket;
+            yield* RpcServer.make(factoryRpcBoundaryGroup, { disableTracing: true }).pipe(
+              Effect.provideService(RpcServer.Protocol, protocol),
+              Effect.provide(handlersForSession(session)),
+              Effect.forkScoped,
+            );
+            return yield* httpEffect;
+          }),
+        );
+      }),
+    );
+    const scope = yield* Scope.make();
+    yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
+    const services = yield* Layer.buildWithScope(
+      HttpRouter.serve(routes, { disableLogger: true, disableListenLog: true }).pipe(
+        Layer.provideMerge(Layer.mergeAll(NodeHttpServer.layerTest, RpcSerialization.layerJson)),
+      ),
+      scope,
+    );
+    const address = Context.get(services, HttpServer.HttpServer).address;
+    if (!NetAddress.isInetAddress(address))
+      throw new Error("Factory RPC test server did not bind to an internet address.");
+    return "http://127.0.0.1:" + address.port;
+  });
+
 const sourceUpdateWaiter = <E>(updates: Queue.Dequeue<SourceShell.SourceShellUpdate, E>) => {
   const pending: SourceShell.SourceShellUpdate[] = [];
   const takeMatching = (matches: (update: SourceShell.SourceShellUpdate) => boolean) =>
@@ -398,6 +441,97 @@ const sourceUpdateWaiter = <E>(updates: Queue.Dequeue<SourceShell.SourceShellUpd
       ),
   };
 };
+
+it.layer(NodeServices.layer)("factory authenticated RPC boundary", (it) => {
+  it.effect("denies read-only factory RPCs without side effects and permits control scope", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-factory-rpc-boundary-" });
+      const configLayer = yield* makeFactoryConfig(home, true);
+      const authScope = yield* Scope.make();
+      yield* Effect.addFinalizer(() => Scope.close(authScope, Exit.void));
+      const authServices = yield* Layer.buildWithScope(
+        EnvironmentAuth.layer.pipe(
+          Layer.provideMerge(SqlitePersistence.SqlitePersistenceMemory),
+          Layer.provide(ServerSecretStore.layer),
+          Layer.provide(ServerEnvironment.identityLayer),
+          Layer.provide(configLayer),
+        ),
+        authScope,
+      );
+      const serverAuth = Context.get(authServices, EnvironmentAuth.EnvironmentAuth);
+      const sourceA = yield* makeControlledSource("rpc-a", "rpc-env-a");
+      const sourceB = yield* makeControlledSource("rpc-b", "rpc-env-b");
+      const factory = yield* startFactory(home);
+      const enrollment = yield* factory.runtime.getEnrollment;
+      yield* enrollment.enroll({
+        endpoint: sourceA.endpoint,
+        label: "RPC Source A",
+        sourceCredential: sourceA.bootstrapCredential,
+      });
+      yield* enrollment.enroll({
+        endpoint: sourceB.endpoint,
+        label: "RPC Source B",
+        sourceCredential: sourceB.bootstrapCredential,
+      });
+      yield* sourceA.nextConfigFeed;
+      yield* sourceB.nextConfigFeed;
+      yield* Queue.take(sourceA.shellSubscriptions);
+      yield* Queue.take(sourceB.shellSubscriptions);
+      const metadata = yield* factory.runtime.getMetadata;
+      const sourceShell = yield* factory.runtime.getSourceShell;
+      const before = yield* metadata.getSnapshot;
+      const sourceStatesBefore = yield* sourceShell.getStates;
+      const ticketsBefore = sourceA.stats.tickets + sourceB.stats.tickets;
+      const handlersForSession = (session: EnvironmentAuth.AuthenticatedSession) => {
+        const productionHandlers = makeFactoryRpcHandlers(session, factory.runtime);
+        return factoryRpcBoundaryGroup.toLayer({
+          [FactoryRpcMethods.groupsCreate]: productionHandlers[FactoryRpcMethods.groupsCreate],
+        });
+      };
+      const callGroupsCreate = (scopes: ReadonlyArray<AuthEnvironmentScope>, name: string) =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const issued = yield* serverAuth.issueSession({ scopes });
+            const ticket = yield* serverAuth.issueWebSocketTicket(issued);
+            const endpoint = yield* startFactoryRpcBoundaryServer(serverAuth, handlersForSession);
+            const socketUrl = new URL("/ws", endpoint);
+            socketUrl.protocol = "ws:";
+            socketUrl.searchParams.set("wsTicket", ticket.ticket);
+            const socketLayer = Socket.layerWebSocket(socketUrl.toString(), {
+              openTimeout: "15 seconds",
+            }).pipe(Layer.provide(NodeSocket.layerWebSocketConstructorWS));
+            const protocolLayer = Layer.effect(
+              RpcClient.Protocol,
+              RpcClient.makeProtocolSocket({ retryTransientErrors: false }),
+            ).pipe(Layer.provide(Layer.mergeAll(socketLayer, RpcSerialization.layerJson)));
+            const protocolServices = yield* Layer.build(protocolLayer);
+            const client = yield* RpcClient.make(factoryRpcBoundaryGroup).pipe(
+              Effect.provide(protocolServices),
+            );
+            return yield* client[FactoryRpcMethods.groupsCreate]({ name });
+          }),
+        );
+
+      const denied = yield* Effect.flip(
+        callGroupsCreate([AuthFactoryReadScope], "Denied read-only mutation"),
+      );
+      expect(denied).toBeInstanceOf(EnvironmentAuthorizationError);
+      expect(yield* metadata.getSnapshot).toEqual(before);
+      expect(yield* sourceShell.getStates).toEqual(sourceStatesBefore);
+      expect(sourceA.stats.tickets + sourceB.stats.tickets).toBe(ticketsBefore);
+
+      const created = yield* callGroupsCreate(
+        [AuthFactoryControlScope],
+        "Authorized control mutation",
+      );
+      expect(created.name).toBe("Authorized control mutation");
+      expect((yield* metadata.getSnapshot).groups).toHaveLength(before.groups.length + 1);
+      expect(yield* sourceShell.getStates).toEqual(sourceStatesBefore);
+      expect(sourceA.stats.tickets + sourceB.stats.tickets).toBe(ticketsBefore);
+    }),
+  );
+});
 
 it.layer(NodeServices.layer)("factory phase 1 integration", (it) => {
   it.effect(
@@ -531,21 +665,6 @@ it.layer(NodeServices.layer)("factory phase 1 integration", (it) => {
           favorite: true,
         });
 
-        const principal = {
-          sessionId: AuthSessionId.make("read-only-browser"),
-          subject: "read-only-browser",
-          method: "browser-session-cookie" as const,
-          scopes: new Set([AuthFactoryReadScope]),
-        };
-        const denied = yield* Effect.flip(
-          requireEnvironmentScope(AuthFactoryControlScope).pipe(
-            Effect.provideService(EnvironmentAuthenticatedPrincipal, principal),
-          ),
-        );
-        expect(denied).toBeInstanceOf(EnvironmentScopeRequiredError);
-        expect(requiredScopeForRpcMethod(ORCHESTRATION_V2_WS_METHODS.subscribeShell)).toBe(
-          AuthOrchestrationReadScope,
-        );
         expect(sourceA.stats.exchangedScopes).toEqual([AuthStandardClientScopes.join(" ")]);
         expect(sourceB.stats.exchangedScopes).toEqual([AuthStandardClientScopes.join(" ")]);
         expect(sourceA.stats.tickets).toBe(1);
@@ -570,9 +689,6 @@ it.layer(NodeServices.layer)("factory phase 1 integration", (it) => {
           expect(wal).not.toContain(sourceB.bootstrapCredential);
           expect(wal).not.toContain(sourceB.accessToken);
         }
-        expect(requiredScopeForRpcMethod(ORCHESTRATION_V2_WS_METHODS.subscribeShell)).toBe(
-          AuthOrchestrationReadScope,
-        );
 
         yield* connections.retry(environmentA.registrationId);
         yield* sourceWaiter.state(sourceA.environmentId, "stale");
