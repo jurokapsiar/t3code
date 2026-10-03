@@ -1,5 +1,10 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { EnvironmentHttpApi } from "@t3tools/contracts";
+import {
+  AuthAccessTokenType,
+  AuthEnvironmentBootstrapTokenType,
+  AuthTokenExchangeGrantType,
+  EnvironmentHttpApi,
+} from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -128,6 +133,91 @@ it.effect("sets the selected browser session cookies through the HTTP route", ()
           expect(restrictedCookies).toHaveLength(1);
           expect(restrictedCookies[0]).toMatch(/^t3_session_/);
           expect(restrictedCookies[0]).not.toContain("t3_dev_session_");
+
+          const bearerPairingResponse = await environmentA.handler(
+            postJson(
+              "/api/auth/pairing-token",
+              { scopes: ["orchestration:read"] },
+              { cookie: devCookieHeader },
+            ),
+            requestContext,
+          );
+          expect(bearerPairingResponse.status).toBe(200);
+          const bearerPairing = (await bearerPairingResponse.json()) as { credential: string };
+          const accessTokenResponse = await environmentA.handler(
+            new Request("http://127.0.0.1/oauth/token", {
+              method: "POST",
+              headers: { "content-type": "application/x-www-form-urlencoded" },
+              body: new URLSearchParams({
+                grant_type: AuthTokenExchangeGrantType,
+                subject_token: bearerPairing.credential,
+                subject_token_type: AuthEnvironmentBootstrapTokenType,
+                requested_token_type: AuthAccessTokenType,
+                scope: "orchestration:read",
+              }),
+            }),
+            requestContext,
+          );
+          expect(accessTokenResponse.status).toBe(200);
+          const accessToken = (await accessTokenResponse.json()) as { access_token: string };
+          const cookieRenewalResponse = await environmentA.handler(
+            postJson(
+              "/api/auth/renew",
+              { scopes: ["orchestration:read"] },
+              { cookie: devCookieHeader },
+            ),
+            requestContext,
+          );
+          expect(cookieRenewalResponse.status).toBe(401);
+          const renewalResponse = await environmentA.handler(
+            postJson(
+              "/api/auth/renew",
+              { scopes: ["orchestration:read"] },
+              { authorization: `Bearer ${accessToken.access_token}` },
+            ),
+            requestContext,
+          );
+          expect(renewalResponse.status).toBe(200);
+          expect(renewalResponse.headers.get("cache-control")).toBe("no-store");
+          const renewed = (await renewalResponse.json()) as {
+            access_token: string;
+            token_type: string;
+            expires_in: number;
+            scope: string;
+          };
+          expect(renewed.token_type).toBe("Bearer");
+          expect(renewed.scope).toBe("orchestration:read");
+          expect(renewed.expires_in).toBeGreaterThan(30 * 24 * 60 * 60 - 2);
+          expect(renewed.access_token).not.toBe(accessToken.access_token);
+
+          const oldSessionResponse = await environmentA.handler(
+            new Request("http://127.0.0.1/api/auth/session", {
+              headers: { authorization: `Bearer ${accessToken.access_token}` },
+            }),
+            requestContext,
+          );
+          expect(oldSessionResponse.status).toBe(200);
+          expect(await oldSessionResponse.json()).toMatchObject({ authenticated: true });
+
+          const widenedResponse = await environmentA.handler(
+            postJson(
+              "/api/auth/renew",
+              { scopes: ["access:write"] },
+              { authorization: `Bearer ${accessToken.access_token}` },
+            ),
+            requestContext,
+          );
+          expect(widenedResponse.status).toBe(400);
+          expect(await widenedResponse.text()).not.toContain(accessToken.access_token);
+          const emptyScopesResponse = await environmentA.handler(
+            postJson(
+              "/api/auth/renew",
+              { scopes: [] },
+              { authorization: "Bearer " + accessToken.access_token },
+            ),
+            requestContext,
+          );
+          expect(emptyScopesResponse.status).toBe(400);
         }),
       ([environmentA, environmentB]) =>
         Effect.promise(() => Promise.all([environmentA.dispose(), environmentB.dispose()])),

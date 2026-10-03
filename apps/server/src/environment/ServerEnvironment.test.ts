@@ -182,6 +182,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
       expect(second.capabilities.serverResolvedCommandContext).toBe(true);
       expect(second.capabilities.agentActivityPublishing).toBe(false);
       expect(second.capabilities.factory).toBeUndefined();
+      expect(second.capabilities.factoryRenewal).toBe(true);
       expect(second.factoryProtocolVersion).toBeUndefined();
     }),
   );

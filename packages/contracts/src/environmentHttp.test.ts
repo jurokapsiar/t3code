@@ -1,6 +1,8 @@
+import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  AuthSessionRenewalRequest,
   EnvironmentAuthInvalidError,
   EnvironmentInternalError,
   EnvironmentOperationForbiddenError,
@@ -11,9 +13,9 @@ import {
 
 const traceId = "trace-1";
 
+const decodeRenewalRequest = Schema.decodeUnknownSync(AuthSessionRenewalRequest);
+
 describe("environment HTTP errors", () => {
-  // A client squashes the cause and shows `message`; an empty one becomes a generic
-  // "The environment request failed." that names nothing the reader can act on.
   it("each carries a message that names its reason", () => {
     const errors = [
       new EnvironmentRequestInvalidError({
@@ -57,6 +59,13 @@ describe("environment HTTP errors", () => {
     ];
     errors.forEach((error, index) => {
       expect(error.message).toContain(details[index]);
+    });
+  });
+
+  it("decodes optional renewal scopes for older clients", () => {
+    expect(decodeRenewalRequest({})).toEqual({});
+    expect(decodeRenewalRequest({ scopes: ["orchestration:read"] })).toEqual({
+      scopes: ["orchestration:read"],
     });
   });
 });

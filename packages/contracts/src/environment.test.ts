@@ -24,6 +24,10 @@ describe("ExecutionEnvironmentDescriptor", () => {
     ).toBe(true);
   });
 
+  it("treats a missing source-renewal capability as unsupported under version skew", () => {
+    expect(decodeDescriptor(descriptor).capabilities.factoryRenewal).toBeUndefined();
+  });
+
   it("treats a missing pull-request capability as unsupported under version skew", () => {
     expect(decodeDescriptor(descriptor).capabilities.pullRequests).toBeUndefined();
   });

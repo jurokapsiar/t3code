@@ -1,6 +1,8 @@
 import {
   AuthAccessReadScope,
+  AuthAccessTokenType,
   AuthAccessWriteScope,
+  type AuthAccessTokenResult,
   AuthStandardClientScopes,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
@@ -23,7 +25,7 @@ import {
   EnvironmentAuthenticatedPrincipal,
 } from "@t3tools/contracts";
 import type { AuthEnvironmentScope, DpopFailureReason } from "@t3tools/contracts";
-import { parseAllowedOAuthScope } from "@t3tools/shared/oauthScope";
+import { encodeOAuthScope, parseAllowedOAuthScope } from "@t3tools/shared/oauthScope";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -380,6 +382,56 @@ export const authHttpApiLayer = HttpApiBuilder.group(
           ),
           Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
             failEnvironmentInternal("access_token_issuance_failed", error),
+          ),
+        ),
+      )
+      .handle(
+        "renew",
+        Effect.fn("environment.auth.renew")(
+          function* (args) {
+            yield* annotateEnvironmentRequest(args.endpoint.name);
+            const session = yield* EnvironmentAuthenticatedPrincipal;
+            const request = yield* HttpServerRequest.HttpServerRequest;
+            const authorization = request.headers.authorization;
+            const credential = authorization?.startsWith("Bearer ")
+              ? authorization.slice("Bearer ".length).trim()
+              : "";
+            if (!credential) {
+              return yield* failEnvironmentAuthInvalid("missing_credential");
+            }
+            const issued = yield* serverAuth.renewSession({
+              credential,
+              principal: {
+                sessionId: session.sessionId,
+                subject: session.subject,
+                method: session.method,
+                scopes: [...session.scopes],
+              },
+              ...(args.payload.scopes === undefined
+                ? {}
+                : { requestedScopes: args.payload.scopes }),
+            });
+            const now = yield* DateTime.now;
+            yield* appendCredentialResponseHeaders;
+            return {
+              access_token: issued.token,
+              issued_token_type: AuthAccessTokenType,
+              token_type: "Bearer",
+              expires_in: Math.max(
+                0,
+                Math.floor((issued.expiresAt.epochMilliseconds - now.epochMilliseconds) / 1000),
+              ),
+              scope: encodeOAuthScope(issued.scopes),
+            } satisfies AuthAccessTokenResult;
+          },
+          Effect.catchTag("SessionRenewalScopeError", () =>
+            failEnvironmentInvalidRequest("invalid_scope"),
+          ),
+          Effect.catchTag("SessionRenewalCredentialError", () =>
+            failEnvironmentAuthInvalid("invalid_credential"),
+          ),
+          Effect.catchTag("SessionRenewalInternalError", (error) =>
+            failEnvironmentInternal("session_renewal_failed", error),
           ),
         ),
       )

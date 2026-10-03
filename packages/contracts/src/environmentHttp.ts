@@ -19,6 +19,7 @@ import {
   AuthRevokeClientSessionInput,
   AuthRevokePairingLinkInput,
   AuthEnvironmentScope,
+  AuthEnvironmentScopes,
   AuthTokenExchangeRequest,
   AuthSessionState,
   AuthWebSocketTicketResult,
@@ -97,6 +98,7 @@ export const EnvironmentInternalErrorReason = Schema.Literals([
   "browser_session_issuance_failed",
   "browser_session_cookie_failed",
   "access_token_issuance_failed",
+  "session_renewal_failed",
   "websocket_ticket_issuance_failed",
   "pairing_credential_issuance_failed",
   "pairing_links_load_failed",
@@ -421,6 +423,11 @@ export const AuthClientSessionRevokeResult = Schema.Struct({
 });
 export type AuthClientSessionRevokeResult = typeof AuthClientSessionRevokeResult.Type;
 
+export const AuthSessionRenewalRequest = Schema.Struct({
+  scopes: Schema.optionalKey(AuthEnvironmentScopes),
+});
+export type AuthSessionRenewalRequest = typeof AuthSessionRenewalRequest.Type;
+
 export const AuthOtherClientSessionsRevokeResult = Schema.Struct({
   revokedCount: Schema.Number,
 });
@@ -454,6 +461,18 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
       success: AuthAccessTokenResult,
       error: EnvironmentTokenExchangeErrors,
     }),
+  )
+  .add(
+    HttpApiEndpoint.post("renew", "/api/auth/renew", {
+      headers: OptionalBearerHeaders,
+      payload: AuthSessionRenewalRequest,
+      success: AuthAccessTokenResult,
+      error: [
+        EnvironmentRequestInvalidError,
+        EnvironmentAuthInvalidError,
+        EnvironmentInternalError,
+      ],
+    }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
     HttpApiEndpoint.post("webSocketTicket", "/api/auth/websocket-ticket", {

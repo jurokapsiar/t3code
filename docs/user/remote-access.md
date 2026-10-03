@@ -54,8 +54,14 @@ treat a stored enrollment as a live connection.
 
 When you enroll a source, Factory exchanges its one-time pairing credential for
 a scoped session. Factory stores the session credential in the host's OS vault
-by default. It does not store the one-time credential in Factory metadata. Keep
-the vault available to the server account: unlock the login Keychain on macOS,
+by default. It does not store the one-time credential in Factory metadata.
+
+Source sessions expire after 30 days. A source that advertises session renewal
+can issue a replacement for a valid bearer session with the same or narrower
+scopes. Renewal does not revoke the old session. Save the replacement before
+revoking the old session. An expired or revoked session cannot be renewed. A
+source without renewal support needs fresh enrollment after its session expires.
+Keep the vault available to the server account: unlock the login Keychain on macOS,
 provide an unlocked Secret Service on Linux, or make the system credential vault
 available on Windows. If the vault is unavailable, enrollment fails. Factory
 does not switch to another store.
