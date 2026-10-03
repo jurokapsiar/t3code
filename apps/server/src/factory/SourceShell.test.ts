@@ -206,6 +206,33 @@ const harness = Effect.gen(function* () {
   };
 });
 
+it.effect("binds control freshness to the exact source connection lease", () =>
+  Effect.gen(function* () {
+    const h = yield* harness;
+    const targetA = yield* h.register("a");
+    yield* h.start;
+    const attempt = yield* Queue.take(h.fake.attempts);
+    yield* attempt.ready(sourceConfig("env-a"));
+    yield* Queue.take(attempt.shellCalls);
+    const access = yield* h.connections.resolveTarget(targetA);
+    expect(yield* h.sourceShell.isSynchronized(access)).toBe(false);
+    yield* attempt.emitShell(snapshot(10, []));
+    yield* h.nextFrame("snapshot", "env-a");
+    yield* attempt.emitShell({ kind: "synchronized" });
+    yield* h.nextFrame("synchronized", "env-a");
+    expect(yield* h.sourceShell.isSynchronized(access)).toBe(true);
+    expect(yield* h.sourceShell.isSynchronized({ ...access, connectionId: {} })).toBe(false);
+    expect(yield* h.sourceShell.isSynchronized({ ...access, target: target("a", "env-b") })).toBe(
+      false,
+    );
+    yield* attempt.fail("authentication");
+    yield* h.nextUpdate(
+      (update) => update.kind === "source" && update.source.freshness.state === "blocked",
+    );
+    expect(yield* h.sourceShell.isSynchronized(access)).toBe(false);
+  }),
+);
+
 it("does not advance the applied cursor when a source update fails", () => {
   expect(SourceShell.nextAppliedCursor({ previous: 10, incoming: 11, applied: false })).toBe(10);
 });

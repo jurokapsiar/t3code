@@ -126,6 +126,7 @@ const makeHarness = (
     const shell = SourceShell.SourceShell.of({
       start: Effect.void,
       getStates: Effect.succeed(sources),
+      isSynchronized: () => Effect.die("Overview does not authorize source requests."),
       subscribe: Stream.concat(
         Stream.succeed({ kind: "snapshot" as const, sources }),
         Stream.fromPubSub(changes).pipe(

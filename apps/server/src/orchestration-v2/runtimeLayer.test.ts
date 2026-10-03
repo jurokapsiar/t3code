@@ -1044,7 +1044,17 @@ it.layer(TestLayer)("OrchestrationV2LayerLive", (it) => {
               updatedAt: now,
               requestId,
               responseMode: "message",
-              questions: [{ id: "color", header: "Color", question: "Which color?", options: [] }],
+              questions: [
+                {
+                  id: "color",
+                  header: "Color",
+                  question: "Which color?",
+                  options: [
+                    { label: "Blue", description: "Use blue", value: "blue" },
+                    { label: "Green", description: "Use green", value: "green" },
+                  ],
+                },
+              ],
             },
           },
         ],
@@ -1062,6 +1072,15 @@ it.layer(TestLayer)("OrchestrationV2LayerLive", (it) => {
       const unanswered = yield* orchestrator.getThreadProjection(threadId);
       assert.equal(unanswered.runtimeRequests[0]?.status, "pending");
       assert.deepEqual(unanswered.messages, []);
+
+      const question = unanswered.turnItems.find((item) => item.id === itemId);
+      assert.equal(question?.type, "user_input_request");
+      if (question?.type === "user_input_request") {
+        assert.deepEqual(question.questions[0]?.options, [
+          { label: "Blue", description: "Use blue", value: "blue" },
+          { label: "Green", description: "Use green", value: "green" },
+        ]);
+      }
 
       const command = {
         type: "runtime-request.respond" as const,

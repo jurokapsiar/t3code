@@ -97,6 +97,8 @@ export class SourceShell extends Context.Service<
   {
     readonly start: Effect.Effect<void>;
     readonly getStates: Effect.Effect<ReadonlyArray<SourceShellState>>;
+    /** Control freshness belongs to a connection lease, not an overview timestamp. */
+    readonly isSynchronized: (access: Connections.SourceAccess) => Effect.Effect<boolean>;
     /** A full initial state followed by applied shell frames and freshness changes. */
     readonly subscribe: Stream.Stream<SourceShellUpdate>;
   }
@@ -708,6 +710,17 @@ const make = Effect.gen(function* () {
   return SourceShell.of({
     start,
     getStates: Effect.sync(snapshot),
+    isSynchronized: (access) =>
+      Effect.sync(() => {
+        const source = sources.get(access.target.registrationId);
+        return (
+          source !== undefined &&
+          source.target.environmentId === access.target.environmentId &&
+          source.connectionId === access.connectionId &&
+          !source.invalidData &&
+          source.freshness.state === "fresh"
+        );
+      }),
     subscribe,
   });
 });

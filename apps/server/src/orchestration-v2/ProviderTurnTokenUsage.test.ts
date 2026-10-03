@@ -38,6 +38,7 @@ describe("provider turn token usage projection", () => {
     const projected = upsertProviderTurn([running], completed);
 
     assert.deepEqual(projected[0]?.tokenUsage, running.tokenUsage);
+    assert.equal(upsertProviderTurn([], completed)[0]?.tokenUsage, undefined);
     assert.equal(projected[0]?.status, "completed");
   });
 });

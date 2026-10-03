@@ -310,6 +310,9 @@ it.layer(
       expect(yield* Effect.flip(factory.getOverview)).toMatchObject({
         code: "feature-disabled",
       });
+      expect(yield* Effect.flip(factory.getRelayPolicy)).toMatchObject({
+        code: "feature-disabled",
+      });
       expect(transportBuilds).toBe(0);
     }),
   );
@@ -330,6 +333,7 @@ it.layer(
       expect(yield* factory.getConnections).toBeDefined();
       expect(yield* factory.getSourceShell).toBeDefined();
       const overview = yield* factory.getOverview;
+      expect(yield* factory.getRelayPolicy).toBeDefined();
       const snapshot = yield* overview.getSnapshot;
       expect(snapshot.projects).toEqual([]);
       expect(snapshot.threads).toEqual([]);

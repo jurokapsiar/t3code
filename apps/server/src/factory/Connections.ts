@@ -1,4 +1,5 @@
 import {
+  type AuthEnvironmentScope,
   FactoryError,
   FactoryRegistrationId,
   FactoryRemoteTarget,
@@ -68,6 +69,9 @@ export interface SourceAccess {
   readonly connectionId: object;
   readonly target: FactoryRemoteTarget;
   readonly config: ServerConfig;
+  /** Grants of the credential used by this connection. Never part of a wire view. */
+  readonly sourceScopes: ReadonlyArray<AuthEnvironmentScope>;
+  readonly checkCurrent: Effect.Effect<void, SourceFailure>;
   readonly shell: Stream.Stream<OrchestrationV2ShellStreamItem, SourceFailure>;
   readonly closed: Effect.Effect<never, SourceFailure>;
   /** Commit only after the shell consumer has applied this source item. */
@@ -110,6 +114,7 @@ interface Owner {
   state: SourceState;
   fiber: Fiber.Fiber<void> | undefined;
   session: SourceSession | undefined;
+  authorization?: Pick<CredentialStore.StoredCredential, "scopes" | "expiresAt"> | undefined;
   ended: Deferred.Deferred<never, SourceFailure> | undefined;
 }
 
@@ -208,9 +213,14 @@ const make = Effect.gen(function* () {
             );
           const ended = yield* Deferred.make<never, SourceFailure>();
           owner.ended = ended;
+          owner.authorization = {
+            scopes: Object.freeze([...stored.value.scopes]),
+            expiresAt: stored.value.expiresAt,
+          };
           yield* Effect.addFinalizer(() =>
             Effect.gen(function* () {
               owner.session = undefined;
+              owner.authorization = undefined;
               yield* Deferred.fail(ended, new SourceFailure({ reason: "unavailable" }));
             }),
           );
@@ -427,6 +437,7 @@ const make = Effect.gen(function* () {
       const session = owner?.session;
       const config = owner?.state.config;
       const ended = owner?.ended;
+      const authorization = owner?.authorization;
       if (
         reference === undefined ||
         !isEnabled(reference) ||
@@ -435,6 +446,7 @@ const make = Effect.gen(function* () {
         session === undefined ||
         config == null ||
         ended === undefined ||
+        authorization === undefined ||
         owner.state.phase !== "online"
       )
         return yield* new SourceFailure({ reason: "unavailable" });
@@ -472,6 +484,26 @@ const make = Effect.gen(function* () {
         connectionId: session,
         target,
         config,
+        sourceScopes: authorization.scopes,
+        checkCurrent: Effect.gen(function* () {
+          yield* checkCurrent;
+          const now = yield* DateTime.now;
+          if (DateTime.toEpochMillis(authorization.expiresAt) <= DateTime.toEpochMillis(now))
+            return yield* new SourceFailure({ reason: "authentication" });
+          const current = (yield* metadata.listEnvironments).find(
+            (entry) => entry.registrationId === target.registrationId,
+          );
+          if (current !== undefined && current.environmentId !== target.environmentId)
+            return yield* new SourceFailure({ reason: "identity" });
+          if (
+            current === undefined ||
+            !isEnabled(current) ||
+            current.endpoint !== reference.endpoint ||
+            owner.state.config !== config
+          )
+            return yield* new SourceFailure({ reason: "unavailable" });
+          yield* checkCurrent;
+        }),
         shell,
         closed,
         acknowledgeShell: (sequence) =>

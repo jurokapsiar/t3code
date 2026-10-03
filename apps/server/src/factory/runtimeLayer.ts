@@ -14,6 +14,7 @@ import * as Overview from "./Overview.ts";
 import * as Connections from "./Connections.ts";
 import * as NodeSource from "./NodeSource.ts";
 import * as SourceShell from "./SourceShell.ts";
+import * as RelayPolicy from "./RelayPolicy.ts";
 
 export class FactoryRuntime extends Context.Service<
   FactoryRuntime,
@@ -23,6 +24,7 @@ export class FactoryRuntime extends Context.Service<
     readonly getConnections: Effect.Effect<Connections.Connections["Service"], FactoryError>;
     readonly getSourceShell: Effect.Effect<SourceShell.SourceShell["Service"], FactoryError>;
     readonly getOverview: Effect.Effect<Overview.Overview["Service"], FactoryError>;
+    readonly getRelayPolicy: Effect.Effect<RelayPolicy.RelayPolicy["Service"], FactoryError>;
     readonly getEnrollment: Effect.Effect<
       Enrollment.Enrollment["Service"],
       FactoryError | CredentialStore.CredentialStoreError | Enrollment.SourceCredentialExchangeError
@@ -52,6 +54,7 @@ export const layer = ({
           getConnections: Effect.fail(disabledError),
           getSourceShell: Effect.fail(disabledError),
           getOverview: Effect.fail(disabledError),
+          getRelayPolicy: Effect.fail(disabledError),
           getEnrollment: Effect.fail(disabledError),
         });
       }
@@ -75,6 +78,7 @@ export const layer = ({
         ),
       );
       const overviewLayer = Overview.layer.pipe(Layer.provideMerge(enrollmentLayer));
+      const relayPolicyLayer = RelayPolicy.layer.pipe(Layer.provideMerge(overviewLayer));
 
       return Layer.effect(
         FactoryRuntime,
@@ -84,6 +88,7 @@ export const layer = ({
           const connections = yield* Connections.Connections;
           const sourceShell = yield* SourceShell.SourceShell;
           const overview = yield* Overview.Overview;
+          const relayPolicy = yield* RelayPolicy.RelayPolicy;
           yield* connections.start;
           yield* sourceShell.start;
           yield* overview.start;
@@ -101,9 +106,10 @@ export const layer = ({
             getConnections: Effect.succeed(connections),
             getSourceShell: Effect.succeed(sourceShell),
             getOverview: Effect.succeed(overview),
+            getRelayPolicy: Effect.succeed(relayPolicy),
             getEnrollment: Effect.succeed(enrollment),
           };
         }),
-      ).pipe(Layer.provide(overviewLayer));
+      ).pipe(Layer.provide(relayPolicyLayer));
     }),
   );

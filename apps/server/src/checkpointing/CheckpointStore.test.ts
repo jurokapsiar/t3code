@@ -18,6 +18,7 @@ import * as CheckpointStore from "./CheckpointStore.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as ServerConfig from "../config.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 
 const ServerConfigLayer = ServerConfig.ServerConfig.layerTest(process.cwd(), {
   prefix: "t3-checkpoint-store-test-",
@@ -29,6 +30,7 @@ const CheckpointStoreTestLayer = CheckpointStore.layer.pipe(
   Layer.provideMerge(NodeServices.layer),
 );
 const TestLayer = CheckpointStoreTestLayer.pipe(
+  Layer.provideMerge(GitVcsDriver.layer),
   Layer.provideMerge(VcsProcessTestLayer),
   Layer.provideMerge(VcsDriverTestLayer),
   Layer.provideMerge(ServerConfigLayer),
@@ -128,6 +130,42 @@ it.layer(TestLayer)("CheckpointStore.layer", (it) => {
     }),
   );
   describe("diffCheckpoints", () => {
+    it.effect(
+      "keeps current workspace edits separate from immutable checkpoint diffs without an agent event",
+      () =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTmpDir();
+          yield* initRepoWithCommit(cwd);
+          const store = yield* CheckpointStore.CheckpointStore;
+          const gitDriver = yield* GitVcsDriver.GitVcsDriver;
+          const fromCheckpointRef = checkpointRefForThreadTurn(ThreadId.make("factory-diff"), 0);
+          const toCheckpointRef = checkpointRefForThreadTurn(ThreadId.make("factory-diff"), 1);
+          yield* store.captureCheckpoint({ cwd, checkpointRef: fromCheckpointRef });
+          yield* writeTextFile(NodePath.join(cwd, "README.md"), "checkpoint edit\n");
+          yield* store.captureCheckpoint({ cwd, checkpointRef: toCheckpointRef });
+          const checkpoint = yield* store.diffCheckpoints({
+            cwd,
+            fromCheckpointRef,
+            toCheckpointRef,
+            ignoreWhitespace: false,
+          });
+          expect(checkpoint).toContain("+checkpoint edit");
+          yield* writeTextFile(NodePath.join(cwd, "README.md"), "current edit\n");
+          const current = yield* gitDriver.getReviewDiffPreview({ cwd });
+          const workingTree = current.sources.find((source) => source.kind === "working-tree");
+          expect(workingTree?.diff).toContain("+current edit");
+          expect(workingTree?.diff).not.toContain("+checkpoint edit");
+          expect(
+            yield* store.diffCheckpoints({
+              cwd,
+              fromCheckpointRef,
+              toCheckpointRef,
+              ignoreWhitespace: false,
+            }),
+          ).toBe(checkpoint);
+        }),
+    );
+
     it.effect("returns full oversized checkpoint diffs without truncation", () =>
       Effect.gen(function* () {
         const tmp = yield* makeTmpDir();

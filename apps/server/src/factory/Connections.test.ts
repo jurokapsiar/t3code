@@ -165,6 +165,26 @@ const harness = Effect.gen(function* () {
   };
 });
 
+it.effect("keeps source grants internal and invalidates an issued lease at credential expiry", () =>
+  Effect.gen(function* () {
+    const h = yield* harness;
+    yield* h.register();
+    yield* h.connections.start;
+    const first = yield* Queue.take(h.fake.attempts);
+    yield* first.ready(config());
+    yield* h.wait("a", "online");
+    const access = yield* h.connections.resolveTarget(target());
+    expect(access.sourceScopes).toEqual(["orchestration:read"]);
+    yield* access.checkCurrent;
+    for (const state of yield* h.connections.getStates)
+      expect(state).not.toHaveProperty("sourceScopes");
+    yield* TestClock.adjust("30 days");
+    expect(yield* Effect.flip(access.checkCurrent)).toMatchObject({
+      reason: expect.stringMatching(/authentication|unavailable/),
+    });
+  }),
+);
+
 it.effect("wakes a blocked registration through its enabled lifecycle", () =>
   Effect.gen(function* () {
     const h = yield* harness;
