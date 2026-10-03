@@ -463,6 +463,7 @@ const make = Effect.gen(function* () {
           credentialStorage: null,
           credentialExpiresAt: null,
           renewal: "unsupported",
+          cleanupPending: false,
           lastSeenAt: null,
           revision: 0,
         }));

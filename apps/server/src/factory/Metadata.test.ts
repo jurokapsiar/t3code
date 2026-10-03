@@ -63,6 +63,7 @@ const environment = (registrationId: string, environmentId: string) =>
     credentialStorage: null,
     credentialExpiresAt: null,
     renewal: "unsupported",
+    cleanupPending: false,
     lastSeenAt: null,
     revision: 0,
   });
@@ -143,6 +144,33 @@ metadataLayer("Factory metadata", (it) => {
           ?.renewal,
       ).toBe("failed");
       expect(yield* encodeJson(snapshot)).not.toContain("opaque-reference");
+    }),
+  );
+
+  it.effect("publishes cleanup pending separately from renewal failure", () =>
+    Effect.gen(function* () {
+      const metadata = yield* Metadata.Metadata;
+      const pending = environment("registration-cleanup", "environment-cleanup");
+      yield* metadata.createEnvironment(pending);
+      yield* metadata.markEnrollment({
+        registrationId: pending.registrationId,
+        credentialStorage: "secure-vault",
+        credentialItemKey: "opaque-reference",
+        credentialExpiresAt: null,
+      });
+
+      const updated = yield* metadata.setRenewalStatus(
+        pending.registrationId,
+        "ready",
+        undefined,
+        true,
+      );
+
+      expect(updated).toMatchObject({ renewal: "ready", cleanupPending: true });
+      expect((yield* metadata.getSnapshot).environments[0]).toMatchObject({
+        renewal: "ready",
+        cleanupPending: true,
+      });
     }),
   );
 

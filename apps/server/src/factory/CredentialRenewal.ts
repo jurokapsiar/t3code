@@ -70,7 +70,11 @@ const make = Effect.gen(function* () {
     registrationId: FactoryRegistrationId,
     status: FactoryRenewalState,
     expiresAt?: DateTime.DateTime,
-  ) => metadata.setRenewalStatus(registrationId, status, expiresAt).pipe(Effect.asVoid);
+    cleanupPending?: boolean,
+  ) =>
+    metadata
+      .setRenewalStatus(registrationId, status, expiresAt, cleanupPending)
+      .pipe(Effect.asVoid);
 
   const clearSchedule = (registrationId: FactoryRegistrationId) =>
     Ref.update(schedules, (current) => {
@@ -89,10 +93,12 @@ const make = Effect.gen(function* () {
   const retryAt = (registrationId: FactoryRegistrationId) =>
     Ref.get(retries).pipe(Effect.map((current) => current.get(registrationId)?.retryAtMs ?? 0));
 
-  const recordFailure = (
+  const recordRetry = (
     registrationId: FactoryRegistrationId,
     nowMs: number,
     expiresAt: DateTime.DateTime,
+    cleanupPending = false,
+    status: FactoryRenewalState = "failed",
   ) =>
     Ref.update(retries, (current) => {
       const previous = current.get(registrationId);
@@ -101,7 +107,7 @@ const make = Effect.gen(function* () {
       const next = new Map(current);
       next.set(registrationId, { attempt, retryAtMs: nowMs + delay });
       return next;
-    }).pipe(Effect.andThen(updateStatus(registrationId, "failed", expiresAt)));
+    }).pipe(Effect.andThen(updateStatus(registrationId, status, expiresAt, cleanupPending)));
 
   const getSchedule = (input: {
     readonly registrationId: FactoryRegistrationId;
@@ -152,15 +158,15 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const predecessorId = input.credential.predecessorCleanupId;
       if (predecessorId === undefined) {
-        yield* updateStatus(input.registrationId, "failed", input.credential.expiresAt);
+        yield* updateStatus(input.registrationId, "ready", input.credential.expiresAt, true);
         return;
       }
       if (!input.credential.scopes.includes(AuthAccessWriteScope)) {
-        yield* updateStatus(input.registrationId, "failed", input.credential.expiresAt);
+        yield* updateStatus(input.registrationId, "ready", input.credential.expiresAt, true);
         return;
       }
       if ((yield* retryAt(input.registrationId)) > input.nowMs) {
-        yield* updateStatus(input.registrationId, "failed", input.credential.expiresAt);
+        yield* updateStatus(input.registrationId, "ready", input.credential.expiresAt, true);
         return;
       }
       const revoked = yield* source
@@ -174,7 +180,13 @@ const make = Effect.gen(function* () {
           Effect.catchTag("SourceCredentialExchangeError", () => Effect.succeed(false)),
         );
       if (!revoked) {
-        yield* recordFailure(input.registrationId, input.nowMs, input.credential.expiresAt);
+        yield* recordRetry(
+          input.registrationId,
+          input.nowMs,
+          input.credential.expiresAt,
+          true,
+          "ready",
+        );
         return;
       }
       const cleanCredential = withoutCleanup(input.credential);
@@ -183,11 +195,17 @@ const make = Effect.gen(function* () {
         Effect.catchTag("CredentialStoreError", () => Effect.succeed(false)),
       );
       if (!saved) {
-        yield* recordFailure(input.registrationId, input.nowMs, input.credential.expiresAt);
+        yield* recordRetry(
+          input.registrationId,
+          input.nowMs,
+          input.credential.expiresAt,
+          true,
+          "ready",
+        );
         return;
       }
       yield* clearRetry(input.registrationId);
-      yield* updateStatus(input.registrationId, "ready", input.credential.expiresAt);
+      yield* updateStatus(input.registrationId, "ready", input.credential.expiresAt, false);
     });
 
   const renewCredential = (input: {
@@ -196,10 +214,16 @@ const make = Effect.gen(function* () {
     readonly itemKey: string;
     readonly credential: CredentialStore.StoredCredential;
     readonly nowMs: number;
+    readonly cleanupPending: boolean;
   }) =>
     Effect.gen(function* () {
       if ((yield* retryAt(input.registrationId)) > input.nowMs) {
-        yield* updateStatus(input.registrationId, "failed", input.credential.expiresAt);
+        yield* updateStatus(
+          input.registrationId,
+          "failed",
+          input.credential.expiresAt,
+          input.cleanupPending,
+        );
         return;
       }
       const replacement = yield* source
@@ -209,7 +233,12 @@ const make = Effect.gen(function* () {
           Effect.catchTag("SourceCredentialExchangeError", () => Effect.succeedNone),
         );
       if (Option.isNone(replacement)) {
-        yield* recordFailure(input.registrationId, input.nowMs, input.credential.expiresAt);
+        yield* recordRetry(
+          input.registrationId,
+          input.nowMs,
+          input.credential.expiresAt,
+          input.cleanupPending,
+        );
         return;
       }
       const nextCredential = replacement.value;
@@ -217,7 +246,12 @@ const make = Effect.gen(function* () {
         nextCredential.scopes.length === 0 ||
         nextCredential.scopes.some((scope) => !input.credential.scopes.includes(scope))
       ) {
-        yield* recordFailure(input.registrationId, input.nowMs, input.credential.expiresAt);
+        yield* recordRetry(
+          input.registrationId,
+          input.nowMs,
+          input.credential.expiresAt,
+          input.cleanupPending,
+        );
         return;
       }
       const cleanupPermitted =
@@ -234,17 +268,18 @@ const make = Effect.gen(function* () {
         Effect.catchTag("CredentialStoreError", () => Effect.succeed(false)),
       );
       if (!saved) {
-        yield* recordFailure(input.registrationId, input.nowMs, input.credential.expiresAt);
+        yield* recordRetry(
+          input.registrationId,
+          input.nowMs,
+          input.credential.expiresAt,
+          input.cleanupPending,
+        );
         return;
       }
       yield* clearSchedule(input.registrationId);
       yield* clearRetry(input.registrationId);
       yield* PubSub.publish(renewed, input.registrationId);
-      yield* updateStatus(
-        input.registrationId,
-        cleanupPermitted ? "ready" : "failed",
-        nextCredential.expiresAt,
-      );
+      yield* updateStatus(input.registrationId, "ready", nextCredential.expiresAt, true);
       if (!cleanupPermitted) return;
       yield* cleanupPredecessor({
         registrationId: input.registrationId,
@@ -306,7 +341,12 @@ const make = Effect.gen(function* () {
         return;
       }
       if (credential.renewalSupported !== true) {
-        yield* updateStatus(environment.registrationId, "unsupported", credential.expiresAt);
+        yield* updateStatus(
+          environment.registrationId,
+          "unsupported",
+          credential.expiresAt,
+          cleanupPending,
+        );
         return;
       }
       const schedule = yield* getSchedule({
@@ -317,22 +357,20 @@ const make = Effect.gen(function* () {
       if (schedule.dueAtMs > nowMs) {
         yield* updateStatus(
           environment.registrationId,
-          cleanupPending ? "failed" : "ready",
+          "ready",
           credential.expiresAt,
+          cleanupPending,
         );
         return;
       }
-      yield* updateStatus(
-        environment.registrationId,
-        cleanupPending ? "failed" : "due",
-        credential.expiresAt,
-      );
+      yield* updateStatus(environment.registrationId, "due", credential.expiresAt, cleanupPending);
       yield* renewCredential({
         registrationId: environment.registrationId,
         endpoint: environment.endpoint,
         itemKey: credentialItemKey,
         credential,
         nowMs,
+        cleanupPending,
       });
     });
 

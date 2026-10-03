@@ -23,6 +23,7 @@ import {
 } from "./factory.ts";
 
 const decodeThreadSummary = Schema.decodeSync(FactoryThreadSummary);
+const decodeFactoryEnvironment = Schema.decodeUnknownSync(FactoryEnvironmentView);
 const decodeOverviewPatch = Schema.decodeUnknownSync(FactoryOverviewPatch);
 const decodeOverviewSnapshot = Schema.decodeSync(FactoryOverviewSnapshot);
 const decodeOverviewEvent = Schema.decodeUnknownSync(FactoryOverviewEvent);
@@ -78,6 +79,27 @@ describe("factory contracts", () => {
     expect("archivedAt" in FactoryThreadSummary.fields).toBe(false);
     expect("credential" in FactoryEnvironmentView.fields).toBe(false);
     expect("sourceCredential" in FactoryEnvironmentView.fields).toBe(false);
+  });
+
+  it("reports cleanup pending without changing the replacement credential status", () => {
+    const environment = decodeFactoryEnvironment({
+      registrationId: "registration-a",
+      environmentId: "source-a",
+      endpoint: "https://source.example",
+      label: "Source",
+      platform: null,
+      enabled: true,
+      state: "offline",
+      credentialStorage: "secure-vault",
+      credentialExpiresAt: null,
+      renewal: "ready",
+      cleanupPending: true,
+      lastSeenAt: null,
+      revision: 0,
+    });
+
+    expect(environment.renewal).toBe("ready");
+    expect(environment.cleanupPending).toBe(true);
   });
 
   it("requires metadata patches to replace memberships and favorites together", () => {
