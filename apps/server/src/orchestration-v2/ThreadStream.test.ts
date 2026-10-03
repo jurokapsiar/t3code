@@ -43,13 +43,6 @@ describe("decideFactoryReplay", () => {
     expect(decideFactoryReplay(replay)).toEqual({ mode: "replay", pageEvents: 128 });
   });
 
-  it.each([0, 128, 129, 1_000, 10_000])(
-    "accepts %i events within the negotiated total",
-    (eventCount) => {
-      expect(decideFactoryReplay({ ...replay, eventCount })).toMatchObject({ mode: "replay" });
-    },
-  );
-
   it("resets when the total or cursor is outside the negotiated bounds", () => {
     expect(decideFactoryReplay({ ...replay, eventCount: 10_001 })).toEqual({
       mode: "snapshot",

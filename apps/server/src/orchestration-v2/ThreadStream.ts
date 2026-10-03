@@ -4,6 +4,9 @@ import type {
   OrchestrationV2ReplayResetReason,
 } from "@t3tools/contracts";
 
+import * as Effect from "effect/Effect";
+import * as Stream from "effect/Stream";
+
 import { buildBoundedThreadProjection } from "./threadHistoryPaging.ts";
 import { projectThreadProjectionForWire } from "./WireProjection.ts";
 
@@ -134,6 +137,130 @@ export function decideFactoryReplay(input: {
     return { mode: "snapshot", reason: "oversized-event" };
   }
   return { mode: "replay", pageEvents: FACTORY_REPLAY_PAGE_EVENTS };
+}
+
+export type FactoryReplayPage<A> = {
+  readonly events: ReadonlyArray<A>;
+  readonly hasMore: boolean;
+  readonly oversized: boolean;
+  readonly decodeFailed: boolean;
+};
+
+export type FactoryReplayStats = {
+  readonly eventCount: number;
+  readonly largestRawEventBytes: number;
+  readonly hasCreateEvent?: boolean;
+};
+
+/** Read negotiated pages while keeping each SQL read and projected batch within budget. */
+export function createFactoryReplayPages<
+  A extends { readonly sequence: number },
+  B,
+  ERead,
+  RRead,
+  EProject,
+  RProject,
+  EResetStream,
+  RResetStream,
+  EReset,
+  RReset,
+  ECompletion,
+  RCompletion,
+  ELive,
+  RLive,
+>(input: {
+  readonly afterSequence: number;
+  readonly highWater: number;
+  readonly readPage: (
+    cursor: number,
+    throughSequence: number,
+  ) => Effect.Effect<FactoryReplayPage<A>, ERead, RRead>;
+  readonly project: (
+    events: ReadonlyArray<A>,
+  ) => Effect.Effect<ReadonlyArray<B>, EProject, RProject>;
+  /** Returns the complete snapshot, synchronized marker, and live tail. */
+  readonly reset: (
+    reason: OrchestrationV2ReplayResetReason,
+  ) => Effect.Effect<Stream.Stream<B, EResetStream, RResetStream>, EReset, RReset>;
+  readonly completionMarker: Stream.Stream<B, ECompletion, RCompletion>;
+  readonly live: Stream.Stream<B, ELive, RLive>;
+}): Stream.Stream<
+  B,
+  ERead | EProject | EResetStream | EReset | ECompletion | ELive,
+  RRead | RProject | RResetStream | RReset | RCompletion | RLive
+> {
+  type ReplayError = ERead | EProject | EResetStream | EReset | ECompletion | ELive;
+  type ReplayContext = RRead | RProject | RResetStream | RReset | RCompletion | RLive;
+  const replayPages = (cursor: number): Stream.Stream<B, ReplayError, ReplayContext> =>
+    Stream.unwrap(
+      input.readPage(cursor, input.highWater).pipe(
+        Effect.flatMap((page) => {
+          if (page.decodeFailed) return input.reset("decode-failure");
+          if (page.oversized) return input.reset("oversized-event");
+          return input.project(page.events).pipe(
+            Effect.flatMap((items) => {
+              const bounded = chunkFactoryReplayPage(items);
+              if (bounded.mode === "snapshot") return input.reset(bounded.reason);
+              if (page.hasMore && page.events.length === 0) return input.reset("invalid-cursor");
+              const nextCursor = page.events.at(-1)?.sequence;
+              const next =
+                page.hasMore && nextCursor !== undefined
+                  ? replayPages(nextCursor)
+                  : Stream.concat(input.completionMarker, input.live);
+              return Effect.succeed(
+                Stream.concat(
+                  Stream.fromIterable(bounded.pages).pipe(
+                    Stream.flatMap((batch) => Stream.fromIterable(batch)),
+                  ),
+                  next,
+                ),
+              );
+            }),
+          );
+        }),
+      ),
+    );
+
+  return replayPages(input.afterSequence);
+}
+
+/** Run the negotiated replay path used by websocket subscriptions. */
+export function createFactoryReplayStream<A extends { readonly sequence: number }, B, E, R>(input: {
+  readonly afterSequence: number;
+  readonly highWater: number;
+  readonly getStats: () => Effect.Effect<FactoryReplayStats, E, R>;
+  readonly readPage: (
+    cursor: number,
+    throughSequence: number,
+  ) => Effect.Effect<FactoryReplayPage<A>, E, R>;
+  readonly checkStats?: (
+    stats: FactoryReplayStats,
+  ) => Effect.Effect<OrchestrationV2ReplayResetReason | undefined, E, R>;
+  readonly project: (events: ReadonlyArray<A>) => Effect.Effect<ReadonlyArray<B>, E, R>;
+  /** Returns the complete snapshot, synchronized marker, and live tail. */
+  readonly reset: (
+    reason: OrchestrationV2ReplayResetReason,
+  ) => Effect.Effect<Stream.Stream<B, E, R>, E, R>;
+  readonly completionMarker: Stream.Stream<B, E, R>;
+  readonly live: Stream.Stream<B, E, R>;
+}): Effect.Effect<Stream.Stream<B, E, R>, E, R> {
+  const replayPages = createFactoryReplayPages(input);
+
+  return Effect.gen(function* () {
+    const stats = yield* input.getStats();
+    const plan = decideFactoryReplay({
+      negotiated: true,
+      afterSequence: input.afterSequence,
+      highWater: input.highWater,
+      eventCount: stats.eventCount,
+      largestRawEventBytes: stats.largestRawEventBytes,
+      largestEncodedEventBytes: 0,
+    });
+    if (plan.mode === "snapshot") return yield* input.reset(plan.reason);
+    const resetReason = yield* input.checkStats?.(stats) ?? Effect.succeed(undefined);
+    if (resetReason !== undefined) return yield* input.reset(resetReason);
+    return replayPages;
+  });
 }
 
 export type ThreadResumePlan =
