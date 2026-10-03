@@ -193,6 +193,12 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
       desktop servers whose app predates the remote trigger, where clients
       must keep telling the user to update the app on that machine. */
   desktopAppUpdate: Schema.optionalKey(Schema.Boolean),
+  /** This server accepts factory-owned RPCs. Absent on older servers. */
+  factory: Schema.optionalKey(Schema.Boolean),
+  /** This server can renew source sessions stored by its factory. */
+  factoryRenewal: Schema.optionalKey(Schema.Boolean),
+  /** This server negotiates bounded batched replay for source streams. */
+  batchedReplay: Schema.optionalKey(Schema.Boolean),
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;
 
@@ -203,6 +209,8 @@ export const ExecutionEnvironmentDescriptor = Schema.Struct({
   serverVersion: TrimmedNonEmptyString,
   /** Absent on hosts from before explicit orchestration protocol negotiation. */
   orchestrationProtocolVersion: Schema.optionalKey(Schema.Int),
+  /** Absent on hosts that predate the factory protocol. */
+  factoryProtocolVersion: Schema.optionalKey(Schema.Int),
   capabilities: ExecutionEnvironmentCapabilities,
 });
 export type ExecutionEnvironmentDescriptor = typeof ExecutionEnvironmentDescriptor.Type;

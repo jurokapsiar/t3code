@@ -9,6 +9,21 @@ import {
 import * as Schema from "effect/Schema";
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
+import {
+  FactoryEnvironmentsEnrollRpc,
+  FactoryEnvironmentsListRpc,
+  FactoryEnvironmentsUpdateRpc,
+  FactoryEnvironmentsRemoveRpc,
+  FactoryFavoritesReorderRpc,
+  FactoryFavoritesSetRpc,
+  FactoryGroupsAssignRpc,
+  FactoryGroupsCreateRpc,
+  FactoryGroupsDeleteRpc,
+  FactoryGroupsListRpc,
+  FactoryGroupsUnassignRpc,
+  FactoryGroupsUpdateRpc,
+  FactoryOverviewSubscribeRpc,
+} from "./factoryRpc.ts";
 import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import {
   CodexAuthCallbackInput,
@@ -1856,4 +1871,17 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationV2SubscribeArchivedShellRpc,
   WsOrchestrationV2SubscribeShellRpc,
   WsOrchestrationV2SubscribeThreadRpc,
+  FactoryEnvironmentsListRpc,
+  FactoryEnvironmentsEnrollRpc,
+  FactoryEnvironmentsUpdateRpc,
+  FactoryEnvironmentsRemoveRpc,
+  FactoryGroupsListRpc,
+  FactoryGroupsCreateRpc,
+  FactoryGroupsUpdateRpc,
+  FactoryGroupsDeleteRpc,
+  FactoryGroupsAssignRpc,
+  FactoryGroupsUnassignRpc,
+  FactoryFavoritesSetRpc,
+  FactoryFavoritesReorderRpc,
+  FactoryOverviewSubscribeRpc,
 );
