@@ -162,16 +162,16 @@ const makeHarness = (
           const stored = credentials.get(reference);
           expect(stored?.token).toBe(newToken);
           expect(stored?.predecessorCleanupId).toBe(oldSessionId);
+          if (revokeFailuresRemaining > 0) {
+            revokeFailuresRemaining -= 1;
+            return yield* new Enrollment.SourceCredentialExchangeError({ operation: "revoke" });
+          }
           const predecessor = remoteSessions.get(input.sessionId)!;
           const revoked = !predecessor.revoked;
           if (revoked) predecessor.revoked = true;
           revokeResults.push(revokeLostResponsesRemaining > 0 ? "response-lost" : revoked);
           if (revokeLostResponsesRemaining > 0) {
             revokeLostResponsesRemaining -= 1;
-            return yield* new Enrollment.SourceCredentialExchangeError({ operation: "revoke" });
-          }
-          if (revokeFailuresRemaining > 0) {
-            revokeFailuresRemaining -= 1;
             return yield* new Enrollment.SourceCredentialExchangeError({ operation: "revoke" });
           }
           return { revoked };
@@ -400,11 +400,44 @@ it.layer(
 
       expect(stored?.token).toBe(newToken);
       expect(stored?.predecessorCleanupId).toBe(oldSessionId);
+      expect(harness.remoteSessions.get(oldSessionId)?.revoked).toBe(false);
+      expect(harness.revokeResults).toEqual([]);
       expect((yield* harness.metadata.listEnvironments)[0]).toMatchObject({
         renewal: "ready",
         cleanupPending: true,
       });
     }).pipe(Effect.provide(TestClock.layer()), Random.withSeed("renewal-cleanup-failure")),
+  );
+
+  it.effect("retries a pre-commit revoke failure while retaining the stored replacement", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(18 * DAY_MS);
+      const harness = yield* makeHarness({ revokeFailureCount: 1 });
+      yield* harness.renewal.runOnce;
+
+      expect(harness.credentials.get(reference)?.token).toBe(newToken);
+      expect(harness.credentials.get(reference)?.predecessorCleanupId).toBe(oldSessionId);
+      expect(harness.remoteSessions.get(oldSessionId)?.revoked).toBe(false);
+      expect(harness.revokeResults).toEqual([]);
+      expect((yield* harness.metadata.listEnvironments)[0]).toMatchObject({
+        renewal: "ready",
+        cleanupPending: true,
+      });
+
+      yield* TestClock.adjust("30 seconds");
+      yield* harness.renewal.runOnce;
+
+      expect(harness.credentials.get(reference)?.token).toBe(newToken);
+      expect(harness.credentials.get(reference)?.predecessorCleanupId).toBeUndefined();
+      expect(harness.remoteSessions.get(oldSessionId)?.revoked).toBe(true);
+      expect(harness.calls.filter((call) => call === "issue")).toHaveLength(1);
+      expect(harness.calls.filter((call) => call === "revoke")).toHaveLength(2);
+      expect(harness.revokeResults).toEqual([true]);
+      expect((yield* harness.metadata.listEnvironments)[0]).toMatchObject({
+        renewal: "ready",
+        cleanupPending: false,
+      });
+    }).pipe(Effect.provide(TestClock.layer()), Random.withSeed("renewal-pre-commit-revoke")),
   );
 
   it.effect("retries predecessor cleanup after service restart without falling back", () =>
