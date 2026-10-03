@@ -75,6 +75,18 @@ const FactoryProjectMembershipInput = Schema.Struct({
   project: FactoryProjectKey,
 });
 
+export const FactoryEnrollmentCredential = Schema.String.check(Schema.isNonEmpty()).annotate({
+  description: "Sensitive, short-lived source credential. Use only for enrollment.",
+});
+export type FactoryEnrollmentCredential = typeof FactoryEnrollmentCredential.Type;
+
+export const FactoryEnvironmentEnrollInput = Schema.Struct({
+  endpoint: FactoryEndpoint,
+  label: TrimmedNonEmptyString,
+  sourceCredential: FactoryEnrollmentCredential,
+});
+export type FactoryEnvironmentEnrollInput = typeof FactoryEnvironmentEnrollInput.Type;
+
 export const FactoryEnvironmentsListRpc = Rpc.make(FactoryRpcMethods.environmentsList, {
   payload: EmptyInput,
   success: Schema.Array(FactoryEnvironmentView),
@@ -82,10 +94,7 @@ export const FactoryEnvironmentsListRpc = Rpc.make(FactoryRpcMethods.environment
 });
 
 export const FactoryEnvironmentsEnrollRpc = Rpc.make(FactoryRpcMethods.environmentsEnroll, {
-  payload: Schema.Struct({
-    endpoint: FactoryEndpoint,
-    label: TrimmedNonEmptyString,
-  }),
+  payload: FactoryEnvironmentEnrollInput,
   success: FactoryEnvironmentView,
   error: FactoryRpcError,
 });

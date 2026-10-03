@@ -3,9 +3,19 @@ import * as RpcSchema from "effect/unstable/rpc/RpcSchema";
 import * as Schema from "effect/Schema";
 
 import { AuthSourceMethodScope } from "./auth.ts";
-import { FactoryRelayScope, FactoryRpcGroup, FactoryRpcMethodScopes } from "./factoryRpc.ts";
+import { FactoryEnvironmentView } from "./factory.ts";
+import {
+  FactoryEnvironmentsEnrollRpc,
+  FactoryRelayScope,
+  FactoryRpcGroup,
+  FactoryRpcMethodScopes,
+} from "./factoryRpc.ts";
 
 const decodeFactoryRelayScope = Schema.decodeSync(FactoryRelayScope);
+const decodeEnrollmentInput = Schema.decodeSync(FactoryEnvironmentsEnrollRpc.payloadSchema);
+const decodeEnrollmentInputExit = Schema.decodeUnknownExit(
+  FactoryEnvironmentsEnrollRpc.payloadSchema,
+);
 
 describe("FactoryRpcGroup", () => {
   it("declares factory-owned metadata, enrollment, favorites, and overview methods", () => {
@@ -42,15 +52,24 @@ describe("FactoryRpcGroup", () => {
     }
   });
 
-  it("uses typed, secret-free enrollment input and a streaming overview", () => {
-    const enroll = FactoryRpcGroup.requests.get("factory.environments.enroll");
-    const overview = FactoryRpcGroup.requests.get("factory.overview.subscribe");
-    if (enroll === undefined || overview === undefined) {
-      throw new Error("Required factory RPC declarations are missing");
-    }
+  it("accepts a short-lived credential only as enrollment input", () => {
+    const input = {
+      endpoint: "https://source.example",
+      label: "Source",
+      sourceCredential: "short-lived-credential",
+    };
+    expect(decodeEnrollmentInput(input)).toEqual(input);
+    expect("sourceCredential" in FactoryEnvironmentView.fields).toBe(false);
+    expect("token" in FactoryEnvironmentView.fields).toBe(false);
+    expect(
+      decodeEnrollmentInputExit({ endpoint: input.endpoint, label: input.label }),
+    ).toMatchObject({ _tag: "Failure" });
+  });
 
-    expect("sourceCredential" in enroll.payloadSchema.fields).toBe(false);
-    expect("token" in enroll.payloadSchema.fields).toBe(false);
+  it("uses a streaming overview", () => {
+    const overview = FactoryRpcGroup.requests.get("factory.overview.subscribe");
+    if (overview === undefined) throw new Error("Overview RPC declaration is missing");
+
     expect(RpcSchema.isStreamSchema(overview.successSchema)).toBe(true);
   });
 });

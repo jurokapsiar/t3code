@@ -39,6 +39,12 @@ describe("WebSocket RPC contracts", () => {
     expect(methods.filter((method) => method.startsWith("orchestrationV1."))).toEqual([]);
   });
 
+  it("keeps factory methods out of the source WebSocket group until handlers exist", () => {
+    expect(
+      [...WsRpcGroup.requests.keys()].filter((method) => method.startsWith("factory.")),
+    ).toEqual([]);
+  });
+
   it("rejects server-internal commands sent to dispatchCommand", () => {
     const dispatchCommand = WsRpcGroup.requests.get(ORCHESTRATION_V2_WS_METHODS.dispatchCommand);
     if (dispatchCommand === undefined) throw new Error("dispatchCommand is not registered");
