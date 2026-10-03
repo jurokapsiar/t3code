@@ -530,8 +530,11 @@ const streamStaticFile = (file: FileSystem.File, size: bigint) =>
     }),
   );
 
-const handleStaticAndDevRequest = Effect.fn("handleStaticAndDevRequest")(
-  function* (immutableBuildAssets: ReadonlySet<string>) {
+export const handleStaticAndDevRequest = Effect.fn("handleStaticAndDevRequest")(
+  function* (
+    immutableBuildAssets: ReadonlySet<string>,
+    mount?: { readonly directory: string; readonly prefix: string },
+  ) {
     const request = yield* HttpServerRequest.HttpServerRequest;
     const url = HttpServerRequest.toURL(request);
 
@@ -540,19 +543,28 @@ const handleStaticAndDevRequest = Effect.fn("handleStaticAndDevRequest")(
     }
 
     const config = yield* ServerConfig.ServerConfig;
-    if (config.devUrl && isDevProxiedPath(url.value.pathname)) {
+    if (!mount && config.devUrl && isDevProxiedPath(url.value.pathname)) {
       return HttpServerResponse.text("Not Found", { status: 404 });
     }
 
-    const preserveFactoryPairingPage = config.factoryEnabled && url.value.pathname === "/pair";
-    if (config.devUrl && isLoopbackHostname(url.value.hostname) && !preserveFactoryPairingPage) {
+    const preserveFactoryPairingPage =
+      config.factoryEnabled &&
+      (url.value.pathname === "/pair" || url.value.pathname.startsWith("/assets/"));
+    if (
+      !mount &&
+      config.devUrl &&
+      isLoopbackHostname(url.value.hostname) &&
+      !preserveFactoryPairingPage
+    ) {
       return HttpServerResponse.redirect(resolveDevRedirectUrl(config.devUrl, url.value), {
         status: 302,
       });
     }
 
     const staticDir =
-      config.staticDir ?? (config.devUrl ? yield* ServerConfig.resolveStaticDir() : undefined);
+      mount?.directory ??
+      config.staticDir ??
+      (config.devUrl ? yield* ServerConfig.resolveStaticDir() : undefined);
     if (!staticDir) {
       return HttpServerResponse.text("No static directory configured and no dev URL set.", {
         status: 503,
@@ -561,7 +573,10 @@ const handleStaticAndDevRequest = Effect.fn("handleStaticAndDevRequest")(
 
     const path = yield* Path.Path;
     const staticRoot = path.resolve(staticDir);
-    const staticRequestPath = url.value.pathname === "/" ? "/index.html" : url.value.pathname;
+    const pathname = mount
+      ? url.value.pathname.slice(mount.prefix.length) || "/"
+      : url.value.pathname;
+    const staticRequestPath = pathname === "/" ? "/index.html" : pathname;
     const rawStaticRelativePath = staticRequestPath.replace(/^[/\\]+/, "");
     const hasRawLeadingParentSegment = rawStaticRelativePath.startsWith("..");
     const staticRelativePath = path.normalize(rawStaticRelativePath).replace(/^[/\\]+/, "");
@@ -594,6 +609,8 @@ const handleStaticAndDevRequest = Effect.fn("handleStaticAndDevRequest")(
 
     let opened = yield* openStaticFile(filePath);
     if (!opened) {
+      if (mount && (ext || pathname.startsWith("/assets/")))
+        return HttpServerResponse.text("Not Found", { status: 404 });
       filePath = path.resolve(staticRoot, "index.html");
       opened = yield* openStaticFile(filePath);
       if (!opened) {

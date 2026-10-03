@@ -250,6 +250,7 @@ export default defineConfig(() => {
                 {
                   target: devProxyTarget,
                   changeOrigin: true,
+                  ...(prefix === "/factory" ? { xfwd: true } : {}),
                   ...(prefix === "/ws" || prefix === "/api" ? { ws: true } : {}),
                 },
               ]),

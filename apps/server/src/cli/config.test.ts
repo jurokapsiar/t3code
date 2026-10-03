@@ -49,6 +49,25 @@ it.layer(NodeServices.layer)("factory config", (it) => {
           ),
         );
 
+      const ui = yield* resolveServerConfig(
+        { ...flags, factoryUiDir: Option.some("./factory-dist") },
+        Option.none(),
+      ).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            ConfigProvider.layer(
+              ConfigProvider.fromEnv({ env: { T3CODE_FACTORY_UI_DIR: "/ignored" } }),
+            ),
+            NetService.layer,
+          ),
+        ),
+      );
+      expect(ui.factoryUiDir).toBe(`${process.cwd()}/factory-dist`);
+      const envUi = yield* resolve(Option.some(true), {
+        T3CODE_FACTORY_UI_DIR: "./environment-dist",
+      });
+      expect(envUi.factoryUiDir).toBe(`${process.cwd()}/environment-dist`);
+
       const disabled = yield* resolve(Option.none(), {});
       const enabled = yield* resolve(Option.none(), { T3CODE_FACTORY_ENABLED: "true" });
       const flagWins = yield* resolve(Option.some(false), { T3CODE_FACTORY_ENABLED: "true" });

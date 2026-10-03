@@ -4,6 +4,7 @@ import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Result from "effect/Result";
 import * as Etag from "effect/unstable/http/Etag";
 import * as HttpPlatform from "effect/unstable/http/HttpPlatform";
 import * as HttpApi from "effect/unstable/httpapi/HttpApi";
@@ -38,6 +39,7 @@ it.layer(
           ServerConfig.layer({
             ...config,
             factoryEnabled: true,
+            port: 3773,
             devUrl: new URL("http://localhost:5733"),
             staticDir,
           }),
@@ -61,25 +63,176 @@ it.layer(
     }),
   );
 
-  it.effect("serves the existing T3 bundle for factory hosting on the same origin", () =>
+  it.effect("mounts the opted-in Factory build without replacing T3 or reserved routes", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;
       const fs = yield* FileSystem.FileSystem;
-      const staticDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-factory-static-" });
-      yield* fs.writeFileString(`${staticDir}/index.html`, "T3 embedded application");
-      const appLayer = Layer.merge(factoryHttpRouteLayer, staticAndDevRouteLayer).pipe(
-        Layer.provideMerge(ServerConfig.layer({ ...config, factoryEnabled: true, staticDir })),
-        Layer.provideMerge(NodeServices.layer),
+      const staticDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-static-" });
+      const factoryUiDir = yield* fs.makeTempDirectoryScoped({ prefix: "factory-static-" });
+      yield* fs.writeFileString(`${staticDir}/index.html`, "T3 application");
+      yield* fs.makeDirectory(`${staticDir}/assets`);
+      yield* fs.writeFileString(`${staticDir}/assets/t3.js`, "T3 script");
+      yield* fs.writeFileString(
+        `${factoryUiDir}/index.html`,
+        '<script src="/factory/assets/main.js"></script>Factory application',
       );
-      const { handler, dispose } = HttpRouter.toWebHandler(appLayer, { disableLogger: true });
-      yield* Effect.addFinalizer(() => Effect.promise(() => dispose()));
+      yield* fs.makeDirectory(`${factoryUiDir}/assets`);
+      yield* fs.writeFileString(`${factoryUiDir}/assets/main.js`, "Factory script");
+      for (const devUrl of [undefined, new URL("http://localhost:5733")]) {
+        const { handler, dispose } = HttpRouter.toWebHandler(
+          Layer.merge(factoryHttpRouteLayer, staticAndDevRouteLayer).pipe(
+            Layer.provideMerge(
+              ServerConfig.layer({
+                ...config,
+                factoryEnabled: true,
+                staticDir,
+                factoryUiDir,
+                devUrl,
+              }),
+            ),
+            Layer.provideMerge(NodeServices.layer),
+          ),
+          { disableLogger: true },
+        );
+        yield* Effect.addFinalizer(() => Effect.promise(() => dispose()));
+        for (const [path, content] of [
+          ["/", "T3 application"],
+          ["/pair", "T3 application"],
+          ["/assets/t3.js", "T3 script"],
+          ["/factory", "Factory application"],
+          ["/factory/", "Factory application"],
+          ["/factory/projects/project", "Factory application"],
+          ["/factory/assets/main.js", "Factory script"],
+        ]) {
+          const response = yield* Effect.promise(() =>
+            handler(
+              new Request(`http://192.168.1.42:3773${path}`, {
+                headers: { host: "192.168.1.42:3773" },
+              }),
+            ),
+          );
+          expect(response.status).toBe(200);
+          expect(yield* Effect.promise(() => response.text())).toContain(content);
+        }
+        for (const path of [
+          "/factory/assets/missing.js",
+          "/factory/env",
+          "/factory/env/source/chat",
+          "/factory/bootstrap/missing",
+        ]) {
+          const response = yield* Effect.promise(() =>
+            handler(
+              new Request(`http://192.168.1.42:3773${path}`, {
+                headers: { host: "192.168.1.42:3773" },
+              }),
+            ),
+          );
+          expect(response.status).toBe(404);
+        }
+      }
+    }),
+  );
 
-      for (const path of ["/", "/factory"]) {
+  it.effect("preserves LAN and forwarded browser hosts and canonical pairing ports", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      for (const [devUrl, headers, expected] of [
+        [
+          new URL("http://localhost:5733"),
+          { host: "192.168.1.42:3773" },
+          "http://192.168.1.42:3773/pair",
+        ],
+        [
+          new URL("http://localhost:5733"),
+          {
+            host: "localhost:3773",
+            "x-forwarded-host": "192.168.1.42:3000",
+            "x-forwarded-proto": "http",
+          },
+          "http://192.168.1.42:3773/pair",
+        ],
+        [
+          new URL("http://localhost:5733"),
+          {
+            host: "localhost:3773",
+            "x-forwarded-host": "localhost:3000",
+            "x-forwarded-proto": "http",
+          },
+          "http://localhost:3773/pair",
+        ],
+        [
+          undefined,
+          {
+            host: "localhost:3773",
+            "x-forwarded-host": "factory.example.test",
+            "x-forwarded-proto": "https",
+          },
+          "https://factory.example.test/pair",
+        ],
+      ] as const) {
+        const { handler, dispose } = HttpRouter.toWebHandler(
+          factoryHttpRouteLayer.pipe(
+            Layer.provideMerge(
+              ServerConfig.layer({ ...config, factoryEnabled: true, port: 3773, devUrl }),
+            ),
+            Layer.provideMerge(NodeServices.layer),
+          ),
+          { disableLogger: true },
+        );
+        yield* Effect.addFinalizer(() => Effect.promise(() => dispose()));
         const response = yield* Effect.promise(() =>
-          handler(new Request(`http://localhost:3773${path}`)),
+          handler(new Request("http://localhost:3773/factory/bootstrap", { headers })),
         );
         expect(response.status).toBe(200);
-        expect(yield* Effect.promise(() => response.text())).toContain("T3 embedded application");
+        expect(yield* Effect.promise(() => response.json())).toEqual({ pairingUrl: expected });
+      }
+    }),
+  );
+
+  it.effect("fails startup with a typed error for a configured directory without a build", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const factoryUiDir = yield* fs.makeTempDirectoryScoped({ prefix: "empty-factory-ui-" });
+      const result = yield* HttpRouter.toHttpEffect(factoryHttpRouteLayer).pipe(
+        Effect.provide(ServerConfig.layer({ ...config, factoryEnabled: true, factoryUiDir })),
+        Effect.result,
+      );
+      expect(Result.isFailure(result)).toBe(true);
+      if (Result.isFailure(result))
+        expect(result.failure).toMatchObject({ _tag: "FactoryUiError" });
+    }),
+  );
+
+  it.effect("never falls back to T3 when Factory UI is absent or disabled", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const staticDir = yield* fs.makeTempDirectoryScoped({ prefix: "no-factory-ui-" });
+      yield* fs.writeFileString(`${staticDir}/index.html`, "T3 application");
+      for (const factoryEnabled of [false, true]) {
+        const { handler, dispose } = HttpRouter.toWebHandler(
+          Layer.merge(factoryHttpRouteLayer, staticAndDevRouteLayer).pipe(
+            Layer.provideMerge(
+              ServerConfig.layer({
+                ...config,
+                staticDir,
+                factoryEnabled,
+                ...(factoryEnabled ? {} : { factoryUiDir: "/missing/disabled-ui" }),
+              }),
+            ),
+            Layer.provideMerge(NodeServices.layer),
+          ),
+          { disableLogger: true },
+        );
+        yield* Effect.addFinalizer(() => Effect.promise(() => dispose()));
+        const response = yield* Effect.promise(() =>
+          handler(new Request("http://localhost:3773/factory/assets/main.js")),
+        );
+        expect(response.status).toBe(factoryEnabled ? 503 : 404);
+        expect(yield* Effect.promise(() => response.json())).toMatchObject({
+          _tag: factoryEnabled ? "FactoryUiError" : "FactoryError",
+        });
       }
     }),
   );
@@ -89,7 +242,12 @@ it.layer(
       const config = yield* ServerConfig.ServerConfig;
       const fs = yield* FileSystem.FileSystem;
       const staticDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-factory-pair-page-" });
-      yield* fs.writeFileString(`${staticDir}/index.html`, "T3 pairing application");
+      yield* fs.writeFileString(
+        `${staticDir}/index.html`,
+        '<script src="/assets/pair.js"></script>T3 pairing application',
+      );
+      yield* fs.makeDirectory(`${staticDir}/assets`);
+      yield* fs.writeFileString(`${staticDir}/assets/pair.js`, "T3 pairing script");
       const authConfig = ServerConfig.layer({
         ...config,
         factoryEnabled: true,
@@ -146,6 +304,12 @@ it.layer(
       expect(pairingPage.status).toBe(200);
       expect(pairingPage.headers.get("location")).toBeNull();
       expect(yield* Effect.promise(() => pairingPage.text())).toContain("T3 pairing application");
+      const pairingScript = yield* Effect.promise(() =>
+        handler(new Request("http://localhost:3773/assets/pair.js"), requestContext),
+      );
+      expect(pairingScript.status).toBe(200);
+      expect(pairingScript.headers.get("location")).toBeNull();
+      expect(yield* Effect.promise(() => pairingScript.text())).toBe("T3 pairing script");
     }),
   );
 

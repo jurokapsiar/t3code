@@ -36,6 +36,15 @@ Factory mode is opt-in. Start a server with `t3 serve --factory`, or set
 `T3CODE_FACTORY_ENABLED=true`. The CLI flag takes precedence over the setting.
 Without either, the server keeps its normal single-environment behavior.
 
+To serve a built Factory UI, add `--factory-ui-dir /path/to/t3factory/dist`,
+or set `T3CODE_FACTORY_UI_DIR`. Build that UI with `/factory/` as its asset base.
+Open `/factory` on the server's browser-reachable address. T3 Code stays at `/`,
+and browser authorization uses the existing `/pair` page and `/api/auth` routes.
+The server reserves `/factory/bootstrap` and `/factory/env` for its own routes.
+A missing or invalid configured build stops startup. Without a UI directory,
+Factory UI requests return an explicit error; they do not show T3 Code instead.
+When Factory mode is off, the UI directory is not opened.
+
 Factory hosting is still in development. It does not yet enroll source servers
 or combine their sessions, so do not use it to manage remote environments.
 

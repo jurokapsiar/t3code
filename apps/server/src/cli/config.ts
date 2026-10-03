@@ -86,6 +86,10 @@ const factoryEnabledFlag = Flag.Boolean("factory").pipe(
   Flag.withDescription("Enable the opt-in T3 serve factory runtime."),
   Flag.optional,
 );
+const factoryUiDirFlag = Flag.String("factory-ui-dir").pipe(
+  Flag.withDescription("Built Factory UI directory to serve at /factory (requires --factory)."),
+  Flag.optional,
+);
 // Trace file location, shared by the server and `t3 trace summary`.
 export const traceFileConfig = Config.String("T3CODE_TRACE_FILE").pipe(
   Config.option,
@@ -162,6 +166,10 @@ const EnvServerConfig = Config.all({
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
+  factoryUiDir: Config.String("T3CODE_FACTORY_UI_DIR").pipe(
+    Config.option,
+    Config.map(Option.getOrUndefined),
+  ),
   factoryEnabled: Config.Boolean("T3CODE_FACTORY_ENABLED").pipe(Config.withDefault(false)),
   tailscaleServePort: Config.Port("T3CODE_TAILSCALE_SERVE_PORT").pipe(
     Config.option,
@@ -203,6 +211,7 @@ export interface CliServerFlags {
   readonly tailscaleServeEnabled: Option.Option<boolean>;
   readonly tailscaleServePort: Option.Option<number>;
   readonly factoryEnabled?: Option.Option<boolean>;
+  readonly factoryUiDir?: Option.Option<string>;
 }
 
 export interface CliAuthLocationFlags {
@@ -238,6 +247,7 @@ export const sharedServerCommandFlags = {
   tailscaleServeEnabled: tailscaleServeFlag,
   tailscaleServePort: tailscaleServePortFlag,
   factoryEnabled: factoryEnabledFlag,
+  factoryUiDir: factoryUiDirFlag,
 } as const;
 
 const resolveOptionPrecedence = <Value>(
@@ -282,6 +292,7 @@ export const resolveServerConfig = (
       tailscaleServeEnabled: flags.tailscaleServeEnabled ?? Option.none(),
       tailscaleServePort: flags.tailscaleServePort ?? Option.none(),
       factoryEnabled: flags.factoryEnabled ?? Option.none(),
+      factoryUiDir: flags.factoryUiDir ?? Option.none(),
     } satisfies CliServerFlags;
     const bootstrapFd = Option.getOrUndefined(normalizedFlags.bootstrapFd) ?? env.bootstrapFd;
     const bootstrapEnvelope =
@@ -393,6 +404,11 @@ export const resolveServerConfig = (
       resolveOptionPrecedence(normalizedFlags.factoryEnabled, Option.some(env.factoryEnabled)),
       () => false,
     );
+    const rawFactoryUiDir = Option.getOrUndefined(normalizedFlags.factoryUiDir) ?? env.factoryUiDir;
+    const factoryUiDir =
+      rawFactoryUiDir === undefined
+        ? undefined
+        : path.resolve(yield* expandHomePath(rawFactoryUiDir));
     const staticDir = devUrl ? undefined : yield* ServerConfig.resolveStaticDir();
     const host = Option.getOrElse(
       resolveOptionPrecedence(
@@ -471,6 +487,7 @@ export const resolveServerConfig = (
       tailscaleServeEnabled,
       tailscaleServePort,
       factoryEnabled,
+      ...(factoryUiDir === undefined ? {} : { factoryUiDir }),
     };
 
     return config;
