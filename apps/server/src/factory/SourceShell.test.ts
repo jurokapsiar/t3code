@@ -377,6 +377,99 @@ it.effect("applies same-sequence enrichment without replacing active threads", (
   }),
 );
 
+it.effect("ignores enrichment from an older cursor after a newer delta", () =>
+  Effect.gen(function* () {
+    const h = yield* harness;
+    yield* h.register("a");
+    yield* h.start;
+    const attempt = yield* Queue.take(h.fake.attempts);
+    yield* attempt.ready(sourceConfig("env-a"));
+    yield* Queue.take(attempt.shellCalls);
+    yield* h.nextUpdate((update) => update.kind === "snapshot");
+    yield* attempt.emitShell(snapshot(8, [project("p", "Initial")]));
+    yield* h.nextFrame("snapshot", "env-a");
+    yield* attempt.emitShell({
+      kind: "project.updated",
+      sequence: 12,
+      project: project("p", "Current"),
+    });
+    yield* h.nextFrame("project.updated", "env-a");
+    yield* attempt.emitShell({
+      kind: "snapshot",
+      resolvedRepositoryIdentityRoots: ["/work/p"],
+      snapshot: {
+        schemaVersion: 1,
+        snapshotSequence: 8,
+        projects: [project("p", "Late enrichment")],
+        threads: [],
+        archivedThreads: [],
+      },
+    } as OrchestrationV2ShellStreamItem);
+    yield* attempt.emitShell({ kind: "synchronized" });
+    yield* h.nextFrame("synchronized", "env-a");
+
+    expect((yield* h.state("env-a"))?.projects[0]?.title).toBe("Current");
+    expect((yield* h.state("env-a"))?.appliedCursor).toBe(12);
+    expect((yield* h.connections.getStates)[0]?.cursor).toBe(12);
+  }),
+);
+
+it.effect("does not let an older authoritative snapshot rewind an active connection", () =>
+  Effect.gen(function* () {
+    const h = yield* harness;
+    yield* h.register("a");
+    yield* h.start;
+    const attempt = yield* Queue.take(h.fake.attempts);
+    yield* attempt.ready(sourceConfig("env-a"));
+    yield* Queue.take(attempt.shellCalls);
+    yield* h.nextUpdate((update) => update.kind === "snapshot");
+    yield* attempt.emitShell(snapshot(10, [project("p", "Initial")]));
+    yield* h.nextFrame("snapshot", "env-a");
+    yield* attempt.emitShell({
+      kind: "project.updated",
+      sequence: 12,
+      project: project("p", "Current"),
+    });
+    yield* h.nextFrame("project.updated", "env-a");
+    yield* attempt.emitShell(snapshot(11, [project("p", "Stale snapshot")]));
+    yield* attempt.emitShell({ kind: "synchronized" });
+    yield* h.nextFrame("synchronized", "env-a");
+
+    expect((yield* h.state("env-a"))?.projects[0]?.title).toBe("Current");
+    expect((yield* h.state("env-a"))?.appliedCursor).toBe(12);
+    expect((yield* h.connections.getStates)[0]?.cursor).toBe(12);
+  }),
+);
+
+it.effect("does not apply enrichment before an authoritative snapshot", () =>
+  Effect.gen(function* () {
+    const h = yield* harness;
+    yield* h.register("a");
+    yield* h.start;
+    const attempt = yield* Queue.take(h.fake.attempts);
+    yield* attempt.ready(sourceConfig("env-a"));
+    yield* Queue.take(attempt.shellCalls);
+    yield* h.nextUpdate((update) => update.kind === "snapshot");
+    yield* attempt.emitShell({
+      kind: "snapshot",
+      resolvedRepositoryIdentityRoots: ["/work/p"],
+      snapshot: {
+        schemaVersion: 1,
+        snapshotSequence: 8,
+        projects: [project("p", "Premature enrichment")],
+        threads: [],
+        archivedThreads: [],
+      },
+    } as OrchestrationV2ShellStreamItem);
+    yield* attempt.emitShell({ kind: "synchronized" });
+    yield* h.nextFrame("synchronized", "env-a");
+
+    expect((yield* h.state("env-a"))?.projects).toEqual([]);
+    expect((yield* h.state("env-a"))?.appliedCursor).toBeUndefined();
+    expect((yield* h.connections.getStates)[0]?.cursor).toBeUndefined();
+  }),
+);
+
 it.effect("replaces only the source shell named by an authoritative reset snapshot", () =>
   Effect.gen(function* () {
     const h = yield* harness;
@@ -399,7 +492,7 @@ it.effect("replaces only the source shell named by an authoritative reset snapsh
     yield* b.emitShell(snapshot(3, [project("b", "B")], [thread("b", "b")]));
     yield* h.nextFrame("snapshot", "env-b");
     yield* a.emitShell({
-      ...snapshot(4, [], []),
+      ...snapshot(1, [], []),
       resetReason: "invalid-cursor",
     } as OrchestrationV2ShellStreamItem);
     yield* h.nextFrame("snapshot", "env-a");
@@ -407,12 +500,51 @@ it.effect("replaces only the source shell named by an authoritative reset snapsh
     const states = yield* h.sourceShell.getStates;
     expect(states.find((source) => source.target.environmentId === "env-a")?.projects).toEqual([]);
     expect(states.find((source) => source.target.environmentId === "env-a")?.threads).toEqual([]);
+    expect(states.find((source) => source.target.environmentId === "env-a")?.appliedCursor).toBe(1);
+    expect(
+      (yield* h.connections.getStates).find((source) => source.target.environmentId === "env-a")
+        ?.cursor,
+    ).toBe(1);
     expect(
       states.find((source) => source.target.environmentId === "env-b")?.projects[0]?.title,
     ).toBe("B");
     expect(states.find((source) => source.target.environmentId === "env-b")?.threads).toHaveLength(
       1,
     );
+  }),
+);
+
+it.effect("accepts a full authoritative baseline from a new connection lease", () =>
+  Effect.gen(function* () {
+    const h = yield* harness;
+    const targetA = yield* h.register("a");
+    yield* h.start;
+    const first = yield* Queue.take(h.fake.attempts);
+    yield* first.ready(sourceConfig("env-a"));
+    yield* Queue.take(first.shellCalls);
+    yield* h.nextUpdate((update) => update.kind === "snapshot");
+    yield* first.emitShell(snapshot(10, [project("p", "Old lease")]));
+    yield* h.nextFrame("snapshot", "env-a");
+    yield* first.emitShell({
+      kind: "project.updated",
+      sequence: 12,
+      project: project("p", "Old lease delta"),
+    });
+    yield* h.nextFrame("project.updated", "env-a");
+    yield* first.fail("transport");
+    yield* first.closed;
+    yield* Queue.take(first.shellCancellations);
+
+    yield* h.connections.retry(targetA.registrationId);
+    const second = yield* Queue.take(h.fake.attempts);
+    yield* second.ready(sourceConfig("env-a"));
+    expect(yield* Queue.take(second.shellCalls)).toMatchObject({ afterSequence: 12 });
+    yield* second.emitShell(snapshot(8, [project("p", "New lease baseline")]));
+    yield* h.nextFrame("snapshot", "env-a");
+
+    expect((yield* h.state("env-a"))?.projects[0]?.title).toBe("New lease baseline");
+    expect((yield* h.state("env-a"))?.appliedCursor).toBe(8);
+    expect((yield* h.connections.getStates)[0]?.cursor).toBe(8);
   }),
 );
 

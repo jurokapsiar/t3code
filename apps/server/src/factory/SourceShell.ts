@@ -115,6 +115,8 @@ interface SourceProjection {
   appliedCursor: typeof NonNegativeInt.Type | undefined;
   freshness: FactorySourceFreshnessType;
   invalidData: boolean;
+  connectionId: object | undefined;
+  firstItemOnConnection: boolean;
 }
 
 interface Consumer {
@@ -228,6 +230,8 @@ const makeProjection = (target: FactoryRemoteTarget): SourceProjection => ({
     retryAt: null,
   }),
   invalidData: false,
+  connectionId: undefined,
+  firstItemOnConnection: false,
 });
 
 const stateOf = (source: SourceProjection): SourceShellState => ({
@@ -264,10 +268,21 @@ const reasonFromConnection = (
 const reduce = (
   source: SourceProjection,
   item: OrchestrationV2ShellStreamItem,
+  firstItemOnConnection: boolean,
 ): SourceChange | undefined => {
   if (item.kind === "synchronized") return { kind: "synchronized" };
 
   if (item.kind === "snapshot") {
+    const sequence = item.snapshot.snapshotSequence;
+    if (item.resolvedRepositoryIdentityRoots !== undefined) {
+      if (source.appliedCursor !== sequence) return { kind: "stale" };
+    } else if (
+      sequence < (source.appliedCursor ?? -1) &&
+      (item.resetReason === undefined || item.resetReason === "thread-recreated") &&
+      !firstItemOnConnection
+    ) {
+      return { kind: "stale" };
+    }
     const projects = item.snapshot.projects.map((project) =>
       projectSummary(source.target, project),
     );
@@ -520,7 +535,10 @@ const make = Effect.gen(function* () {
     source: SourceProjection,
     item: OrchestrationV2ShellStreamItem,
   ) {
-    const change = reduce(source, item);
+    if (source.connectionId !== access.connectionId) return;
+    const firstItemOnConnection = source.firstItemOnConnection;
+    source.firstItemOnConnection = false;
+    const change = reduce(source, item, firstItemOnConnection);
     if (change === undefined) {
       source.invalidData = true;
       source.freshness = FactorySourceFreshness.make({
@@ -634,6 +652,8 @@ const make = Effect.gen(function* () {
       consumers.delete(registrationId);
       yield* Fiber.interrupt(currentConsumer.fiber);
     }
+    source.connectionId = access.connectionId;
+    source.firstItemOnConnection = true;
     source.freshness = FactorySourceFreshness.make({
       target: source.target,
       state: sourceHasRows(source) ? "stale" : "synchronizing",
