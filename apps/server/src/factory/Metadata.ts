@@ -16,6 +16,7 @@ import {
   ExecutionEnvironmentPlatform,
   FactoryCredentialStorage,
   FactoryEnvironmentView,
+  FactoryRenewalState,
   FactoryError,
   FactoryErrorCode,
   NonNegativeInt,
@@ -139,6 +140,11 @@ export class Metadata extends Context.Service<
     readonly updateEnvironment: (
       input: EnvironmentUpdateInput,
     ) => Effect.Effect<FactoryEnvironmentView, FactoryError>;
+    readonly setRenewalStatus: (
+      registrationId: FactoryRegistrationId,
+      status: FactoryRenewalState,
+      expiresAt?: DateTime.DateTime,
+    ) => Effect.Effect<FactoryEnvironmentView, FactoryError>;
     readonly markEnrollment: (
       input: MarkEnrollmentInput,
     ) => Effect.Effect<FactoryEnvironmentView, FactoryError>;
@@ -202,7 +208,7 @@ const make = Effect.gen(function* () {
         credential_expires_at AS "credentialExpiresAt",
         last_seen_at AS "lastSeenAt",
         revision,
-        'unsupported' AS renewal
+        renewal
       FROM factory_environments
       WHERE ${registrationId === undefined ? sql`1 = 1` : sql`registration_id = ${registrationId}`}
       ORDER BY label COLLATE NOCASE, registration_id
@@ -425,11 +431,11 @@ const make = Effect.gen(function* () {
           yield* sql`
             INSERT INTO factory_environments (
               registration_id, environment_id, endpoint, label, platform, enabled, state,
-              credential_storage, credential_item_key, credential_expires_at, last_seen_at, revision
+              credential_storage, credential_item_key, credential_expires_at, last_seen_at, revision, renewal
             ) VALUES (
               ${input.registrationId}, ${input.environmentId}, ${input.endpoint}, ${input.label},
               ${platform}, 0, 'pending',
-              NULL, NULL, NULL, NULL, 0
+              NULL, NULL, NULL, NULL, 0, 'unsupported'
             )
           `.pipe(Effect.orDie);
           return yield* findEnvironment(input.registrationId).pipe(
@@ -454,6 +460,37 @@ const make = Effect.gen(function* () {
             WHERE registration_id = ${input.registrationId}
           `.pipe(Effect.orDie);
           return yield* findEnvironment(input.registrationId).pipe(
+            Effect.flatMap((row) =>
+              row === undefined
+                ? factoryError("not-found", "The source environment does not exist.")
+                : Effect.succeed(row),
+            ),
+          );
+        }),
+      ),
+
+    setRenewalStatus: (registrationId, status, expiresAt) =>
+      withCommit(
+        Effect.gen(function* () {
+          const current = yield* findEnvironment(registrationId);
+          if (current === undefined) {
+            return yield* factoryError("not-found", "The source environment does not exist.");
+          }
+          if (current.renewal !== status || expiresAt !== undefined) {
+            if (expiresAt === undefined) {
+              yield* sql`
+                UPDATE factory_environments SET renewal = ${status}
+                WHERE registration_id = ${registrationId}
+              `.pipe(Effect.orDie);
+            } else {
+              yield* sql`
+                UPDATE factory_environments
+                SET renewal = ${status}, credential_expires_at = ${DateTime.formatIso(expiresAt)}
+                WHERE registration_id = ${registrationId}
+              `.pipe(Effect.orDie);
+            }
+          }
+          return yield* findEnvironment(registrationId).pipe(
             Effect.flatMap((row) =>
               row === undefined
                 ? factoryError("not-found", "The source environment does not exist.")

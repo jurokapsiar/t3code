@@ -21,7 +21,9 @@ const StoredCredentialTestSchema = Schema.Struct({
   issuedAt: Schema.DateTimeUtcFromString,
   expiresAt: Schema.DateTimeUtcFromString,
   scopes: AuthEnvironmentScopes,
+  renewalSupported: Schema.optionalKey(Schema.Boolean),
   predecessorCleanupId: Schema.optionalKey(AuthSessionId),
+  predecessorCleanupPending: Schema.optionalKey(Schema.Boolean),
 });
 const decodeStoredCredentialJson = Schema.decodeUnknownEffect(
   Schema.fromJsonString(StoredCredentialTestSchema),
@@ -36,6 +38,9 @@ const makeCredential = Effect.gen(function* () {
     issuedAt,
     expiresAt: DateTime.add(issuedAt, { days: 1 }),
     scopes: ["orchestration:read"],
+    renewalSupported: true,
+    predecessorCleanupId: AuthSessionId.make("predecessor-for-store-tests"),
+    predecessorCleanupPending: true,
   } satisfies CredentialStore.StoredCredential;
 });
 

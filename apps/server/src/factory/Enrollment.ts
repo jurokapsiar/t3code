@@ -1,9 +1,12 @@
 import {
   AuthAccessTokenResult,
+  AuthClientSessionRevokeResult,
   AuthAccessTokenType,
   AuthEnvironmentBootstrapTokenType,
   AuthSessionId,
   AuthSessionState,
+  AuthSessionRenewalRequest,
+  AuthRevokeClientSessionInput,
   AuthStandardClientScopes,
   AuthTokenExchangeGrantType,
   ExecutionEnvironmentDescriptor,
@@ -40,6 +43,9 @@ const AuthSessionClaims = Schema.Struct({ sid: AuthSessionId });
 const SourceEnvironmentIdentity = Schema.Struct({
   environmentId: ExecutionEnvironmentDescriptor.fields.environmentId,
   platform: Schema.NullOr(ExecutionEnvironmentDescriptor.fields.platform),
+  capabilities: Schema.optionalKey(
+    Schema.Struct({ factoryRenewal: Schema.optionalKey(Schema.Boolean) }),
+  ),
 });
 type SourceEnvironmentIdentity = typeof SourceEnvironmentIdentity.Type;
 
@@ -50,7 +56,7 @@ const decodeAuthSessionClaimsJson = Schema.decodeUnknownEffect(
 export class SourceCredentialExchangeError extends Schema.TaggedError<SourceCredentialExchangeError>()(
   "SourceCredentialExchangeError",
   {
-    operation: Schema.Literals(["discover", "exchange", "validate"]),
+    operation: Schema.Literals(["discover", "exchange", "validate", "renew", "revoke"]),
   },
 ) {
   override get message(): string {
@@ -69,6 +75,15 @@ export class SourceCredentialExchange extends Context.Service<
       readonly credential: string;
       readonly environmentId: SourceEnvironmentIdentity["environmentId"];
     }) => Effect.Effect<CredentialStore.StoredCredential, SourceCredentialExchangeError>;
+    readonly renew: (input: {
+      readonly endpoint: string;
+      readonly credential: CredentialStore.StoredCredential;
+    }) => Effect.Effect<CredentialStore.StoredCredential, SourceCredentialExchangeError>;
+    readonly revoke: (input: {
+      readonly endpoint: string;
+      readonly credential: string;
+      readonly sessionId: AuthSessionId;
+    }) => Effect.Effect<AuthClientSessionRevokeResult, SourceCredentialExchangeError>;
   }
 >()("t3/factory/Enrollment/SourceCredentialExchange") {}
 
@@ -211,11 +226,106 @@ const makeSourceCredentialExchange = Effect.gen(function* () {
         issuedAt,
         expiresAt: session.expiresAt,
         scopes: session.scopes,
+        renewalSupported: descriptor.capabilities?.factoryRenewal === true,
       } satisfies CredentialStore.StoredCredential;
     });
   };
 
-  return SourceCredentialExchange.of({ discover, exchange });
+  const renew: SourceCredentialExchange["Service"]["renew"] = (input) =>
+    Effect.gen(function* () {
+      const url = yield* endpointUrl(input.endpoint, "/api/auth/renew", "renew");
+      const request = yield* HttpClientRequest.post(url.toString()).pipe(
+        HttpClientRequest.setHeader("authorization", `Bearer ${input.credential.token}`),
+        HttpClientRequest.bodyJson(
+          AuthSessionRenewalRequest.make({ scopes: input.credential.scopes }),
+        ),
+        Effect.map(noStore),
+        Effect.mapError(() => new SourceCredentialExchangeError({ operation: "renew" })),
+      );
+      const issued = yield* fetchJson({
+        client,
+        request,
+        schema: AuthAccessTokenResult,
+        operation: "renew",
+      });
+      if (issued.token_type !== "Bearer") {
+        return yield* new SourceCredentialExchangeError({ operation: "renew" });
+      }
+      const issuedScopes = parseOAuthScope(issued.scope);
+      const allowedScopes = new Set<string>(input.credential.scopes);
+      if (
+        issuedScopes === null ||
+        issuedScopes.length !== issued.scope.split(" ").length ||
+        issuedScopes.length === 0 ||
+        issuedScopes.some((scope) => !allowedScopes.has(scope))
+      ) {
+        return yield* new SourceCredentialExchangeError({ operation: "validate" });
+      }
+
+      const sessionUrl = yield* endpointUrl(input.endpoint, "/api/auth/session", "validate");
+      const session = yield* fetchJson({
+        client,
+        request: noStore(
+          HttpClientRequest.get(sessionUrl.toString()).pipe(
+            HttpClientRequest.setHeader("authorization", `Bearer ${issued.access_token}`),
+          ),
+        ),
+        schema: AuthSessionState,
+        operation: "validate",
+      });
+      if (
+        !session.authenticated ||
+        session.sessionMethod !== "bearer-access-token" ||
+        session.expiresAt === undefined ||
+        session.scopes === undefined ||
+        new Set(session.scopes).size !== session.scopes.length ||
+        session.scopes.length !== issuedScopes.length ||
+        session.scopes.some((scope) => !issuedScopes.includes(scope))
+      ) {
+        return yield* new SourceCredentialExchangeError({ operation: "validate" });
+      }
+
+      const encodedClaims = issued.access_token.split(".")[0];
+      if (!encodedClaims) {
+        return yield* new SourceCredentialExchangeError({ operation: "validate" });
+      }
+      const claimsJson = yield* Effect.fromResult(
+        Encoding.decodeBase64UrlString(encodedClaims),
+      ).pipe(Effect.mapError(() => new SourceCredentialExchangeError({ operation: "validate" })));
+      const claims = yield* decodeAuthSessionClaimsJson(claimsJson).pipe(
+        Effect.mapError(() => new SourceCredentialExchangeError({ operation: "validate" })),
+      );
+      const issuedAt = yield* DateTime.now;
+      return {
+        token: issued.access_token,
+        sourceSessionId: claims.sid,
+        issuedAt,
+        expiresAt: session.expiresAt,
+        scopes: session.scopes,
+        renewalSupported: true,
+      } satisfies CredentialStore.StoredCredential;
+    });
+
+  const revoke: SourceCredentialExchange["Service"]["revoke"] = (input) =>
+    Effect.gen(function* () {
+      const url = yield* endpointUrl(input.endpoint, "/api/auth/clients/revoke", "revoke");
+      const request = yield* HttpClientRequest.post(url.toString()).pipe(
+        HttpClientRequest.setHeader("authorization", `Bearer ${input.credential}`),
+        HttpClientRequest.bodyJson(
+          AuthRevokeClientSessionInput.make({ sessionId: input.sessionId }),
+        ),
+        Effect.map(noStore),
+        Effect.mapError(() => new SourceCredentialExchangeError({ operation: "revoke" })),
+      );
+      return yield* fetchJson({
+        client,
+        request,
+        schema: AuthClientSessionRevokeResult,
+        operation: "revoke",
+      });
+    });
+
+  return SourceCredentialExchange.of({ discover, exchange, renew, revoke });
 });
 
 export const sourceLayer = Layer.effect(SourceCredentialExchange, makeSourceCredentialExchange);
@@ -295,14 +405,22 @@ const make = Effect.gen(function* () {
     readonly storage: FactoryCredentialStorage;
   }) =>
     Effect.gen(function* () {
-      const environment = yield* metadata.markEnrollment({
+      yield* metadata.markEnrollment({
         registrationId: input.registrationId,
         credentialStorage: input.storage,
         credentialItemKey: input.credentialItemKey,
         credentialExpiresAt: input.credential.expiresAt,
       });
-      yield* lifecycle.enabled(environment);
-      return environment;
+      const now = yield* DateTime.now;
+      const renewal =
+        DateTime.toEpochMillis(input.credential.expiresAt) <= DateTime.toEpochMillis(now)
+          ? "expired"
+          : input.credential.renewalSupported === true
+            ? "ready"
+            : "unsupported";
+      const current = yield* metadata.setRenewalStatus(input.registrationId, renewal);
+      yield* lifecycle.enabled(current);
+      return current;
     });
 
   const enroll: Enrollment["Service"]["enroll"] = (input) =>

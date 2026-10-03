@@ -6,6 +6,7 @@ import * as Layer from "effect/Layer";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as CredentialStore from "./CredentialStore.ts";
+import * as CredentialRenewal from "./CredentialRenewal.ts";
 import * as Enrollment from "./Enrollment.ts";
 import * as Metadata from "./Metadata.ts";
 
@@ -53,16 +54,19 @@ export const layer = ({
         Metadata.layer,
         ServerEnvironment.identityLayer,
       );
-      const enrollmentLayer = Enrollment.layer.pipe(
+      const renewalDependenciesLayer = CredentialRenewal.layer.pipe(
         Layer.provideMerge(enrollmentDependenciesLayer),
       );
+      const enrollmentLayer = Enrollment.layer.pipe(Layer.provideMerge(renewalDependenciesLayer));
 
       return Layer.effect(
         FactoryRuntime,
         Effect.gen(function* () {
           const enrollment = yield* Enrollment.Enrollment;
+          const renewal = yield* CredentialRenewal.CredentialRenewal;
           yield* enrollment.reconcile;
           yield* startConnections();
+          yield* renewal.start;
           const metadata = yield* Metadata.Metadata;
           return {
             enabled: true,

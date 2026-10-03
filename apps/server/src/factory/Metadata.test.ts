@@ -10,6 +10,8 @@ import * as Scope from "effect/Scope";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Schema from "effect/Schema";
 
+const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
+
 import { FactoryEnvironmentView, FactoryProjectKey } from "@t3tools/contracts";
 import {
   makeSqlitePersistenceLive,
@@ -117,6 +119,30 @@ metadataLayer("Factory metadata", (it) => {
         state: "offline",
         credentialStorage: "secure-vault",
       });
+    }),
+  );
+
+  it.effect("publishes credential renewal status without exposing credential data", () =>
+    Effect.gen(function* () {
+      const metadata = yield* Metadata.Metadata;
+      const pending = environment("registration-renewal", "environment-renewal");
+      yield* metadata.createEnvironment(pending);
+      yield* metadata.markEnrollment({
+        registrationId: pending.registrationId,
+        credentialStorage: "secure-vault",
+        credentialItemKey: "opaque-reference",
+        credentialExpiresAt: null,
+      });
+
+      const renewed = yield* metadata.setRenewalStatus(pending.registrationId, "failed");
+      const snapshot = yield* metadata.getSnapshot;
+
+      expect(renewed.renewal).toBe("failed");
+      expect(
+        snapshot.environments.find((entry) => entry.registrationId === pending.registrationId)
+          ?.renewal,
+      ).toBe("failed");
+      expect(yield* encodeJson(snapshot)).not.toContain("opaque-reference");
     }),
   );
 

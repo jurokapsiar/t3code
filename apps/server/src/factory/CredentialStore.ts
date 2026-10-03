@@ -18,7 +18,9 @@ const StoredCredentialSchema = Schema.Struct({
   issuedAt: Schema.DateTimeUtc,
   expiresAt: Schema.DateTimeUtc,
   scopes: AuthEnvironmentScopes,
+  renewalSupported: Schema.optionalKey(Schema.Boolean),
   predecessorCleanupId: Schema.optionalKey(AuthSessionId),
+  predecessorCleanupPending: Schema.optionalKey(Schema.Boolean),
 });
 export type StoredCredential = typeof StoredCredentialSchema.Type;
 

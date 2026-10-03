@@ -20,6 +20,8 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   AuthAccessTokenType,
   AuthEnvironmentBootstrapTokenType,
+  AuthRevokeClientSessionInput,
+  AuthSessionRenewalRequest,
   AuthSessionId,
   AuthStandardClientScopes,
   AuthTokenExchangeGrantType,
@@ -36,6 +38,8 @@ import { makeSqlitePersistenceLive } from "../persistence/Layers/Sqlite.ts";
 afterEach(() => vi.unstubAllGlobals());
 
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+const decodeRenewalRequest = Schema.decodeEffect(Schema.fromJsonString(AuthSessionRenewalRequest));
+const decodeRevokeInput = Schema.decodeEffect(Schema.fromJsonString(AuthRevokeClientSessionInput));
 
 const sourceCredential = "fixed-source-bootstrap-credential-for-tests";
 const storedCredential = "fixed-source-access-token-for-tests";
@@ -48,6 +52,7 @@ const input = FactoryEnvironmentEnrollInput.make({
 const makeEnrollmentHarness = (options: {
   readonly failCredentialWrite: boolean;
   readonly failCredentialRemoval?: boolean;
+  readonly renewalSupported?: boolean;
 }) =>
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;
@@ -100,6 +105,9 @@ const makeEnrollmentHarness = (options: {
           Effect.succeed({
             environmentId: EnvironmentId.make("source-environment"),
             platform: null,
+            ...(options.renewalSupported === undefined
+              ? {}
+              : { capabilities: { factoryRenewal: options.renewalSupported } }),
           }),
         exchange: ({ credential }) => {
           assert.equal(credential, sourceCredential);
@@ -109,8 +117,13 @@ const makeEnrollmentHarness = (options: {
             issuedAt,
             expiresAt,
             scopes: ["orchestration:read"],
+            renewalSupported: options.renewalSupported ?? false,
           });
         },
+        renew: () =>
+          Effect.fail(new Enrollment.SourceCredentialExchangeError({ operation: "renew" })),
+        revoke: () =>
+          Effect.fail(new Enrollment.SourceCredentialExchangeError({ operation: "revoke" })),
       }),
     );
     const lifecycleLayer = Layer.succeed(
@@ -250,7 +263,11 @@ const makeExchangeHttpLayer = (
       }
       return HttpClientResponse.fromWeb(
         request,
-        Response.json({ environmentId: "source-environment", platform: null }),
+        Response.json({
+          environmentId: "source-environment",
+          platform: null,
+          capabilities: { factoryRenewal: true },
+        }),
       );
     }),
   );
@@ -283,6 +300,7 @@ it.effect("exchanges the bootstrap credential over the source auth endpoints", (
     assert.equal(credential.token, token);
     assert.equal(credential.sourceSessionId, AuthSessionId.make("source-session"));
     assert.deepEqual(credential.scopes, AuthStandardClientScopes);
+    assert.isTrue(credential.renewalSupported);
     assert.equal(requests.length, 3);
     assert.equal(tokenRequest.method, "POST");
     assert.equal(tokenRequest.url, "https://source.example/oauth/token");
@@ -318,11 +336,186 @@ it.effect("rejects issued scopes outside the standard client allowlist", () =>
   }),
 );
 
+const makeRenewalHttpLayer = (
+  requests: Array<{
+    readonly method: string;
+    readonly url: string;
+    readonly headers: Readonly<Record<string, string | undefined>>;
+    readonly body: string | undefined;
+  }>,
+  revokeStatus = 200,
+  renewalResponse: {
+    readonly issuedScope?: string;
+    readonly sessionScopes?: ReadonlyArray<string>;
+  } = {},
+) => {
+  const replacementToken = `${NodeBuffer.Buffer.from(JSON.stringify({ sid: "replacement-session" })).toString("base64url")}.signature`;
+  const httpClient = HttpClient.make((request) =>
+    Effect.sync(() => {
+      requests.push({
+        method: request.method,
+        url: request.url,
+        headers: request.headers,
+        body: request.body._tag === "Uint8Array" ? request.body.text : undefined,
+      });
+      if (request.url.endsWith("/api/auth/renew")) {
+        return HttpClientResponse.fromWeb(
+          request,
+          Response.json({
+            access_token: replacementToken,
+            issued_token_type: AuthAccessTokenType,
+            token_type: "Bearer",
+            expires_in: 30 * 24 * 60 * 60,
+            scope: renewalResponse.issuedScope ?? "orchestration:read",
+          }),
+        );
+      }
+      if (request.url.endsWith("/api/auth/session")) {
+        return HttpClientResponse.fromWeb(
+          request,
+          Response.json({
+            authenticated: true,
+            auth: {
+              policy: "remote-reachable",
+              bootstrapMethods: ["one-time-token"],
+              sessionMethods: ["bearer-access-token"],
+              sessionCookieName: "t3_session",
+            },
+            scopes: renewalResponse.sessionScopes ?? ["orchestration:read"],
+            sessionMethod: "bearer-access-token",
+            expiresAt: "2099-01-01T00:00:00.000Z",
+          }),
+        );
+      }
+      return HttpClientResponse.fromWeb(
+        request,
+        Response.json({ revoked: true }, { status: revokeStatus }),
+      );
+    }),
+  );
+  return {
+    replacementToken,
+    layer: Enrollment.sourceLayer.pipe(
+      Layer.provide(Layer.succeed(HttpClient.HttpClient, httpClient)),
+    ),
+  };
+};
+
+it.effect("renews through the existing source endpoint and narrows scopes", () =>
+  Effect.gen(function* () {
+    const requests: Parameters<typeof makeRenewalHttpLayer>[0] = [];
+    const { replacementToken, layer } = makeRenewalHttpLayer(requests);
+    const services = yield* Layer.build(layer);
+    const source = Context.get(services, Enrollment.SourceCredentialExchange);
+    const oldCredential: CredentialStore.StoredCredential = {
+      token: "old-bearer-token-for-renewal-test",
+      sourceSessionId: AuthSessionId.make("previous-session"),
+      issuedAt: DateTime.makeUnsafe(0),
+      expiresAt: DateTime.makeUnsafe(30 * 24 * 60 * 60 * 1000),
+      scopes: ["orchestration:read", "access:write"],
+      renewalSupported: true,
+    };
+    const renewed = yield* source.renew({
+      endpoint: "https://source.example",
+      credential: oldCredential,
+    });
+    const revoked = yield* source.revoke({
+      endpoint: "https://source.example",
+      credential: renewed.token,
+      sessionId: oldCredential.sourceSessionId,
+    });
+
+    assert.equal(renewed.token, replacementToken);
+    assert.equal(renewed.sourceSessionId, AuthSessionId.make("replacement-session"));
+    assert.deepEqual(renewed.scopes, ["orchestration:read"]);
+    assert.isTrue(renewed.renewalSupported);
+    assert.isTrue(revoked.revoked);
+    assert.deepEqual(
+      requests.map(({ method, url }) => [method, url]),
+      [
+        ["POST", "https://source.example/api/auth/renew"],
+        ["GET", "https://source.example/api/auth/session"],
+        ["POST", "https://source.example/api/auth/clients/revoke"],
+      ],
+    );
+    assert.equal(requests[0]?.headers.authorization, `Bearer ${oldCredential.token}`);
+    assert.equal(requests[0]?.headers["cache-control"], "no-store");
+    assert.deepEqual(yield* decodeRenewalRequest(requests[0]?.body ?? "{}"), {
+      scopes: ["orchestration:read", "access:write"],
+    });
+    assert.equal(requests[2]?.headers.authorization, `Bearer ${replacementToken}`);
+    assert.deepEqual(yield* decodeRevokeInput(requests[2]?.body ?? "{}"), {
+      sessionId: oldCredential.sourceSessionId,
+    });
+  }),
+);
+
+it.effect("rejects a renewal whose validated session duplicates scopes", () =>
+  Effect.gen(function* () {
+    const requests: Parameters<typeof makeRenewalHttpLayer>[0] = [];
+    const { layer, replacementToken } = makeRenewalHttpLayer(requests, 200, {
+      issuedScope: "orchestration:read access:write",
+      sessionScopes: ["orchestration:read", "orchestration:read"],
+    });
+    const services = yield* Layer.build(layer);
+    const source = Context.get(services, Enrollment.SourceCredentialExchange);
+    const failure = yield* source
+      .renew({
+        endpoint: "https://source.example",
+        credential: {
+          token: "old-bearer-token-for-renewal-test",
+          sourceSessionId: AuthSessionId.make("previous-session"),
+          issuedAt: DateTime.makeUnsafe(0),
+          expiresAt: DateTime.makeUnsafe(30 * 24 * 60 * 60 * 1000),
+          scopes: ["orchestration:read", "access:write"],
+        },
+      })
+      .pipe(Effect.flip);
+
+    assert.equal(failure.operation, "validate");
+    assert.notInclude(String(failure), replacementToken);
+    assert.notInclude(encodeJson(failure), replacementToken);
+  }),
+);
+
+it.effect("keeps a forbidden revoke response credential-free", () =>
+  Effect.gen(function* () {
+    const requests: Parameters<typeof makeRenewalHttpLayer>[0] = [];
+    const { layer } = makeRenewalHttpLayer(requests, 403);
+    const services = yield* Layer.build(layer);
+    const source = Context.get(services, Enrollment.SourceCredentialExchange);
+    const failure = yield* source
+      .revoke({
+        endpoint: "https://source.example",
+        credential: "replacement-secret-for-denial-test",
+        sessionId: AuthSessionId.make("previous-session"),
+      })
+      .pipe(Effect.flip);
+
+    assert.equal(failure.operation, "revoke");
+    assert.notInclude(String(failure), "replacement-secret-for-denial-test");
+    assert.notInclude(encodeJson(failure), "replacement-secret-for-denial-test");
+  }),
+);
+
 it.layer(
   ServerConfig.layerTest(process.cwd(), { prefix: "t3-factory-enrollment-" }).pipe(
     Layer.provideMerge(NodeServices.layer),
   ),
 )("factory enrollment", (it) => {
+  it.effect("marks advertised renewal support in the environment view", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeEnrollmentHarness({
+        failCredentialWrite: false,
+        renewalSupported: true,
+      });
+      const environment = yield* harness.enroll();
+
+      assert.equal(environment.renewal, "ready");
+      assert.equal(harness.credentials.values().next().value?.renewalSupported, true);
+    }),
+  );
+
   it.effect("does not enable a registration after a failed credential write", () =>
     Effect.gen(function* () {
       const harness = yield* makeEnrollmentHarness({ failCredentialWrite: true });
