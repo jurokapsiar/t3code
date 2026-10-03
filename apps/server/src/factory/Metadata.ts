@@ -162,6 +162,9 @@ export class Metadata extends Context.Service<
     readonly markEnrollment: (
       input: MarkEnrollmentInput,
     ) => Effect.Effect<FactoryEnvironmentView, FactoryError>;
+    readonly replaceEnrollment: (
+      input: MarkEnrollmentInput & { readonly revision: number },
+    ) => Effect.Effect<FactoryEnvironmentView, FactoryError>;
     readonly markPendingEnrollment: (
       input: MarkPendingEnrollmentInput,
     ) => Effect.Effect<FactoryEnvironmentView, FactoryError>;
@@ -606,6 +609,41 @@ const make = Effect.gen(function* () {
                 credential_expires_at = ${input.credentialExpiresAt === null ? null : DateTime.formatIso(input.credentialExpiresAt)},
                 revision = revision + 1
             WHERE registration_id = ${input.registrationId}
+          `.pipe(Effect.orDie);
+          return yield* findEnvironment(input.registrationId).pipe(
+            Effect.flatMap((row) =>
+              row === undefined
+                ? factoryError("not-found", "The source environment does not exist.")
+                : Effect.succeed(row),
+            ),
+          );
+        }),
+      ),
+
+    replaceEnrollment: (input) =>
+      withCommit(
+        Effect.gen(function* () {
+          const current = yield* findEnvironment(input.registrationId);
+          if (current === undefined) {
+            return yield* factoryError("not-found", "The source environment does not exist.");
+          }
+          if (
+            current.revision !== input.revision ||
+            current.state === "pending" ||
+            current.state === "removing"
+          ) {
+            return yield* factoryError(
+              "conflict",
+              "The source changed before its credential could be replaced.",
+            );
+          }
+          yield* sql`
+            UPDATE factory_environments
+            SET state = 'offline', credential_storage = ${input.credentialStorage},
+                credential_item_key = ${input.credentialItemKey},
+                credential_expires_at = ${input.credentialExpiresAt === null ? null : DateTime.formatIso(input.credentialExpiresAt)},
+                revision = revision + 1
+            WHERE registration_id = ${input.registrationId} AND revision = ${input.revision}
           `.pipe(Effect.orDie);
           return yield* findEnvironment(input.registrationId).pipe(
             Effect.flatMap((row) =>

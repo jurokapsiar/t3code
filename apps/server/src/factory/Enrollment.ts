@@ -24,6 +24,7 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Encoding from "effect/Encoding";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -430,9 +431,12 @@ const make = Effect.gen(function* () {
 
       const current = yield* metadata.listEnvironments;
       const existing = current.find((entry) => entry.environmentId === discovered.environmentId);
+      const reEnrollment = existing !== undefined && existing.state !== "pending";
       if (
         existing !== undefined &&
-        (existing.state !== "pending" || existing.endpoint !== input.endpoint)
+        (existing.endpoint !== input.endpoint ||
+          existing.state === "removing" ||
+          existing.cleanupPending)
       ) {
         return yield* new FactoryError({
           code: "conflict",
@@ -462,11 +466,21 @@ const make = Effect.gen(function* () {
           lastSeenAt: null,
           revision: 0,
         }));
-      const reference = yield* makeCredentialReference(crypto, installationId, registrationId);
       const knownReference = yield* metadata.getCredentialReference(registrationId);
+      if (knownReference !== null) yield* ensureSelectedStorage(knownReference.storage);
+      const generatedReference = yield* makeCredentialReference(
+        crypto,
+        installationId,
+        registrationId,
+      );
+      const reference =
+        reEnrollment && knownReference !== null ? knownReference.itemKey : generatedReference;
+      const previousCredential =
+        reEnrollment && knownReference !== null
+          ? yield* credentials.get(knownReference.itemKey)
+          : Option.none<CredentialStore.StoredCredential>();
 
-      if (knownReference !== null) {
-        yield* ensureSelectedStorage(knownReference.storage);
+      if (knownReference !== null && !reEnrollment) {
         const stored = yield* credentials.get(knownReference.itemKey);
         if (Option.isSome(stored)) {
           return yield* completeEnrollment({
@@ -478,17 +492,50 @@ const make = Effect.gen(function* () {
         }
       }
 
-      yield* metadata.markPendingEnrollment({
-        registrationId,
-        credentialStorage: selectedStorage,
-        credentialItemKey: reference,
-      });
+      if (!reEnrollment) {
+        yield* metadata.markPendingEnrollment({
+          registrationId,
+          credentialStorage: selectedStorage,
+          credentialItemKey: reference,
+        });
+      }
       const credential = yield* source.exchange({
         endpoint: input.endpoint,
         credential: input.sourceCredential,
         environmentId: pending.environmentId,
       });
       yield* credentials.set(reference, credential);
+      if (reEnrollment) {
+        const replacement = yield* metadata
+          .replaceEnrollment({
+            registrationId,
+            revision: pending.revision,
+            credentialStorage: selectedStorage,
+            credentialItemKey: reference,
+            credentialExpiresAt: credential.expiresAt,
+          })
+          .pipe(Effect.exit);
+        if (Exit.isFailure(replacement)) {
+          if (Option.isSome(previousCredential)) {
+            yield* credentials.set(reference, previousCredential.value);
+          }
+          return yield* Effect.failCause(replacement.cause);
+        }
+        const now = yield* DateTime.now;
+        const renewal =
+          DateTime.toEpochMillis(credential.expiresAt) <= DateTime.toEpochMillis(now)
+            ? "expired"
+            : credential.renewalSupported === true
+              ? "ready"
+              : "unsupported";
+        const updated = yield* metadata.setRenewalStatus(
+          registrationId,
+          renewal,
+          credential.expiresAt,
+        );
+        yield* lifecycle.enabled(updated);
+        return updated;
+      }
       return yield* completeEnrollment({
         registrationId,
         credential,

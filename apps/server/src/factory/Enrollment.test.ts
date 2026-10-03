@@ -73,6 +73,8 @@ const makeEnrollmentHarness = (options: {
     const supervisorStartsRef = yield* Ref.make(0);
     const issuedAt = yield* DateTime.now;
     const expiresAt = DateTime.add(issuedAt, { days: 1 });
+    let metadataForExchange: Metadata.Metadata["Service"] | undefined;
+    let advanceRevisionOnNextExchange = false;
     const storeLayer = Layer.succeed(
       CredentialStore.CredentialStore,
       CredentialStore.CredentialStore.of({
@@ -109,17 +111,37 @@ const makeEnrollmentHarness = (options: {
               ? {}
               : { capabilities: { factoryRenewal: options.renewalSupported } }),
           }),
-        exchange: ({ credential }) => {
-          assert.equal(credential, sourceCredential);
-          return Effect.succeed({
-            token: storedCredential,
-            sourceSessionId: AuthSessionId.make("source-session"),
-            issuedAt,
-            expiresAt,
-            scopes: ["orchestration:read"],
-            renewalSupported: options.renewalSupported ?? false,
-          });
-        },
+        exchange: ({ credential }) =>
+          Effect.gen(function* () {
+            if (advanceRevisionOnNextExchange && metadataForExchange !== undefined) {
+              advanceRevisionOnNextExchange = false;
+              const current = (yield* metadataForExchange.listEnvironments)[0];
+              if (current !== undefined) {
+                yield* metadataForExchange
+                  .updateEnvironment({
+                    registrationId: current.registrationId,
+                    revision: current.revision,
+                    label: "Concurrent edit",
+                  })
+                  .pipe(
+                    Effect.mapError(
+                      () => new Enrollment.SourceCredentialExchangeError({ operation: "exchange" }),
+                    ),
+                  );
+              }
+            }
+            return {
+              token:
+                credential === sourceCredential
+                  ? storedCredential
+                  : storedCredential + ":" + credential,
+              sourceSessionId: AuthSessionId.make("source-session"),
+              issuedAt,
+              expiresAt,
+              scopes: ["orchestration:read"],
+              renewalSupported: options.renewalSupported ?? false,
+            };
+          }),
         renew: () =>
           Effect.fail(new Enrollment.SourceCredentialExchangeError({ operation: "renew" })),
         revoke: () =>
@@ -154,6 +176,7 @@ const makeEnrollmentHarness = (options: {
     );
     const enrollment = Context.get(services, Enrollment.Enrollment);
     const metadata = Context.get(services, Metadata.Metadata);
+    metadataForExchange = metadata;
     const sql = Context.get(services, SqlClient.SqlClient);
     const readRegistration = Effect.gen(function* () {
       const registrations = yield* metadata.listEnvironments;
@@ -162,7 +185,8 @@ const makeEnrollmentHarness = (options: {
     });
 
     return {
-      enroll: () => enrollment.enroll(input),
+      enroll: (credential = input.sourceCredential) =>
+        enrollment.enroll({ ...input, sourceCredential: credential }),
       readRegistration,
       supervisorStarts: Ref.get(supervisorStartsRef),
       credentials,
@@ -172,6 +196,9 @@ const makeEnrollmentHarness = (options: {
       enrollment,
       sql,
       failRemoval,
+      advanceRevisionOnNextExchange: () => {
+        advanceRevisionOnNextExchange = true;
+      },
     };
   });
 
@@ -503,6 +530,43 @@ it.layer(
     Layer.provideMerge(NodeServices.layer),
   ),
 )("factory enrollment", (it) => {
+  it.effect("re-enrolls an existing source with the same registration identity", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeEnrollmentHarness({ failCredentialWrite: false });
+      const first = yield* harness.enroll();
+      const replacementCredential = "replacement-source-bootstrap-credential";
+      const second = yield* harness.enroll(replacementCredential).pipe(Effect.exit);
+
+      assert.isTrue(Exit.isSuccess(second));
+      if (Exit.isFailure(second)) return;
+      assert.equal(second.value.registrationId, first.registrationId);
+      assert.equal((yield* harness.readRegistration).registrationId, first.registrationId);
+      assert.equal(harness.credentials.size, 1);
+      assert.equal(
+        [...harness.credentials.values()][0]?.token,
+        storedCredential + ":" + replacementCredential,
+      );
+    }),
+  );
+
+  it.effect("restores the previous credential when a concurrent edit rejects replacement", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeEnrollmentHarness({ failCredentialWrite: false });
+      const registered = yield* harness.enroll();
+      harness.advanceRevisionOnNextExchange();
+
+      const result = yield* harness
+        .enroll("replacement-source-bootstrap-credential")
+        .pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(result));
+      const current = yield* harness.readRegistration;
+      assert.equal(current.label, "Concurrent edit");
+      assert.equal(current.registrationId, registered.registrationId);
+      assert.equal(harness.credentials.size, 1);
+      assert.equal([...harness.credentials.values()][0]?.token, storedCredential);
+    }),
+  );
+
   it.effect("marks advertised renewal support in the environment view", () =>
     Effect.gen(function* () {
       const harness = yield* makeEnrollmentHarness({
