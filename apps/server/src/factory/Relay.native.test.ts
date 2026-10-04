@@ -1,4 +1,5 @@
 import { expect, it } from "@effect/vitest";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -7,6 +8,7 @@ import * as Effect from "effect/Effect";
 import * as Encoding from "effect/Encoding";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
@@ -93,11 +95,17 @@ const decode = Schema.decodeEffect(Schema.fromJsonString(Reply));
 
 it.live(
   "passes real source scope and native workspace failures through the relay",
-  () =>
+  (context) =>
     Effect.gen(function* () {
+      if ((yield* HostProcessPlatform) === "win32") context.skip();
       const fs = yield* FileSystem.FileSystem;
       const workspace = yield* fs.makeTempDirectoryScoped({ prefix: "t3-relay-native-workspace-" });
+      const outside = yield* fs.makeTempDirectoryScoped({ prefix: "t3-relay-native-outside-" });
       yield* fs.writeFileString(`${workspace}/safe.txt`, "native source content");
+      yield* fs.writeFileString(`${outside}/outside.txt`, "existing out-of-workspace content");
+      const path = yield* Path.Path;
+      const traversal = path.relative(workspace, `${outside}/outside.txt`);
+      expect(traversal).toMatch(/^\.\.\//);
       const configServices = yield* Layer.build(
         Config.layerTest(workspace, { prefix: "t3-relay-native-home-" }),
       );
@@ -206,7 +214,7 @@ it.live(
         _tag: "Success",
         value: { contents: "native source content" },
       });
-      yield* send(2, "projects.readFile", { cwd: workspace, relativePath: "../outside.txt" });
+      yield* send(2, "projects.readFile", { cwd: workspace, relativePath: traversal });
       expect((yield* response()).exit).toMatchObject({
         _tag: "Failure",
         cause: [{ _tag: "Fail", error: { _tag: "ProjectReadFileError" } }],
