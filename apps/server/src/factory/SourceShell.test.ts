@@ -738,7 +738,7 @@ it.effect("accepts a full authoritative baseline from a new connection lease", (
 );
 
 it.effect(
-  "replays into an intact projection after endpoint replacement and rejects the previous lease",
+  "replays into an intact projection after transport reconnect and rejects the previous lease",
   () =>
     Effect.gen(function* () {
       const h = yield* harness;
@@ -758,14 +758,10 @@ it.effect(
       yield* first.emitShell({ kind: "synchronized" });
       yield* h.nextFrame("synchronized", "env-a");
       const oldAccess = yield* h.connections.resolveTarget(targetA);
-      const current = (yield* h.metadata.listEnvironments)[0]!;
-      yield* h.connections.updateEnvironment({
-        registrationId: current.registrationId,
-        revision: current.revision,
-        endpoint: "https://replacement.example",
-      });
+      yield* first.fail("transport");
       yield* first.closed;
       yield* Queue.take(first.shellCancellations);
+      yield* h.connections.retry(targetA.registrationId);
       const second = yield* Queue.take(h.fake.attempts);
       yield* second.ready(sourceConfig("env-a"));
       expect(yield* Queue.take(second.shellCalls)).toMatchObject({ afterSequence: 10 });

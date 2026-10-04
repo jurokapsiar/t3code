@@ -67,12 +67,29 @@ const harness = Effect.gen(function* () {
     }),
   ).pipe(Layer.provide(fake.layer));
   const credentials = new Map<string, CredentialStore.StoredCredential>();
+  const identityOverrides = yield* Ref.make<ReadonlyArray<Metadata.EnrollmentReference> | null>(
+    null,
+  );
+  const metadataLayer = Layer.effect(
+    Metadata.Metadata,
+    Effect.gen(function* () {
+      const base = yield* Metadata.Metadata;
+      return Metadata.Metadata.of({
+        ...base,
+        listEnrollmentReferences: Ref.get(identityOverrides).pipe(
+          Effect.flatMap((overrides) =>
+            overrides === null ? base.listEnrollmentReferences : Effect.succeed(overrides),
+          ),
+        ),
+      });
+    }),
+  ).pipe(Layer.provide(Metadata.layer.pipe(Layer.provideMerge(SqlitePersistenceMemory))));
   const vaultFailed = yield* Ref.make(false);
   const scope = yield* Scope.make();
   yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
   const dependencies = Layer.mergeAll(
     CredentialMutations.layer,
-    Metadata.layer.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
+    metadataLayer,
     relayTransportLayer,
     Layer.succeed(Identity.ServerEnvironmentIdentity, {
       getEnvironmentId: Effect.succeed(EnvironmentId.make("factory")),
@@ -187,6 +204,7 @@ const harness = Effect.gen(function* () {
     enrollment: Context.get(services, Enrollment.Enrollment),
     lifecycle: Context.get(services, Enrollment.RegistrationLifecycle),
     vaultFailed,
+    identityOverrides,
     scope,
   };
 });
@@ -252,6 +270,79 @@ it.effect("rejects a mismatched environment target and invalidates its shell lea
   }),
 );
 
+it.effect("restarts a duplicate-identity owner when its competing registration is removed", () =>
+  Effect.gen(function* () {
+    const h = yield* harness;
+    yield* h.register("a", "env-a");
+    yield* h.register("b", "env-b");
+    const references = yield* h.metadata.listEnrollmentReferences;
+    const first = references.find((reference) => reference.environment.registrationId === "a");
+    const second = references.find((reference) => reference.environment.registrationId === "b");
+    if (first === undefined || second === undefined)
+      return yield* Effect.die("Missing test source.");
+    yield* Ref.set(
+      h.identityOverrides,
+      references.map((reference) =>
+        reference.environment.registrationId === "a"
+          ? {
+              ...reference,
+              environment: {
+                ...reference.environment,
+                environmentId: second.environment.environmentId,
+              },
+            }
+          : reference,
+      ),
+    );
+    expect(
+      new Set(
+        (yield* h.metadata.listEnrollmentReferences).map(
+          (reference) => reference.environment.environmentId,
+        ),
+      ),
+    ).toEqual(new Set(["env-b"]));
+    yield* h.connections.start;
+    expect(h.fake.calls).toHaveLength(0);
+    expect((yield* h.wait("a", "blocked")).reason).toBe("identity");
+    expect(
+      (yield* h.connections.getStates).find((state) => state.target.registrationId === "b"),
+    ).toMatchObject({ phase: "blocked", reason: "identity" });
+    expect(h.fake.calls).toHaveLength(0);
+
+    yield* Ref.set(h.identityOverrides, null);
+    const current = (yield* h.metadata.listEnvironments).find(
+      (environment) => environment.registrationId === "a",
+    );
+    if (current === undefined) return yield* Effect.die("Missing competing source.");
+    const removing = yield* h.metadata.markRemoving({
+      registrationId: current.registrationId,
+      revision: current.revision,
+    });
+    const cleared = yield* h.metadata.clearCredentialReference(removing.registrationId);
+    yield* h.metadata.removeEnvironment({
+      registrationId: cleared.registrationId,
+      revision: cleared.revision,
+    });
+    const currentStates = yield* h.connections.getStates;
+    expect(currentStates.find((state) => state.target.registrationId === "b")?.phase).not.toBe(
+      "blocked",
+    );
+
+    const attempt = yield* Queue.take(h.fake.attempts);
+    expect(attempt.input.environment.registrationId).toBe("b");
+    expect(attempt.input.environment.environmentId).toBe("env-b");
+    expect(attempt.input.credential.token).toBe("test-token-b");
+    yield* attempt.ready(config("env-b"));
+    expect((yield* h.wait("b", "online")).reason).toBeUndefined();
+    expect(
+      (yield* h.connections.resolveTarget(target("b", "env-b"))).config.environment.environmentId,
+    ).toBe("env-b");
+
+    yield* attempt.emitConfig({ version: 1, type: "snapshot", config: config("env-a") });
+    expect((yield* h.wait("b", "blocked")).reason).toBe("identity");
+  }),
+);
+
 it.effect("keeps equal local IDs scoped to their source and does not wait for a slow source", () =>
   Effect.gen(function* () {
     const h = yield* harness;
@@ -295,7 +386,7 @@ it.effect("keeps equal local IDs scoped to their source and does not wait for a 
   }),
 );
 
-it.effect("replaces endpoints once and resumes only the projection-supplied cursor", () =>
+it.effect("rejects enrolled endpoint changes and resumes only the projection-supplied cursor", () =>
   Effect.gen(function* () {
     const h = yield* harness;
     yield* h.register();
@@ -306,22 +397,23 @@ it.effect("replaces endpoints once and resumes only the projection-supplied curs
     const access = yield* h.connections.resolveTarget(target());
     yield* access.checkShellCurrent;
     const current = (yield* h.metadata.listEnvironments)[0]!;
-    yield* h.metadata.updateEnvironment({
-      registrationId: current.registrationId,
-      revision: current.revision,
-      endpoint: "https://replacement.example",
-    });
-    yield* first.closed;
-    const second = yield* Queue.take(h.fake.attempts);
-    expect(second.input.environment.endpoint).toBe("https://replacement.example");
-    yield* second.ready(config("env-a", null));
-    yield* h.wait("a", "online");
-    const next = yield* h.connections.resolveTarget(target());
-    yield* Stream.toQueue(next.shell(NonNegativeInt.make(8)), { capacity: 64 });
-    expect(next.connectionId).not.toBe(access.connectionId);
-    expect(yield* Queue.take(second.shellCalls)).toEqual({
+    const rejected = yield* Effect.flip(
+      h.connections.updateEnvironment({
+        registrationId: current.registrationId,
+        revision: current.revision,
+        endpoint: "https://replacement.example",
+      }),
+    );
+    expect(rejected).toMatchObject({ code: "invalid-request" });
+    expect(h.fake.calls.map((call) => call.environment.endpoint)).toEqual(["https://a.example"]);
+    expect(h.fake.calls.map((call) => call.credential.token)).toEqual(["test-token-a"]);
+    expect((yield* h.connections.resolveTarget(target())).connectionId).toBe(access.connectionId);
+
+    yield* Stream.toQueue(access.shell(NonNegativeInt.make(8)), { capacity: 64 });
+    expect(yield* Queue.take(first.shellCalls)).toEqual({
       afterSequence: 8,
       requestCompletionMarker: true,
+      batchedReplay: true,
     });
     yield* h.metadata.setRenewalStatus(current.registrationId, "ready");
     const latest = (yield* h.metadata.listEnvironments)[0]!;
@@ -330,8 +422,8 @@ it.effect("replaces endpoints once and resumes only the projection-supplied curs
       revision: latest.revision,
       label: "Renamed source",
     });
-    expect(h.fake.calls).toHaveLength(2);
-    expect((yield* h.connections.resolveTarget(target())).connectionId).toBe(next.connectionId);
+    expect(h.fake.calls).toHaveLength(1);
+    expect((yield* h.connections.resolveTarget(target())).connectionId).toBe(access.connectionId);
   }),
 );
 

@@ -206,6 +206,21 @@ export class Metadata extends Context.Service<
 const factoryError = (code: FactoryErrorCode, message: string) =>
   new FactoryError({ code, message });
 
+const normalizeEndpoint = (endpoint: string) => {
+  try {
+    const url = new URL(endpoint);
+    return ["http:", "https:"].includes(url.protocol) &&
+      !url.username &&
+      !url.password &&
+      !url.search &&
+      !url.hash
+      ? url.href
+      : null;
+  } catch {
+    return null;
+  }
+};
+
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const crypto = yield* Crypto.Crypto;
@@ -269,6 +284,15 @@ const make = Effect.gen(function* () {
       SELECT group_id AS "groupId", environment_id AS "environmentId", project_id AS "projectId"
       FROM factory_project_memberships
       ORDER BY environment_id, project_id
+    `,
+  });
+
+  const selectProjectMembership = SqlSchema.findAll({
+    Request: Schema.Struct({ environmentId: EnvironmentId, projectId: ProjectId }),
+    Result: Schema.Struct({ groupId: FactoryGroupId }),
+    execute: ({ environmentId, projectId }) => sql`
+      SELECT group_id AS "groupId" FROM factory_project_memberships
+      WHERE environment_id = ${environmentId} AND project_id = ${projectId}
     `,
   });
 
@@ -370,6 +394,20 @@ const make = Effect.gen(function* () {
           ),
         ),
     );
+
+  const bumpGroupRevisions = (groupIds: ReadonlyArray<FactoryGroupId>) =>
+    Effect.gen(function* () {
+      const uniqueIds = [...new Set(groupIds)];
+      if (uniqueIds.length === 0) return;
+      const updatedAt = DateTime.formatIso(yield* DateTime.now.pipe(Effect.orDie));
+      for (const groupId of uniqueIds) {
+        yield* sql`
+          UPDATE factory_project_groups
+          SET revision = revision + 1, updated_at = ${updatedAt}
+          WHERE id = ${groupId}
+        `.pipe(Effect.orDie);
+      }
+    });
 
   const requireGroupRevision = (groupId: FactoryGroupId, expectedRevision: number) =>
     Effect.gen(function* () {
@@ -528,9 +566,23 @@ const make = Effect.gen(function* () {
           ) {
             return yield* factoryError("conflict", "Enroll the source before enabling it.");
           }
+          if (
+            current.credentialStorage !== null &&
+            input.endpoint !== undefined &&
+            normalizeEndpoint(input.endpoint) !== normalizeEndpoint(current.endpoint)
+          ) {
+            return yield* factoryError(
+              "invalid-request",
+              "An enrolled source endpoint cannot be changed. Remove and register the source again.",
+            );
+          }
+          const endpoint =
+            current.credentialStorage === null
+              ? (input.endpoint ?? current.endpoint)
+              : current.endpoint;
           yield* sql`
             UPDATE factory_environments
-            SET endpoint = ${input.endpoint ?? current.endpoint},
+            SET endpoint = ${endpoint},
                 label = ${input.label ?? current.label},
                 enabled = ${(input.enabled ?? current.enabled) ? 1 : 0},
                 state = ${input.enabled === false && current.state !== "pending" && current.state !== "removing" ? "offline" : current.state},
@@ -826,12 +878,21 @@ const make = Effect.gen(function* () {
           if (!environments.some((row) => row.environmentId === input.project.environmentId)) {
             return yield* factoryError("not-found", "The source environment does not exist.");
           }
+          const memberships = yield* selectProjectMembership({
+            environmentId: input.project.environmentId,
+            projectId: input.project.projectId,
+          }).pipe(Effect.orDie);
+          const previousGroupId = memberships[0]?.groupId;
           yield* sql`
             INSERT INTO factory_project_memberships (environment_id, project_id, group_id)
             VALUES (${input.project.environmentId}, ${input.project.projectId}, ${input.groupId})
             ON CONFLICT (environment_id, project_id)
             DO UPDATE SET group_id = excluded.group_id
           `.pipe(Effect.orDie);
+          if (previousGroupId !== input.groupId)
+            yield* bumpGroupRevisions(
+              previousGroupId === undefined ? [input.groupId] : [previousGroupId, input.groupId],
+            );
           yield* sql`
             DELETE FROM factory_favorites
             WHERE target_kind = 'project' AND environment_id = ${input.project.environmentId}
@@ -849,7 +910,11 @@ const make = Effect.gen(function* () {
             AND project_id = ${input.project.projectId}
           RETURNING 1 AS removed
         `.pipe(
-          Effect.map((rows) => ({ removed: rows.length > 0 })),
+          Effect.flatMap((rows) =>
+            rows.length > 0
+              ? bumpGroupRevisions([input.groupId]).pipe(Effect.as({ removed: true }))
+              : Effect.succeed({ removed: false }),
+          ),
           Effect.orDie,
         ),
       ),
@@ -859,7 +924,10 @@ const make = Effect.gen(function* () {
         Effect.gen(function* () {
           const target = input.target;
           if (!input.favorite) {
+            const favorites = yield* readFavorites();
+            const existed = favorites.some((favorite) => sameTarget(favorite.target, target));
             yield* deleteFavoriteTarget(target);
+            if (existed && target.kind === "group") yield* bumpGroupRevisions([target.groupId]);
             return null;
           }
           if (target.kind === "group") {
@@ -891,6 +959,7 @@ const make = Effect.gen(function* () {
           const order =
             favorites.reduce((maximum, favorite) => Math.max(maximum, favorite.order), -1) + 1;
           yield* insertFavorite(target, order);
+          if (target.kind === "group") yield* bumpGroupRevisions([target.groupId]);
           return { target, order } satisfies FactoryFavorite;
         }),
       ),
@@ -912,9 +981,16 @@ const make = Effect.gen(function* () {
               "Reorder must include each favorite once.",
             );
           }
+          const changedGroups = input.targets.flatMap((target, order) =>
+            target.kind === "group" &&
+            favorites.find((favorite) => sameTarget(favorite.target, target))?.order !== order
+              ? [target.groupId]
+              : [],
+          );
           for (const [order, target] of input.targets.entries()) {
             yield* updateFavoriteOrder(target, order);
           }
+          yield* bumpGroupRevisions(changedGroups);
           return yield* readFavorites();
         }),
       ),

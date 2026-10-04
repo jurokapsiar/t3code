@@ -195,6 +195,54 @@ metadataLayer("Factory metadata", (it) => {
     }),
   );
 
+  it.effect(
+    "keeps an enrolled endpoint immutable while allowing equivalent URLs and metadata edits",
+    () =>
+      Effect.gen(function* () {
+        const metadata = yield* Metadata.Metadata;
+        const pending = environment("registration-endpoint", "endpoint-environment");
+        yield* metadata.createEnvironment(pending);
+        const enrolled = yield* metadata.markEnrollment({
+          registrationId: pending.registrationId,
+          credentialStorage: "secure-vault",
+          credentialItemKey: "endpoint-credential",
+          credentialExpiresAt: null,
+        });
+
+        const rejected = yield* Effect.flip(
+          metadata.updateEnvironment({
+            registrationId: enrolled.registrationId,
+            revision: enrolled.revision,
+            endpoint: "https://attacker.example",
+          }),
+        );
+        expect(rejected).toMatchObject({ code: "invalid-request" });
+        expect(
+          (yield* metadata.getEnrollmentReference(enrolled.registrationId))?.environment,
+        ).toMatchObject({ endpoint: pending.endpoint, credentialStorage: "secure-vault" });
+
+        const updated = yield* metadata.updateEnvironment({
+          registrationId: enrolled.registrationId,
+          revision: enrolled.revision,
+          endpoint: "https://ENDPOINT-ENVIRONMENT.EXAMPLE:443/",
+          label: "Renamed source",
+          enabled: false,
+        });
+        expect(updated).toMatchObject({
+          endpoint: pending.endpoint,
+          label: "Renamed source",
+          enabled: false,
+        });
+
+        const enabled = yield* metadata.updateEnvironment({
+          registrationId: updated.registrationId,
+          revision: updated.revision,
+          enabled: true,
+        });
+        expect(enabled.enabled).toBe(true);
+      }),
+  );
+
   it.effect("publishes cleanup pending separately from renewal failure", () =>
     Effect.gen(function* () {
       const metadata = yield* Metadata.Metadata;
@@ -249,7 +297,7 @@ metadataLayer("Factory metadata", (it) => {
     Effect.gen(function* () {
       const metadata = yield* Metadata.Metadata;
       const group = yield* metadata.createGroup({ name: "Review" });
-      const renamed = yield* metadata.renameGroup({
+      yield* metadata.renameGroup({
         groupId: group.id,
         name: "Reviewed",
         revision: group.revision,
@@ -264,7 +312,8 @@ metadataLayer("Factory metadata", (it) => {
       expect(conflict).toMatchObject({ _tag: "FactoryError", code: "conflict" });
 
       yield* metadata.setFavorite({ target: { kind: "group", groupId: group.id }, favorite: true });
-      yield* metadata.deleteGroup({ groupId: group.id, revision: renamed.revision });
+      const favorited = (yield* metadata.getSnapshot).groups.find((item) => item.id === group.id)!;
+      yield* metadata.deleteGroup({ groupId: group.id, revision: favorited.revision });
       const afterDelete = yield* metadata.getSnapshot;
       expect(afterDelete.groups.some((item) => item.id === group.id)).toBe(false);
       expect(
@@ -272,6 +321,86 @@ metadataLayer("Factory metadata", (it) => {
           (item) => item.target.kind === "group" && item.target.groupId === group.id,
         ),
       ).toBe(false);
+    }),
+  );
+
+  it.effect("bumps both group revisions when membership moves and guards stale deletes", () =>
+    Effect.gen(function* () {
+      const metadata = yield* Metadata.Metadata;
+      yield* metadata.createEnvironment(environment("registration-groups", "environment-groups"));
+      const source = yield* metadata.createGroup({ name: "Source" });
+      const destination = yield* metadata.createGroup({ name: "Destination" });
+      const key = project("environment-groups", "project-1");
+
+      yield* metadata.assignProject({ groupId: source.id, project: key });
+      const afterAssign = yield* metadata.getSnapshot;
+      const assignedSource = afterAssign.groups.find((item) => item.id === source.id)!;
+      expect(assignedSource.revision).toBe(source.revision + 1);
+      expect(
+        yield* Effect.flip(metadata.deleteGroup({ groupId: source.id, revision: source.revision })),
+      ).toMatchObject({ code: "conflict" });
+
+      yield* metadata.assignProject({ groupId: destination.id, project: key });
+      const afterMove = yield* metadata.getSnapshot;
+      const movedSource = afterMove.groups.find((item) => item.id === source.id)!;
+      const movedDestination = afterMove.groups.find((item) => item.id === destination.id)!;
+      expect(movedSource.revision).toBe(assignedSource.revision + 1);
+      expect(movedDestination.revision).toBe(destination.revision + 1);
+      expect(
+        yield* Effect.flip(
+          metadata.deleteGroup({ groupId: destination.id, revision: destination.revision }),
+        ),
+      ).toMatchObject({ code: "conflict" });
+
+      yield* metadata.unassignProject({ groupId: destination.id, project: key });
+      const afterUnassign = (yield* metadata.getSnapshot).groups.find(
+        (item) => item.id === destination.id,
+      )!;
+      expect(afterUnassign.revision).toBe(movedDestination.revision + 1);
+    }),
+  );
+
+  it.effect("bumps group revisions when group favorites are added, removed, and reordered", () =>
+    Effect.gen(function* () {
+      const metadata = yield* Metadata.Metadata;
+      const first = yield* metadata.createGroup({ name: "First" });
+      const second = yield* metadata.createGroup({ name: "Second" });
+
+      yield* metadata.setFavorite({ target: { kind: "group", groupId: first.id }, favorite: true });
+      let snapshot = yield* metadata.getSnapshot;
+      let firstRevision = snapshot.groups.find((item) => item.id === first.id)!.revision;
+      expect(firstRevision).toBe(first.revision + 1);
+      expect(
+        yield* Effect.flip(metadata.deleteGroup({ groupId: first.id, revision: first.revision })),
+      ).toMatchObject({ code: "conflict" });
+
+      yield* metadata.setFavorite({
+        target: { kind: "group", groupId: second.id },
+        favorite: true,
+      });
+      snapshot = yield* metadata.getSnapshot;
+      const secondRevision = snapshot.groups.find((item) => item.id === second.id)!.revision;
+      yield* metadata.reorderFavorites({
+        targets: [
+          { kind: "group", groupId: second.id },
+          { kind: "group", groupId: first.id },
+        ],
+      });
+      snapshot = yield* metadata.getSnapshot;
+      firstRevision = snapshot.groups.find((item) => item.id === first.id)!.revision;
+      expect(firstRevision).toBeGreaterThan(first.revision + 1);
+      expect(snapshot.groups.find((item) => item.id === second.id)!.revision).toBe(
+        secondRevision + 1,
+      );
+
+      yield* metadata.setFavorite({
+        target: { kind: "group", groupId: first.id },
+        favorite: false,
+      });
+      snapshot = yield* metadata.getSnapshot;
+      expect(snapshot.groups.find((item) => item.id === first.id)!.revision).toBe(
+        firstRevision + 1,
+      );
     }),
   );
 
@@ -301,10 +430,24 @@ metadataLayer("Factory metadata", (it) => {
 
       yield* metadata.setFavorite({ target, favorite: true });
       yield* metadata.assignProject({ groupId: group.id, project: key });
-      expect((yield* metadata.getSnapshot).favorites).toEqual([]);
+      expect(
+        (yield* metadata.getSnapshot).favorites.filter(
+          (favorite) =>
+            favorite.target.kind === "project" &&
+            favorite.target.project.environmentId === key.environmentId &&
+            favorite.target.project.projectId === key.projectId,
+        ),
+      ).toEqual([]);
       yield* metadata.unassignProject({ groupId: group.id, project: key });
       yield* metadata.setFavorite({ target, favorite: true });
-      expect((yield* metadata.getSnapshot).favorites).toHaveLength(1);
+      expect(
+        (yield* metadata.getSnapshot).favorites.filter(
+          (favorite) =>
+            favorite.target.kind === "project" &&
+            favorite.target.project.environmentId === key.environmentId &&
+            favorite.target.project.projectId === key.projectId,
+        ),
+      ).toHaveLength(1);
     }),
   );
 });

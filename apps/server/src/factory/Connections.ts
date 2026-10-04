@@ -138,6 +138,7 @@ interface Owner {
   readonly reference: Metadata.EnrollmentReference;
   failures: number;
   state: SourceState;
+  identityBlockers: ReadonlyArray<FactoryRegistrationId> | undefined;
   fiber: Fiber.Fiber<void> | undefined;
   session: SourceSession | undefined;
   authorization?: Pick<CredentialStore.StoredCredential, "scopes" | "expiresAt"> | undefined;
@@ -154,6 +155,23 @@ const sameReference = (a: Metadata.EnrollmentReference, b: Metadata.EnrollmentRe
   isEnabled(a.environment) === isEnabled(b.environment) &&
   a.credentialStorage === b.credentialStorage &&
   a.credentialItemKey === b.credentialItemKey;
+const identityBlockersFor = (
+  reference: Metadata.EnrollmentReference,
+  references: ReadonlyArray<Metadata.EnrollmentReference>,
+) =>
+  references
+    .filter(
+      (other) =>
+        other.environment.registrationId !== reference.environment.registrationId &&
+        isEnabled(other.environment) &&
+        other.environment.environmentId === reference.environment.environmentId,
+    )
+    .map((other) => other.environment.registrationId)
+    .sort();
+const sameIdentityBlockers = (
+  left: ReadonlyArray<FactoryRegistrationId>,
+  right: ReadonlyArray<FactoryRegistrationId>,
+) => left.length === right.length && left.every((id, index) => id === right[index]);
 
 const make = Effect.gen(function* () {
   const scope = yield* Scope.Scope;
@@ -204,15 +222,12 @@ const make = Effect.gen(function* () {
         Effect.gen(function* () {
           yield* setState(owner, "connecting");
           const reference = owner.reference;
-          if (
-            reference.environment.environmentId === localId ||
-            [...owners.values()].some(
-              (other) =>
-                other !== owner &&
-                isEnabled(other.reference.environment) &&
-                other.reference.environment.environmentId === reference.environment.environmentId,
-            )
-          ) {
+          const blockers = identityBlockersFor(
+            reference,
+            [...owners.values()].map((other) => other.reference),
+          );
+          owner.identityBlockers = blockers;
+          if (reference.environment.environmentId === localId || blockers.length > 0) {
             return yield* new SourceFailure({ reason: "identity" });
           }
           if (
@@ -379,7 +394,18 @@ const make = Effect.gen(function* () {
     for (const reference of references) {
       const id = reference.environment.registrationId;
       const previous = owners.get(id);
-      if (previous !== undefined && sameReference(previous.reference, reference) && wake !== id)
+      const blockers = identityBlockersFor(reference, references);
+      const identityBlockersChanged =
+        previous?.state.phase === "blocked" &&
+        previous.state.reason === "identity" &&
+        previous.identityBlockers !== undefined &&
+        !sameIdentityBlockers(previous.identityBlockers, blockers);
+      if (
+        previous !== undefined &&
+        sameReference(previous.reference, reference) &&
+        wake !== id &&
+        !identityBlockersChanged
+      )
         continue;
       if (previous !== undefined) yield* stop(previous);
       const unchangedIdentity =
@@ -393,6 +419,7 @@ const make = Effect.gen(function* () {
           reason: undefined,
           config: unchangedIdentity ? previous.state.config : null,
         },
+        identityBlockers: undefined,
         fiber: undefined,
         session: undefined,
         ended: undefined,
