@@ -118,6 +118,7 @@ interface SourceProjection {
   invalidData: boolean;
   connectionId: object | undefined;
   firstItemOnConnection: boolean;
+  awaitingLegacyBaseline: boolean;
 }
 
 interface Consumer {
@@ -233,6 +234,7 @@ const makeProjection = (target: FactoryRemoteTarget): SourceProjection => ({
   invalidData: false,
   connectionId: undefined,
   firstItemOnConnection: false,
+  awaitingLegacyBaseline: false,
 });
 
 const stateOf = (source: SourceProjection): SourceShellState => ({
@@ -549,7 +551,11 @@ const make = Effect.gen(function* () {
     yield* access.checkShellCurrent;
     const firstItemOnConnection = source.firstItemOnConnection;
     source.firstItemOnConnection = false;
-    const change = reduce(source, item, firstItemOnConnection);
+    const change =
+      source.awaitingLegacyBaseline &&
+      (item.kind !== "snapshot" || item.resolvedRepositoryIdentityRoots !== undefined)
+        ? undefined
+        : reduce(source, item, firstItemOnConnection);
     if (change === undefined) {
       source.invalidData = true;
       source.freshness = FactorySourceFreshness.make({
@@ -565,13 +571,19 @@ const make = Effect.gen(function* () {
     if (change.kind === "stale") return;
 
     const frame = frameForChange(access.target, source, change);
+    const legacyBaseline =
+      source.awaitingLegacyBaseline &&
+      change.kind === "snapshot" &&
+      change.resolvedRoots === undefined;
     const synchronizedAt =
-      change.kind === "synchronized" && !source.invalidData && source.appliedCursor !== undefined
+      legacyBaseline ||
+      (change.kind === "synchronized" && !source.invalidData && source.appliedCursor !== undefined)
         ? yield* DateTime.now
         : undefined;
     yield* access.checkShellCurrent;
-    if (synchronizedAt !== undefined) yield* access.shellSynchronized;
     applyChange(source, change);
+    if (legacyBaseline) source.awaitingLegacyBaseline = false;
+    if (synchronizedAt !== undefined) yield* access.shellSynchronized;
     if (synchronizedAt !== undefined) source.freshness = fresh(source.target, synchronizedAt);
     revision++;
     const update: InternalUpdate = {
@@ -582,6 +594,7 @@ const make = Effect.gen(function* () {
           : { kind: "frame", frame },
     };
     yield* PubSub.publish(changes, update);
+    if (legacyBaseline) yield* publishSource(source);
   });
 
   const consume = Effect.fnUntraced(function* (
@@ -633,6 +646,7 @@ const make = Effect.gen(function* () {
     }
     source.connectionId = access.connectionId;
     source.firstItemOnConnection = true;
+    source.awaitingLegacyBaseline = access.config.shellResumeCompletionMarker !== true;
     source.freshness = FactorySourceFreshness.make({
       target: source.target,
       state: sourceHasRows(source) ? "stale" : "synchronizing",

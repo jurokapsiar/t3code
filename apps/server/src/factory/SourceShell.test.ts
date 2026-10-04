@@ -32,6 +32,7 @@ import * as CredentialRenewal from "./CredentialRenewal.ts";
 import * as CredentialStore from "./CredentialStore.ts";
 import * as Metadata from "./Metadata.ts";
 import * as SourceShell from "./SourceShell.ts";
+import * as RelayPolicy from "./RelayPolicy.ts";
 import * as FakeSource from "./testkit/FakeSource.ts";
 import { config as sourceConfig } from "./testkit/sourceConfig.ts";
 
@@ -128,7 +129,9 @@ const harness = Effect.gen(function* () {
   );
   const connectionLayer = Connections.layer.pipe(Layer.provideMerge(dependencies));
   const services = yield* Layer.buildWithScope(
-    SourceShell.layer.pipe(Layer.provideMerge(connectionLayer)),
+    RelayPolicy.layer.pipe(
+      Layer.provideMerge(SourceShell.layer.pipe(Layer.provideMerge(connectionLayer))),
+    ),
     scope,
   );
   const connections = Context.get(services, Connections.Connections);
@@ -136,12 +139,16 @@ const harness = Effect.gen(function* () {
   const metadata = Context.get(services, Metadata.Metadata);
   const updates = yield* Stream.toQueue(sourceShell.subscribe, { capacity: 256 });
   const connectionUpdates = yield* Stream.toQueue(connections.subscribeStates, { capacity: 64 });
-  const register = Effect.fnUntraced(function* (id: string, environmentId = `env-${id}`) {
+  const register = Effect.fnUntraced(function* (
+    id: string,
+    environmentId = `env-${id}`,
+    scopes: CredentialStore.StoredCredential["scopes"] = ["orchestration:read"],
+  ) {
     const now = yield* DateTime.now;
     credentials.set(id, {
       token: `token-${id}`,
       sourceSessionId: AuthSessionId.make(`session-${id}`),
-      scopes: ["orchestration:read"],
+      scopes,
       issuedAt: now,
       expiresAt: DateTime.add(now, { days: 30 }),
     });
@@ -195,6 +202,7 @@ const harness = Effect.gen(function* () {
     fake,
     connections,
     sourceShell,
+    relayPolicy: Context.get(services, RelayPolicy.RelayPolicy),
     metadata,
     updates,
     connectionUpdates,
@@ -242,6 +250,148 @@ it.effect("binds control freshness to the exact source connection lease", () =>
     );
     expect(yield* h.sourceShell.isSynchronized(access)).toBe(false);
   }),
+);
+
+it.effect.each([undefined, false] as const)(
+  "synchronizes legacy marker=%s only after a full current-lease baseline",
+  (marker) =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      const targetA = yield* h.register("a", "env-a", [
+        "orchestration:read",
+        "orchestration:operate",
+      ]);
+      const { shellResumeCompletionMarker: _, ...legacy } = sourceConfig("env-a");
+      const config = {
+        ...legacy,
+        ...(marker === undefined ? {} : { shellResumeCompletionMarker: marker }),
+      };
+      yield* h.start;
+      const first = yield* Queue.take(h.fake.attempts);
+      yield* first.ready(config);
+      expect(yield* Queue.take(first.shellCalls)).not.toHaveProperty("afterSequence");
+      const access = yield* h.connections.resolveTarget(targetA);
+      expect(yield* h.sourceShell.isSynchronized(access)).toBe(false);
+      const control = {
+        target: targetA,
+        callerScopes: ["factory:control"] as const,
+        operation: "message.dispatch" as const,
+      };
+      expect(yield* h.relayPolicy.observeControl(control)).toEqual({
+        allowed: false,
+        reason: "source-stale",
+      });
+      yield* first.emitShell(snapshot(10, [project("p", "Before")], [thread("t", "p")]));
+      yield* h.nextFrame("snapshot", "env-a");
+      expect(yield* h.sourceShell.isSynchronized(access)).toBe(true);
+      expect(yield* h.relayPolicy.observeControl(control)).toEqual({ allowed: true });
+      expect(
+        yield* h.relayPolicy.observeControl({ ...control, callerScopes: ["factory:read"] }),
+      ).toEqual({ allowed: false, reason: "scope-required" });
+      expect(
+        yield* h.relayPolicy.observeControl({ ...control, target: target("a", "other") }),
+      ).toEqual({ allowed: false, reason: "target-mismatch" });
+      expect((yield* h.state("env-a"))?.freshness.state).toBe("fresh");
+      expect(yield* h.sourceShell.isSynchronized({ ...access, connectionId: {} })).toBe(false);
+      expect(yield* h.sourceShell.isSynchronized({ ...access, target: target("a", "other") })).toBe(
+        false,
+      );
+      yield* first.failShell("transport");
+      yield* h.nextUpdate(
+        (update) => update.kind === "source" && update.source.freshness.state === "stale",
+      );
+      yield* first.closed;
+      yield* TestClock.adjust("1 second");
+      const second = yield* Queue.take(h.fake.attempts);
+      yield* second.ready(config);
+      const request = yield* Queue.take(second.shellCalls);
+      expect(request).not.toHaveProperty("afterSequence");
+      expect(request).not.toHaveProperty("requestCompletionMarker");
+      const nextAccess = yield* h.connections.resolveTarget(targetA);
+      expect(yield* h.sourceShell.isSynchronized(nextAccess)).toBe(false);
+      expect(yield* h.relayPolicy.observeControl(control)).toEqual({
+        allowed: false,
+        reason: "source-stale",
+      });
+      yield* second.emitShell({
+        kind: "project.updated",
+        sequence: 11,
+        project: project("p", "Unsafe delta"),
+      });
+      yield* h.nextUpdate(
+        (update) => update.kind === "source" && update.source.freshness.reason === "invalid-data",
+      );
+      expect(yield* h.sourceShell.isSynchronized(nextAccess)).toBe(false);
+      expect((yield* h.state("env-a"))?.projects[0]?.title).toBe("Before");
+      yield* second.emitShell(snapshot(12, [project("p", "")]));
+      yield* h.nextUpdate(
+        (update) => update.kind === "source" && update.source.freshness.reason === "invalid-data",
+      );
+      expect((yield* h.state("env-a"))?.appliedCursor).toBe(10);
+      expect(yield* h.sourceShell.isSynchronized(nextAccess)).toBe(false);
+      yield* second.emitShell(snapshot(12, [project("p", "Authoritative")]));
+      yield* h.nextFrame("snapshot", "env-a");
+      expect(yield* h.sourceShell.isSynchronized(nextAccess)).toBe(true);
+      expect(yield* h.relayPolicy.observeControl(control)).toEqual({ allowed: true });
+      expect(yield* h.sourceShell.isSynchronized(access)).toBe(false);
+      expect((yield* h.state("env-a"))?.threads).toEqual([]);
+      yield* second.emitShell(snapshot(9, [project("p", "Stale")]));
+      yield* second.emitShell({
+        kind: "project.updated",
+        sequence: 13,
+        project: project("p", "Current"),
+      });
+      yield* h.nextFrame("project.updated", "env-a");
+      expect((yield* h.state("env-a"))?.projects[0]?.title).toBe("Current");
+      expect((yield* h.state("env-a"))?.freshness.state).toBe("fresh");
+    }),
+);
+
+it.effect("resets legacy shell backoff only after the complete snapshot is applied", () =>
+  Effect.gen(function* () {
+    const h = yield* harness;
+    yield* h.register("a");
+    const { shellResumeCompletionMarker: _, ...legacy } = sourceConfig("env-a");
+    yield* h.start;
+    const first = yield* Queue.take(h.fake.attempts);
+    yield* first.ready(legacy);
+    yield* Queue.take(first.shellCalls);
+    yield* first.failShell("transport");
+    yield* h.nextUpdate(
+      (update) => update.kind === "source" && update.source.freshness.state === "offline",
+    );
+    yield* first.closed;
+    yield* TestClock.adjust("500 millis");
+    const second = yield* Queue.take(h.fake.attempts);
+    yield* second.ready(legacy);
+    yield* Queue.take(second.shellCalls);
+    yield* second.failShell("transport");
+    yield* h.nextUpdate(
+      (update) => update.kind === "source" && update.source.freshness.state === "offline",
+    );
+    yield* second.closed;
+    yield* TestClock.adjust("999 millis");
+    expect(h.fake.calls).toHaveLength(2);
+    yield* TestClock.adjust("1 milli");
+    const baseline = yield* Queue.take(h.fake.attempts);
+    yield* baseline.ready(legacy);
+    yield* Queue.take(baseline.shellCalls);
+    yield* baseline.emitShell(snapshot(7, []));
+    yield* h.nextFrame("snapshot", "env-a");
+    expect((yield* h.state("env-a"))?.freshness.state).toBe("fresh");
+    yield* baseline.failShell("transport");
+    yield* h.nextUpdate(
+      (update) => update.kind === "source" && update.source.freshness.state === "offline",
+    );
+    yield* baseline.closed;
+    yield* TestClock.adjust("499 millis");
+    expect(h.fake.calls).toHaveLength(3);
+    yield* TestClock.adjust("1 milli");
+    yield* Queue.take(h.fake.attempts);
+    expect(h.fake.calls).toHaveLength(4);
+  }).pipe(
+    Effect.provideService(Random.Random, { nextIntUnsafe: () => 0, nextDoubleUnsafe: () => 0 }),
+  ),
 );
 
 it("does not advance the applied cursor when a source update fails", () => {

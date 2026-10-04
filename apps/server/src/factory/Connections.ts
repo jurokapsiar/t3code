@@ -532,7 +532,9 @@ const make = Effect.gen(function* () {
             Effect.as(
               session
                 .shell({
-                  ...(afterSequence === undefined ? {} : { afterSequence }),
+                  ...(config.shellResumeCompletionMarker === true && afterSequence !== undefined
+                    ? { afterSequence }
+                    : {}),
                   ...(config.shellResumeCompletionMarker === true
                     ? { requestCompletionMarker: true }
                     : {}),
