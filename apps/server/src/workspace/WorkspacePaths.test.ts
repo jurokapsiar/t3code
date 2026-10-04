@@ -1,4 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodePath from "@effect/platform-node/NodePath";
 import { it, describe, expect } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -168,6 +169,35 @@ it.layer(TestLayer)("WorkspacePathsLive", (it) => {
   });
 
   describe("resolveRelativePathWithinRoot", () => {
+    it.effect("normalizes Windows separators and rejects native Windows absolute paths", () =>
+      Effect.gen(function* () {
+        const workspacePaths = yield* WorkspacePaths.make.pipe(Effect.provide(NodePath.layerWin32));
+        expect(
+          yield* workspacePaths.resolveRelativePathWithinRoot({
+            workspaceRoot: "C:\\project",
+            relativePath: "src\\main.ts",
+          }),
+        ).toEqual({ absolutePath: "C:\\project\\src\\main.ts", relativePath: "src/main.ts" });
+        for (const relativePath of [
+          "C:\\outside",
+          "C:/outside",
+          "\\\\server\\share\\outside",
+          "\\outside",
+          "..\\outside",
+          "../outside",
+          "D:outside",
+        ]) {
+          const error = yield* workspacePaths
+            .resolveRelativePathWithinRoot({
+              workspaceRoot: "C:\\project",
+              relativePath,
+            })
+            .pipe(Effect.flip);
+          expect(error._tag).toBe("WorkspacePathOutsideRootError");
+        }
+      }),
+    );
+
     it.effect("resolves relative paths inside the workspace root", () =>
       Effect.gen(function* () {
         const workspacePaths = yield* WorkspacePaths.WorkspacePaths;

@@ -58,6 +58,37 @@ const writeTextFile = Effect.fn("writeTextFile")(function* (
 
 it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (it) => {
   describe("readFile", () => {
+    it.effect.skipIf(HostProcessPlatform.defaultValue() === "win32")(
+      "lists and reads POSIX colon and literal backslash names without changing identity",
+      () =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTempDir;
+          const entries = yield* WorkspaceEntries.WorkspaceEntries;
+          const files = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+          const names = ["normal.txt", "C:notes.txt", "a\\b.txt", "dir\\name/child.txt"];
+          for (const name of names) yield* writeTextFile(cwd, name, "native text");
+          const root = yield* entries.list({ cwd, directoryPath: "" });
+          expect(root.entries.map((entry) => entry.path).sort()).toEqual([
+            "C:notes.txt",
+            "a\\b.txt",
+            "dir\\name",
+            "normal.txt",
+          ]);
+          expect(yield* entries.list({ cwd, directoryPath: "dir\\name" })).toEqual({
+            entries: [{ path: "dir\\name/child.txt", kind: "file" }],
+            truncated: false,
+          });
+          for (const relativePath of names) {
+            expect(yield* files.readFile({ cwd, relativePath })).toEqual({
+              relativePath,
+              contents: "native text",
+              byteLength: 11,
+              truncated: false,
+            });
+          }
+        }),
+    );
+
     it.effect("reads UTF-8 files relative to the workspace root", () =>
       Effect.gen(function* () {
         const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;

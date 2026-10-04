@@ -1,4 +1,12 @@
 import * as Schema from "effect/Schema";
+import * as HttpApiEndpoint from "effect/unstable/httpapi/HttpApiEndpoint";
+import {
+  AuthTokenExchangeRequest,
+  AuthTokenExchangeGrantType,
+  AuthEnvironmentBootstrapTokenType,
+  AuthAccessTokenType,
+  EnvironmentHttpApi,
+} from "./index.ts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -14,8 +22,33 @@ import {
 const traceId = "trace-1";
 
 const decodeRenewalRequest = Schema.decodeUnknownSync(AuthSessionRenewalRequest);
+const decodeTokenExchange = Schema.decodeUnknownSync(AuthTokenExchangeRequest);
+const sharedPayloadEndpoint = HttpApiEndpoint.post("shared", "/shared", {
+  payload: AuthTokenExchangeRequest,
+});
 
 describe("environment HTTP errors", () => {
+  it("owns form encoding at the OAuth endpoint, not the shared auth schema", () => {
+    expect(sharedPayloadEndpoint.payload.has("application/json")).toBe(true);
+    expect(sharedPayloadEndpoint.payload.has("application/x-www-form-urlencoded")).toBe(false);
+    const payload = EnvironmentHttpApi.groups.auth.endpoints.token.payload.get(
+      "application/x-www-form-urlencoded",
+    );
+    if (!payload) throw new Error("OAuth token exchange must accept form posts");
+    const input = {
+      grant_type: AuthTokenExchangeGrantType,
+      subject_token: "pairing-token",
+      subject_token_type: AuthEnvironmentBootstrapTokenType,
+      requested_token_type: AuthAccessTokenType,
+      client_label: "POSIX desktop",
+      client_device_type: "desktop",
+      client_os: "macOS",
+    };
+    expect(decodeTokenExchange(input)).toEqual(input);
+    expect(payload.encoding._tag).toBe("FormUrlEncoded");
+    expect(() => decodeTokenExchange({ ...input, grant_type: "invalid" })).toThrow();
+  });
+
   it("each carries a message that names its reason", () => {
     const errors = [
       new EnvironmentRequestInvalidError({

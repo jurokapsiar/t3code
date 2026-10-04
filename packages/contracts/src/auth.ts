@@ -1,5 +1,4 @@
 import * as Schema from "effect/Schema";
-import * as HttpApiSchema from "effect/unstable/httpapi/HttpApiSchema";
 
 import {
   AuthSessionId,
@@ -214,7 +213,7 @@ export const AuthTokenExchangeRequest = Schema.Struct({
   client_label: Schema.optionalKey(TrimmedNonEmptyString),
   client_device_type: Schema.optionalKey(AuthClientMetadataDeviceType),
   client_os: Schema.optionalKey(TrimmedNonEmptyString),
-}).pipe(HttpApiSchema.asFormUrlEncoded());
+});
 export type AuthTokenExchangeRequest = typeof AuthTokenExchangeRequest.Type;
 
 export const AuthAccessTokenResult = Schema.Struct({

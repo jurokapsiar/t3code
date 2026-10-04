@@ -5,7 +5,7 @@ import { makeFactoryPackManifest } from "./pack-factory-contracts.ts";
 it("publishes built factory exports with Effect as an exact peer", () => {
   const sourceManifest = {
     name: "@t3tools/contracts",
-    version: "0.0.45",
+    version: "0.0.51",
     private: true,
     type: "module",
     exports: {
@@ -15,7 +15,7 @@ it("publishes built factory exports with Effect as an exact peer", () => {
     dependencies: { effect: "catalog:" },
     devDependencies: { "@effect/vitest": "catalog:" },
   };
-  const versions = { version: "0.0.45", effectVersion: "4.0.0-rc.115" };
+  const versions = { version: "0.0.51", effectVersion: "4.0.0-rc.115" };
   const manifest = makeFactoryPackManifest(versions);
   const fixtureManifest = makeFactoryPackManifest(versions, sourceManifest);
 
