@@ -1,6 +1,9 @@
 import { ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import { fetchEnvironmentBoundedThreadSnapshot } from "./boundedThreadSnapshotHttp.ts";
+import { fetchEnvironmentThreadHistoryPage } from "./threadHistoryHttp.ts";
 import * as Layer from "effect/Layer";
 
 import { PrimaryConnectionTarget, type PreparedConnection } from "../connection/model.ts";
@@ -211,4 +214,67 @@ describe("boundedThreadSnapshotLoader", () => {
       );
     },
   );
+});
+
+it.effect(
+  "routes bounded and history HTTP through the prefix with explicit target and no bearer",
+  () => {
+    const urls: string[] = [];
+    const fetchFn = ((input: RequestInfo | URL, init?: RequestInit) => {
+      urls.push(String(input));
+      expect(new Headers(init?.headers).get("authorization")).toBeNull();
+      expect(new Headers(init?.headers).get("x-t3-orchestration-protocol")).toBe("2");
+      return Promise.resolve(
+        Response.json(
+          {
+            _tag: "EnvironmentResourceNotFoundError",
+            code: "not_found",
+            reason: "thread_not_found",
+            traceId: "test",
+          },
+          { status: 404 },
+        ),
+      );
+    }) satisfies typeof fetch;
+    return Effect.gen(function* () {
+      const prepared = { ...PREPARED, httpBaseUrl: "https://factory.test/factory/env/a/" };
+      const httpUrlMode = { mode: "factory-relay" as const, environmentId: "environment-bounded" };
+      const common = { prepared, threadId: THREAD_ID, signer: Option.none(), httpUrlMode };
+      expect(yield* Effect.flip(fetchEnvironmentBoundedThreadSnapshot(common))).toMatchObject({
+        _tag: "EnvironmentResourceNotFoundError",
+      });
+      expect(
+        yield* Effect.flip(
+          fetchEnvironmentThreadHistoryPage({ ...common, cursor: "cursor-value" }),
+        ),
+      ).toMatchObject({ _tag: "EnvironmentResourceNotFoundError" });
+      expect(urls).toEqual([
+        "https://factory.test/factory/env/a/api/orchestration/threads/thread-bounded/bounded?environmentId=environment-bounded",
+        "https://factory.test/factory/env/a/api/orchestration/threads/thread-bounded/history?environmentId=environment-bounded&cursor=cursor-value",
+      ]);
+    }).pipe(Effect.provide(remoteHttpClientLayer(fetchFn)));
+  },
+);
+
+it.effect("fails invalid relay resolution with its typed error without a network fallback", () => {
+  let calls = 0;
+  const fetchFn = (() => {
+    calls++;
+    return Promise.resolve(Response.json({}));
+  }) satisfies typeof fetch;
+  return Effect.gen(function* () {
+    const result = yield* Effect.flip(
+      fetchEnvironmentBoundedThreadSnapshot({
+        prepared: { ...PREPARED, httpBaseUrl: "https://factory.test/" },
+        threadId: THREAD_ID,
+        signer: Option.none(),
+        httpUrlMode: { mode: "factory-relay" },
+      }),
+    );
+    expect(result).toMatchObject({
+      _tag: "SourceHttpUrlError",
+      message: "The source HTTP URL is not allowed.",
+    });
+    expect(calls).toBe(0);
+  }).pipe(Effect.provide(remoteHttpClientLayer(fetchFn)));
 });

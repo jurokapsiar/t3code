@@ -131,6 +131,8 @@ export function mapRemoteEnvironmentError(
         detail: "The environment credential does not grant the required access.",
         traceId: error.traceId,
       });
+    case "SourceHttpUrlError":
+      return new ConnectionBlockedError({ reason: "configuration", detail: error.message });
     case "EnvironmentRequestInvalidError":
       return new ConnectionBlockedError({
         reason: "configuration",

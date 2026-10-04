@@ -1,4 +1,10 @@
 import {
+  resolveSourceHttpUrl,
+  SourceHttpUrlError,
+  type SourceHttpUrlMode,
+} from "@t3tools/contracts/factoryRelayUrl";
+import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
+import {
   EnvironmentHttpApi,
   EnvironmentHttpCommonError,
   type EnvironmentAuthInvalidError,
@@ -67,6 +73,7 @@ export class RemoteEnvironmentAuthTimeoutError extends Data.TaggedError(
 }
 
 export type RemoteEnvironmentRequestError =
+  | SourceHttpUrlError
   | EnvironmentRequestInvalidError
   | EnvironmentAuthInvalidError
   | EnvironmentScopeRequiredError
@@ -104,12 +111,24 @@ export const makeEnvironmentHttpApiGroupClient = <
 >(
   httpBaseUrl: string,
   group: Group,
+  mode?: SourceHttpUrlMode,
 ) =>
   Effect.flatMap(HttpClient.HttpClient, (httpClient) =>
     HttpApiClient.group(EnvironmentHttpApi, {
-      httpClient,
+      httpClient: HttpClient.mapRequestEffect(httpClient, (request) =>
+        mode?.mode !== "factory-relay"
+          ? Effect.succeed(request)
+          : Effect.try({
+              try: () =>
+                HttpClientRequest.setUrl(
+                  request,
+                  resolveSourceHttpUrl(httpBaseUrl, request.url, mode),
+                ),
+              catch: () => new SourceHttpUrlError(),
+            }),
+      ),
       group,
-      baseUrl: remoteApiBaseUrl(httpBaseUrl),
+      ...(mode?.mode === "factory-relay" ? {} : { baseUrl: remoteApiBaseUrl(httpBaseUrl) }),
     }),
   );
 
@@ -123,6 +142,7 @@ const failRemoteRequest = (
   requestUrl: string,
   cause: unknown,
 ): Effect.Effect<never, RemoteEnvironmentRequestError> => {
+  if (cause instanceof SourceHttpUrlError) return Effect.fail(cause);
   if (cause instanceof RemoteEnvironmentAuthTimeoutError) {
     return Effect.fail(cause);
   }

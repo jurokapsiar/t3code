@@ -127,7 +127,10 @@ export type FactoryRenewalState = typeof FactoryRenewalState.Type;
 
 export const FactorySourceAccess = Schema.Struct({
   websocketRoute: TrimmedNonEmptyString.check(Schema.isPattern(/^\/factory\/env\/[^\s/?#]+\/ws$/)),
-  capabilities: Schema.Struct({ websocket: Schema.Boolean }),
+  httpPrefix: Schema.optional(
+    TrimmedNonEmptyString.check(Schema.isPattern(/^\/factory\/env\/[^\s/?#]+\/$/)),
+  ),
+  capabilities: Schema.Struct({ websocket: Schema.Boolean, http: Schema.optional(Schema.Boolean) }),
 });
 export type FactorySourceAccess = typeof FactorySourceAccess.Type;
 

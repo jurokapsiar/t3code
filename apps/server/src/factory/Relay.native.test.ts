@@ -1,3 +1,13 @@
+import * as HttpClient from "effect/unstable/http/HttpClient";
+import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
+import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
+import { OrchestrationV2ThreadDetailSnapshot } from "@t3tools/contracts";
+import * as HttpRelay from "./HttpRelay.ts";
+import { resolveSourceHttpUrl } from "@t3tools/contracts/factoryRelayUrl";
+import * as Clock from "effect/Clock";
+import { issueAssetUrl } from "../assets/AssetAccess.ts";
+import { issueAttachmentUploadUrl } from "../assets/AttachmentUpload.ts";
+import { encodeThreadHistoryCursor } from "../orchestration-v2/threadHistoryPaging.ts";
 import { expect, it } from "@effect/vitest";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -26,7 +36,7 @@ import * as EventStore from "../orchestration-v2/EventStore.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as CommandReceipts from "../orchestration-v2/CommandReceiptStore.ts";
-import { factoryWebSocketRouteLayer } from "./http.ts";
+import { factoryWebSocketRouteLayer, factorySourceHttpRouteLayer } from "./http.ts";
 import * as HttpServer from "effect/unstable/http/HttpServer";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
@@ -190,11 +200,12 @@ it.live(
         Layer.mock(Connections.Connections)({
           resolveTarget: () => Effect.succeed(access),
           openRelay: () => connectRelay({ environment, credential }),
+          openHttp: () => transport.connectHttp!({ environment, credential }),
         }),
         Layer.mock(SourceShell.SourceShell)({ isSynchronized: () => Effect.succeed(true) }),
       );
       const relayServices = yield* Layer.build(
-        Relay.layer.pipe(
+        Layer.mergeAll(Relay.layer, HttpRelay.layer).pipe(
           Layer.provideMerge(RelayPolicy.layer.pipe(Layer.provideMerge(dependencies))),
         ),
       );
@@ -255,10 +266,11 @@ it.live(
         enabled: true,
         getRelayPolicy: Effect.succeed(Context.get(relayServices, RelayPolicy.RelayPolicy)),
         getRelay: Effect.succeed(Context.get(relayServices, Relay.Relay)),
+        getHttpRelay: Effect.succeed(Context.get(relayServices, HttpRelay.HttpRelay)),
       });
       const factoryServices = yield* Layer.build(
         HttpRouter.serve(
-          factoryWebSocketRouteLayer.pipe(
+          Layer.mergeAll(factoryWebSocketRouteLayer, factorySourceHttpRouteLayer).pipe(
             Layer.provide(
               Layer.mergeAll(
                 runtime,
@@ -572,6 +584,130 @@ it.live(
         status: "completed",
         checkpointId: null,
       });
+      const httpPrefix = `http://127.0.0.1:${factoryAddress.port}/factory/env/native/`;
+      const httpServices = yield* Layer.build(FetchHttpClient.layer);
+      const httpClient = Context.get(httpServices, HttpClient.HttpClient);
+      const sourceHttp = (
+        sourcePath: string,
+        init?: {
+          method?: "GET" | "POST" | "HEAD";
+          body?: string;
+          headers?: Record<string, string>;
+        },
+      ) => {
+        let request = HttpClientRequest.make(init?.method ?? "GET")(
+          resolveSourceHttpUrl(httpPrefix, sourcePath, { mode: "factory-relay", environmentId }),
+        );
+        if (init?.body !== undefined) request = HttpClientRequest.bodyText(request, init.body);
+        request = HttpClientRequest.setHeaders(request, {
+          cookie: `${sessions.cookieName}=${cookie.sessionToken}`,
+          "x-t3-orchestration-protocol": "2",
+          ...init?.headers,
+        });
+        return httpClient
+          .execute(request)
+          .pipe(Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }));
+      };
+      const projectsHttp = yield* sourceHttp("/api/projects");
+      expect(projectsHttp.status).toBe(200);
+      expect(yield* projectsHttp.json).toMatchObject({ projects: [{ id: "native-project" }] });
+      for (const suffix of ["", "/bounded"]) {
+        const detail = yield* sourceHttp(`/api/orchestration/threads/native-thread${suffix}`);
+        expect(detail.status).toBe(200);
+        const detailBody = yield* HttpClientResponse.schemaBodyJson(
+          Schema.toCodecJson(OrchestrationV2ThreadDetailSnapshot),
+        )(detail);
+        expect(
+          detailBody.projection.turnItems.flatMap((item) =>
+            item.type === "user_input_request" ? (item.questions[0]?.options ?? []) : [],
+          ),
+        ).toEqual([
+          { label: "Blue", description: "Use blue", value: "blue" },
+          { label: "Green", description: "Use green", value: "green" },
+        ]);
+        expect(detailBody.projection.providerTurns[0]).not.toHaveProperty("tokenUsage");
+        expect(detailBody.projection.runs[0]).toMatchObject({
+          status: "completed",
+          checkpointId: null,
+        });
+      }
+      const cursor = encodeThreadHistoryCursor({
+        snapshotSequence: snapshot.snapshotSequence,
+        sourceThreadId: threadId,
+        sourceItemId: "native-options-item",
+        position: 1,
+      });
+      const historyHttp = yield* sourceHttp(
+        `/api/orchestration/threads/native-thread/history?cursor=${encodeURIComponent(cursor)}`,
+      );
+      expect(historyHttp.status).toBe(200);
+      expect(yield* historyHttp.json).toHaveProperty("hasMoreHistory");
+      const missingThread = yield* sourceHttp("/api/orchestration/threads/missing/bounded");
+      expect(missingThread.status).toBe(404);
+      expect(yield* missingThread.json).toMatchObject({
+        _tag: "EnvironmentResourceNotFoundError",
+        reason: "thread_not_found",
+      });
+      yield* fs.writeFileString(`${workspace}/relay.mp4`, "0123456789");
+      const mint = issueAssetUrl({
+        resource: { _tag: "media-file", threadId, path: `${workspace}/relay.mp4` },
+      });
+      const assetGrant = yield* mint.pipe(
+        Effect.provide(Context.add(services, Config.ServerConfig, base)),
+      );
+      const assetHttp = yield* sourceHttp(assetGrant.relativeUrl, {
+        headers: { range: "bytes=2-5" },
+      });
+      expect(assetHttp.status).toBe(206);
+      expect(assetHttp.headers["content-range"]).toBe("bytes 2-5/10");
+      expect(yield* assetHttp.text).toBe("2345");
+      const headHttp = yield* sourceHttp(assetGrant.relativeUrl, { method: "HEAD" });
+      expect(headHttp.status).toBe(200);
+      expect(headHttp.headers["content-length"]).toBe("10");
+      expect(yield* headHttp.text).toBe("");
+      const clock = yield* Clock.Clock;
+      const expiredGrant = yield* mint.pipe(
+        Effect.provide(Context.add(services, Config.ServerConfig, base)),
+        Effect.provideService(Clock.Clock, {
+          currentTimeMillis: Effect.succeed(0),
+          currentTimeMillisUnsafe: () => 0,
+          currentTimeNanos: clock.currentTimeNanos,
+          currentTimeNanosUnsafe: () => clock.currentTimeNanosUnsafe(),
+          sleep: (duration) => clock.sleep(duration),
+          monotonicTimeNanos: clock.monotonicTimeNanos,
+          monotonicTimeNanosUnsafe: () => clock.monotonicTimeNanosUnsafe(),
+        }),
+      );
+      expect((yield* sourceHttp(expiredGrant.relativeUrl)).status).toBe(404);
+      const uploadGrant = yield* issueAttachmentUploadUrl({
+        type: "file",
+        name: "relay.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: 10,
+      }).pipe(Effect.provide(Context.add(services, Config.ServerConfig, base)));
+      const uploadHttp = yield* sourceHttp(uploadGrant.relativeUrl, {
+        method: "POST",
+        body: "abcdefghij",
+        headers: { "content-type": "application/pdf" },
+      });
+      expect(uploadHttp.status).toBe(204);
+      const uploadedAsset = yield* issueAssetUrl({
+        resource: {
+          _tag: "attachment",
+          attachmentId: uploadGrant.attachmentId,
+          fileName: "relay.pdf",
+          mimeType: "application/pdf",
+        },
+      }).pipe(Effect.provide(Context.add(services, Config.ServerConfig, base)));
+      expect(
+        yield* sourceHttp(uploadedAsset.relativeUrl).pipe(
+          Effect.flatMap((response) => response.text),
+        ),
+      ).toBe("abcdefghij");
+      const badSize = yield* sourceHttp(uploadGrant.relativeUrl, { method: "POST", body: "short" });
+      expect(badSize.status).toBe(400);
+      yield* fs.remove(`${workspace}/relay.mp4`);
+      expect((yield* sourceHttp(assetGrant.relativeUrl)).status).toBe(404);
       const finalize = yield* Deferred.make<void>();
       const finalized = yield* Deferred.make<void>();
       yield* Deferred.await(finalize).pipe(

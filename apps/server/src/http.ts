@@ -381,6 +381,7 @@ const UNTRACED_REQUEST_PATHS: ReadonlySet<string> = new Set([OTLP_TRACES_PROXY_P
 // The query string is ignored, as in routing.
 export const untracedRequestsLayer = Layer.succeed(HttpMiddleware.TracerDisabledWhen)((request) => {
   const queryIndex = request.url.indexOf("?");
+  if (request.url.startsWith("/factory/env/")) return true;
   return UNTRACED_REQUEST_PATHS.has(
     queryIndex === -1 ? request.url : request.url.slice(0, queryIndex),
   );

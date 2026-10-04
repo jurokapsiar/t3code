@@ -1,3 +1,4 @@
+import { type SourceHttpUrlMode } from "@t3tools/contracts/factoryRelayUrl";
 import type { OrchestrationV2ThreadDetailSnapshot, ThreadId } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -54,6 +55,7 @@ export const fetchEnvironmentThreadSnapshot = Effect.fn(
   "clientRuntime.state.fetchEnvironmentThreadSnapshot",
 )(function* (input: {
   readonly prepared: PreparedConnection;
+  readonly httpUrlMode?: SourceHttpUrlMode;
   readonly threadId: ThreadId;
   readonly signer: Option.Option<ManagedRelay.ManagedRelayDpopSigner["Service"]>;
   readonly remoteAuthorization?: Option.Option<
@@ -66,7 +68,13 @@ export const fetchEnvironmentThreadSnapshot = Effect.fn(
     group: "orchestration",
     method: "GET",
     url: (httpBaseUrl) =>
-      environmentEndpointUrl(httpBaseUrl, `/api/orchestration/threads/${input.threadId}`),
+      environmentEndpointUrl(
+        httpBaseUrl,
+        `/api/orchestration/threads/${encodeURIComponent(input.threadId)}`,
+        input.httpUrlMode === undefined
+          ? undefined
+          : { ...input.httpUrlMode, environmentId: input.prepared.environmentId },
+      ),
     timeoutMs: input.timeoutMs ?? DEFAULT_THREAD_SNAPSHOT_TIMEOUT_MS,
     request: ({ client, headers }) =>
       client.threadSnapshot({

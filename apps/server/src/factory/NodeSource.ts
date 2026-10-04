@@ -1,3 +1,5 @@
+import * as Headers from "effect/unstable/http/Headers";
+import { factoryRelayHttpRoute } from "@t3tools/contracts/factoryRelayUrl";
 import {
   AuthWebSocketTicketResult,
   EnvironmentAuthorizationError,
@@ -205,7 +207,71 @@ const make = Effect.gen(function* () {
       } satisfies Connections.SourceSession;
     },
   );
-  return Connections.SourceTransport.of({ connect, connectRelay });
+  const connectHttp: NonNullable<Connections.SourceTransport["Service"]["connectHttp"]> =
+    Effect.fnUntraced(function* (input) {
+      const base = yield* Effect.try({
+        try: () => {
+          const url = new URL(input.environment.endpoint);
+          if (
+            !["http:", "https:"].includes(url.protocol) ||
+            url.username ||
+            url.password ||
+            url.search ||
+            url.hash
+          )
+            throw new Error("Invalid endpoint.");
+          return url;
+        },
+        catch: () => new Connections.SourceFailure({ reason: "protocol" }),
+      });
+      return {
+        execute: Effect.fnUntraced(function* (request) {
+          const route = factoryRelayHttpRoute(request.url);
+          if (
+            route === null ||
+            !(route === "/api/attachments/upload/*"
+              ? request.method === "POST"
+              : route === "/api/assets/*"
+                ? ["GET", "HEAD"].includes(request.method)
+                : request.method === "GET") ||
+            request.urlParams.params.length !== 0
+          )
+            return yield* new Connections.SourceFailure({ reason: "protocol" });
+          // Rebuild headers: neither the browser nor a relay consumer can override source auth.
+          const headers: Record<string, string> = {
+            authorization: `Bearer ${input.credential.token}`,
+            "accept-encoding": "identity",
+          };
+          for (const key of [
+            "x-t3-orchestration-protocol",
+            "content-type",
+            "content-length",
+            "range",
+            "if-range",
+            "accept",
+          ])
+            if (request.headers[key] !== undefined) headers[key] = request.headers[key];
+          const clean = HttpClientRequest.makeWith(
+            request.method,
+            new URL(request.url, base).toString(),
+            request.urlParams,
+            request.hash,
+            Headers.fromInput(headers),
+            request.body,
+          );
+          return yield* http.execute(clean).pipe(
+            Effect.mapError(() => new Connections.SourceFailure({ reason: "transport" })),
+            Effect.provideService(FetchHttpClient.RequestInit, {
+              cache: "no-store",
+              redirect: "manual",
+              credentials: "omit",
+            }),
+            Effect.withTracerEnabled(false),
+          );
+        }),
+      } satisfies Connections.SourceHttpClient;
+    });
+  return Connections.SourceTransport.of({ connect, connectRelay, connectHttp });
 });
 
 export const layer = Layer.effect(Connections.SourceTransport, make);

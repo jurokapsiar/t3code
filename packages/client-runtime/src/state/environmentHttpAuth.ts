@@ -1,3 +1,4 @@
+import { SourceHttpUrlError, type SourceHttpUrlMode } from "@t3tools/contracts/factoryRelayUrl";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import {
@@ -108,6 +109,7 @@ export const executeAuthenticatedEnvironmentHttpRequest = Effect.fn(
   R,
 >(input: {
   readonly prepared: PreparedConnection;
+  readonly httpUrlMode?: SourceHttpUrlMode;
   readonly signer: Option.Option<ManagedRelayDpopSigner["Service"]>;
   readonly remoteAuthorization?: Option.Option<RemoteEnvironmentAuthorization["Service"]>;
   readonly method: HttpMethod.HttpMethod;
@@ -126,6 +128,15 @@ export const executeAuthenticatedEnvironmentHttpRequest = Effect.fn(
   Effect.Services<ReturnType<typeof makeEnvironmentHttpApiGroupClient<Group>>> | R
 > {
   let httpBaseUrl = input.prepared.httpBaseUrl;
+  const mode =
+    input.httpUrlMode === undefined
+      ? undefined
+      : { ...input.httpUrlMode, environmentId: input.prepared.environmentId };
+  if (mode !== undefined && input.prepared.httpAuthorization !== null)
+    return yield* new RemoteEnvironmentAuthFetchError({
+      message: "Factory HTTP uses only the factory browser session.",
+      cause: "factory-relay",
+    });
   return yield* Effect.gen(function* () {
     let rejectedAccessToken: string | undefined;
     for (;;) {
@@ -156,8 +167,11 @@ export const executeAuthenticatedEnvironmentHttpRequest = Effect.fn(
         authorization = current.httpAuthorization;
       }
 
-      const requestUrl = input.url(httpBaseUrl);
-      const client = yield* makeEnvironmentHttpApiGroupClient(httpBaseUrl, input.group);
+      const requestUrl = yield* Effect.try({
+        try: () => input.url(httpBaseUrl),
+        catch: () => new SourceHttpUrlError(),
+      });
+      const client = yield* makeEnvironmentHttpApiGroupClient(httpBaseUrl, input.group, mode);
       const headers = yield* buildEnvironmentAuthHeaders(
         authorization,
         input.method,
@@ -180,7 +194,7 @@ export const executeAuthenticatedEnvironmentHttpRequest = Effect.fn(
           rejectedAccessToken = authorization.accessToken;
           continue;
         }
-        return yield* result.failure;
+        return yield* Effect.fail(result.failure);
       }
 
       if (

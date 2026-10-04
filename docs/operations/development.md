@@ -119,7 +119,9 @@ Build the public factory contracts package from the repository root:
 node scripts/pack-factory-contracts.ts --output-dir /absolute/path
 ```
 
-The package version comes from `packages/contracts/package.json`. The Effect peer version comes from the workspace catalog. The package exports four built entry points: factory schemas, factory RPCs, the source RPC group, and HTTP contracts. This pack does not change workspace exports or dependencies. Build a new artifact after changing a public contract. Consumers must install the exact Effect peer version.
+The package version comes from `packages/contracts/package.json`. The Effect peer version comes from the workspace catalog. The package exports built entry points for factory schemas, factory RPCs, the source RPC group, HTTP contracts, and the lightweight `factoryRelayUrl` URL resolver. This pack does not change workspace exports or dependencies. Build a new artifact after changing a public contract. Consumers must install the exact Effect peer version.
+
+Factory HTTP consumers use the advertised `sourceAccess.httpPrefix` with `resolveSourceHttpUrl` from `@t3tools/contracts/factoryRelayUrl`, opting into `mode: "factory-relay"` and passing the source environment ID. This keeps root-relative asset grants, upload grants, and bounded/history requests under their registration. Use the Factory session cookie, never a source bearer credential. Only the fixed source HTTP inventory is relayed; absolute source URLs and extra query parameters are rejected. HTTP access remains optional for older Factory servers.
 
 ### Unused code
 

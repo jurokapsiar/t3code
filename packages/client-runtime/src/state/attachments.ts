@@ -1,3 +1,4 @@
+import { resolveSourceHttpUrl, type SourceHttpUrlMode } from "@t3tools/contracts/factoryRelayUrl";
 import {
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
   WS_METHODS,
@@ -157,6 +158,8 @@ export async function runAttachmentUploadCycle<E, RE>(input: {
   readonly environmentId: EnvironmentId;
   readonly upload: AttachmentCreateUploadUrlInput;
   readonly resolveUploadUrl: (relativeUrl: string) => string | null;
+  readonly httpUrlMode?: SourceHttpUrlMode;
+  readonly httpBaseUrl?: string;
   readonly transport: (url: string) => AttachmentByteUpload;
   /** Observe the minted id (for cancellation bookkeeping) before bytes move. */
   readonly onMinted?: (attachmentId: string) => "continue" | "cancel";
@@ -187,7 +190,18 @@ export async function runAttachmentUploadCycle<E, RE>(input: {
     return { status: "cancelled", attachmentId };
   }
 
-  const url = input.resolveUploadUrl(minted.value.relativeUrl);
+  let url;
+  try {
+    url =
+      input.httpUrlMode?.mode === "factory-relay"
+        ? resolveSourceHttpUrl(input.httpBaseUrl ?? "", minted.value.relativeUrl, {
+            ...input.httpUrlMode,
+            environmentId: input.environmentId,
+          })
+        : input.resolveUploadUrl(minted.value.relativeUrl);
+  } catch (error) {
+    return { status: "failed", step: "resolve-url", attachmentId, error };
+  }
   if (!url) {
     return {
       status: "failed",

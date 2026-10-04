@@ -1,3 +1,4 @@
+import { type SourceHttpUrlMode } from "@t3tools/contracts/factoryRelayUrl";
 import type { ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -17,6 +18,7 @@ export const fetchEnvironmentThreadHistoryPage = Effect.fn(
   "clientRuntime.state.fetchEnvironmentThreadHistoryPage",
 )(function* (input: {
   readonly prepared: PreparedConnection;
+  readonly httpUrlMode?: SourceHttpUrlMode;
   readonly threadId: ThreadId;
   readonly cursor: string;
   readonly signer: Option.Option<ManagedRelay.ManagedRelayDpopSigner["Service"]>;
@@ -28,7 +30,13 @@ export const fetchEnvironmentThreadHistoryPage = Effect.fn(
     group: "orchestration",
     method: "GET",
     url: (httpBaseUrl) =>
-      environmentEndpointUrl(httpBaseUrl, `/api/orchestration/threads/${input.threadId}/history`),
+      environmentEndpointUrl(
+        httpBaseUrl,
+        `/api/orchestration/threads/${encodeURIComponent(input.threadId)}/history`,
+        input.httpUrlMode === undefined
+          ? undefined
+          : { ...input.httpUrlMode, environmentId: input.prepared.environmentId },
+      ),
     timeoutMs: input.timeoutMs ?? DEFAULT_THREAD_HISTORY_TIMEOUT_MS,
     request: ({ client, headers }) =>
       client.threadHistoryPage({

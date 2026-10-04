@@ -79,6 +79,26 @@ describe("factory contracts", () => {
       expect(() => decode({ ...access, websocketRoute })).toThrow();
   });
 
+  it("keeps HTTP source access optional and advertises only root-relative query-free prefixes", () => {
+    const decode = Schema.decodeUnknownSync(FactorySourceAccess);
+    const older = { websocketRoute: "/factory/env/a/ws", capabilities: { websocket: true } };
+    expect(decode(older)).toEqual(older);
+    const current = {
+      ...older,
+      httpPrefix: "/factory/env/a/",
+      capabilities: { websocket: true, http: true },
+    };
+    expect(decode(current)).toEqual(current);
+    for (const httpPrefix of [
+      "https://source.test/",
+      "//source.test/",
+      "/factory/env/a/?token=secret",
+      "/factory/env/a/#hash",
+      "/api/",
+    ])
+      expect(() => decode({ ...current, httpPrefix })).toThrow();
+  });
+
   it("decodes compact thread summaries with distinct source and factory status", () => {
     expect(decodeThreadSummary(threadSummary)).toEqual(threadSummary);
     expect(FactoryThreadClassification.literals).toEqual([

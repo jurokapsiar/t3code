@@ -1,3 +1,4 @@
+import * as HttpMiddleware from "effect/unstable/http/HttpMiddleware";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -219,6 +220,70 @@ export const factoryWebSocketRouteLayer = Layer.unwrap(
             }),
           );
       }),
+    );
+  }),
+);
+
+export const factorySourceHttpRouteLayer = Layer.unwrap(
+  Effect.gen(function* () {
+    const config = yield* ServerConfig.ServerConfig;
+    if (!config.factoryEnabled)
+      return HttpRouter.add("*", "/factory/env/:registrationId/*", disabledResponse());
+    const auth = yield* EnvironmentAuth.EnvironmentAuth;
+    const runtime = yield* FactoryRuntime.FactoryRuntime;
+    return HttpRouter.add(
+      "*",
+      "/factory/env/:registrationId/*",
+      Effect.gen(function* () {
+        const request = yield* HttpServerRequest.HttpServerRequest;
+        const url = HttpServerRequest.toURL(request);
+        if (Option.isNone(url)) return HttpServerResponse.text("Bad Request", { status: 400 });
+        if (request.headers.authorization !== undefined || request.headers.dpop !== undefined)
+          return HttpServerResponse.text("Bad Request", { status: 400 });
+        const host =
+          request.headers["x-forwarded-host"]?.split(",", 1)[0]?.trim() ??
+          request.headers.host ??
+          url.value.host;
+        const protocol =
+          request.headers["x-forwarded-proto"]?.split(",", 1)[0]?.trim() ??
+          url.value.protocol.slice(0, -1);
+        if (
+          request.headers.origin !== undefined &&
+          request.headers.origin !== `${protocol}://${host}`
+        )
+          return HttpServerResponse.text("Origin denied.", { status: 403 });
+        const params = yield* HttpRouter.params;
+        const target = yield* decodeRelayTarget({
+          registrationId: params.registrationId,
+          environmentId: url.value.searchParams.get("environmentId"),
+        }).pipe(Effect.result);
+        if (target._tag === "Failure")
+          return HttpServerResponse.text("Bad Request", { status: 400 });
+        const session = yield* auth.authenticateHttpRequest(request).pipe(Effect.result);
+        if (session._tag === "Failure") {
+          if (EnvironmentAuth.isServerAuthCredentialError(session.failure))
+            return HttpServerResponse.text("Authentication required.", { status: 401 });
+          yield* Effect.logError("Factory HTTP authentication failed internally.");
+          return HttpServerResponse.text("Authentication unavailable.", { status: 500 });
+        }
+        if (session.success.method !== "browser-session-cookie")
+          return HttpServerResponse.text("Factory browser authentication required.", {
+            status: 401,
+          });
+        const relay = yield* runtime.getHttpRelay;
+        return yield* relay
+          .forward({ request, target: target.success, callerScopes: session.success.scopes })
+          .pipe(
+            Effect.catchTags({
+              HttpRelayError: (error) =>
+                Effect.succeed(HttpServerResponse.jsonUnsafe(error, { status: error.status })),
+              RelayDenied: (error) =>
+                Effect.succeed(HttpServerResponse.jsonUnsafe(error, { status: 403 })),
+              SourceFailure: (error) =>
+                Effect.succeed(HttpServerResponse.jsonUnsafe(error, { status: 503 })),
+            }),
+          );
+      }).pipe(HttpMiddleware.withLoggerDisabled, Effect.withTracerEnabled(false)),
     );
   }),
 );

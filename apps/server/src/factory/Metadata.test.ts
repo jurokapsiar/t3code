@@ -81,7 +81,8 @@ metadataLayer("Factory metadata", (it) => {
       const view = (yield* metadata.listEnvironments)[0];
       expect(view?.sourceAccess).toEqual({
         websocketRoute: "/factory/env/route%2Fsource/ws",
-        capabilities: { websocket: true },
+        httpPrefix: "/factory/env/route%2Fsource/",
+        capabilities: { websocket: true, http: true },
       });
       const sql = yield* SqlClient.SqlClient;
       const columns = yield* sql`PRAGMA table_info(factory_environments)`;

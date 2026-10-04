@@ -35,6 +35,10 @@ it("publishes built factory exports with Effect as an exact peer", () => {
     types: "./dist/environmentHttp.d.ts",
     import: "./dist/environmentHttp.js",
   });
+  assert.deepStrictEqual(manifest.exports["./factoryRelayUrl"], {
+    types: "./dist/factoryRelayUrl.d.ts",
+    import: "./dist/factoryRelayUrl.js",
+  });
   assert.equal(manifest.peerDependencies.effect, "4.0.0-rc.115");
   assert.equal(manifest.dependencies?.effect, undefined);
   assert.equal(fixtureManifest.dependencies?.effect, undefined);

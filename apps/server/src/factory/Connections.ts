@@ -1,3 +1,5 @@
+import type * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
+import type * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 import {
   type AuthEnvironmentScope,
   FactoryError,
@@ -55,9 +57,19 @@ export interface SourceSession {
   readonly closed: Effect.Effect<never, SourceFailure>;
 }
 
+export interface SourceHttpClient {
+  readonly execute: (
+    request: HttpClientRequest.HttpClientRequest,
+  ) => Effect.Effect<HttpClientResponse.HttpClientResponse, SourceFailure, Scope.Scope>;
+}
+
 export class SourceTransport extends Context.Service<
   SourceTransport,
   {
+    readonly connectHttp?: (input: {
+      readonly environment: FactoryEnvironmentView;
+      readonly credential: CredentialStore.StoredCredential;
+    }) => Effect.Effect<SourceHttpClient, SourceFailure, Scope.Scope>;
     readonly connectRelay?: (input: {
       readonly environment: FactoryEnvironmentView;
       readonly credential: CredentialStore.StoredCredential;
@@ -104,6 +116,9 @@ export class Connections extends Context.Service<
     readonly resolveTarget: (
       target: FactoryRemoteTarget,
     ) => Effect.Effect<SourceAccess, SourceFailure>;
+    readonly openHttp: (
+      access: SourceAccess,
+    ) => Effect.Effect<SourceHttpClient, SourceFailure, Scope.Scope>;
     readonly openRelay: (
       access: SourceAccess,
     ) => Effect.Effect<Socket.Socket, SourceFailure, Scope.Scope>;
@@ -124,6 +139,7 @@ interface Owner {
   session: SourceSession | undefined;
   authorization?: Pick<CredentialStore.StoredCredential, "scopes" | "expiresAt"> | undefined;
   ended: Deferred.Deferred<never, SourceFailure> | undefined;
+  openHttp?: (() => Effect.Effect<SourceHttpClient, SourceFailure, Scope.Scope>) | undefined;
   openRelay?: (() => Effect.Effect<Socket.Socket, SourceFailure, Scope.Scope>) | undefined;
 }
 
@@ -222,6 +238,11 @@ const make = Effect.gen(function* () {
             );
           const ended = yield* Deferred.make<never, SourceFailure>();
           owner.ended = ended;
+          const connectHttp = transport.connectHttp;
+          owner.openHttp =
+            connectHttp === undefined
+              ? undefined
+              : () => connectHttp({ environment: reference.environment, credential: stored.value });
           const connectRelay = transport.connectRelay;
           owner.openRelay =
             connectRelay === undefined
@@ -237,6 +258,7 @@ const make = Effect.gen(function* () {
               owner.session = undefined;
               owner.authorization = undefined;
               owner.openRelay = undefined;
+              owner.openHttp = undefined;
               yield* Deferred.fail(ended, new SourceFailure({ reason: "unavailable" }));
             }),
           );
@@ -533,6 +555,16 @@ const make = Effect.gen(function* () {
       } satisfies SourceAccess;
     });
 
+  const openHttp = Effect.fnUntraced(function* (access: SourceAccess) {
+    yield* access.checkCurrent;
+    const owner = owners.get(access.target.registrationId);
+    if (owner?.session !== access.connectionId || owner.openHttp === undefined)
+      return yield* new SourceFailure({ reason: "unavailable" });
+    const client = yield* owner.openHttp();
+    yield* access.checkCurrent;
+    return client;
+  });
+
   const openRelay = Effect.fnUntraced(function* (access: SourceAccess) {
     yield* access.checkCurrent;
     const owner = owners.get(access.target.registrationId);
@@ -544,6 +576,7 @@ const make = Effect.gen(function* () {
   });
 
   return Connections.of({
+    openHttp,
     openRelay,
     start,
     connect,

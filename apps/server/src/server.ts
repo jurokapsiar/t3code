@@ -73,7 +73,11 @@ import * as ProcessRunner from "./processRunner.ts";
 import * as GitManager from "./git/GitManager.ts";
 import * as EnvironmentTheme from "./environmentTheme.ts";
 import * as FactoryRuntime from "./factory/runtimeLayer.ts";
-import { factoryHttpRouteLayer, factoryWebSocketRouteLayer } from "./factory/http.ts";
+import {
+  factoryHttpRouteLayer,
+  factoryWebSocketRouteLayer,
+  factorySourceHttpRouteLayer,
+} from "./factory/http.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
@@ -640,6 +644,7 @@ const makeRoutesLayer = Layer.mergeAll(
     attachmentUploadRouteLayer,
     factoryHttpRouteLayer,
     factoryWebSocketRouteLayer,
+    factorySourceHttpRouteLayer,
     deviceHubProxyRouteLayer,
     staticAndDevRouteLayer,
     websocketRpcRouteLayer,

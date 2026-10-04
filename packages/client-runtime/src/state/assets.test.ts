@@ -35,6 +35,8 @@ import {
   createProjectFaviconUrlAtomFamily,
   InvalidAssetCollectionKeyError,
   parseAssetCollectionKey,
+  resolveAssetUrl,
+  assetUrlStateFromResult,
 } from "./assets.ts";
 
 describe("asset collection keys", () => {
@@ -510,4 +512,21 @@ describe("project favicon URL cache", () => {
       dispose();
     }
   });
+});
+
+it("resolves relay assets without dropping their prefix and exposes rejection", () => {
+  const mode = { mode: "factory-relay" as const, environmentId: "env-a" };
+  expect(
+    resolveAssetUrl("https://factory.test/factory/env/a/", "/api/assets/signed/file.png", mode),
+  ).toBe("https://factory.test/factory/env/a/api/assets/signed/file.png?environmentId=env-a");
+  expect(
+    assetUrlStateFromResult(
+      AsyncResult.success({
+        relativeUrl: "https://source.test/api/assets/grant/file.png",
+        expiresAt: 1,
+      }),
+      "https://factory.test/factory/env/a/",
+      mode,
+    ),
+  ).toMatchObject({ _tag: "Failure", error: { _tag: "SourceHttpUrlError" } });
 });

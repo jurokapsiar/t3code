@@ -244,7 +244,8 @@ const make = Effect.gen(function* () {
           ...environment,
           sourceAccess: {
             websocketRoute: `/factory/env/${encodeURIComponent(environment.registrationId)}/ws`,
-            capabilities: { websocket: true },
+            httpPrefix: `/factory/env/${encodeURIComponent(environment.registrationId)}/`,
+            capabilities: { websocket: true, http: true },
           },
         })),
       ),

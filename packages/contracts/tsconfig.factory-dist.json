@@ -9,5 +9,11 @@
     "allowImportingTsExtensions": true,
     "rewriteRelativeImportExtensions": true
   },
-  "files": ["src/factory.ts", "src/factoryRpc.ts", "src/rpc.ts", "src/environmentHttp.ts"]
+  "files": [
+    "src/factory.ts",
+    "src/factoryRpc.ts",
+    "src/rpc.ts",
+    "src/environmentHttp.ts",
+    "src/factoryRelayUrl.ts"
+  ]
 }

@@ -126,6 +126,48 @@ describe("runAttachmentUploadCycle", () => {
   });
 });
 
+describe("factory attachment URL mode", () => {
+  it("uses the same scoped resolver for upload and rejects absolute source grants visibly", async () => {
+    const transferred: string[] = [];
+    const inputs = {
+      registry,
+      createUploadUrl: makeCreateUploadUrl("signed"),
+      remove,
+      environmentId,
+      upload: uploadInput,
+      httpBaseUrl: "https://factory.test/factory/env/a/",
+      httpUrlMode: { mode: "factory-relay" as const, environmentId },
+      resolveUploadUrl: () => "https://source.test/unsafe-fallback",
+      transport: (url: string) => {
+        transferred.push(url);
+        return { done: Promise.resolve(), abort: () => {} };
+      },
+    };
+    expect(await runAttachmentUploadCycle(inputs)).toMatchObject({ status: "uploaded" });
+    expect(transferred).toEqual([
+      "https://factory.test/factory/env/a/api/attachments/upload/signed?environmentId=environment-1",
+    ]);
+    const rejected = await runAttachmentUploadCycle({
+      ...inputs,
+      createUploadUrl: {
+        label: "unsafe",
+        run: async () =>
+          AsyncResult.success({
+            attachmentId: "signed",
+            relativeUrl: "https://source.test/api/attachments/upload/secret",
+            expiresAt: 1,
+          }),
+      },
+    });
+    expect(rejected).toMatchObject({
+      status: "failed",
+      step: "resolve-url",
+      error: { _tag: "SourceHttpUrlError" },
+    });
+    expect(transferred).toHaveLength(1);
+  });
+});
+
 describe("verifyPersistedAttachmentUpload", () => {
   it("hits the server on every verification instead of reusing a cached failure", async () => {
     // Mirrors the app's asset URL query atom: SWR-cached with a long stale

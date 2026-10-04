@@ -1,4 +1,9 @@
 import {
+  resolveSourceHttpUrl,
+  SourceHttpUrlError,
+  type SourceHttpUrlMode,
+} from "@t3tools/contracts/factoryRelayUrl";
+import {
   type AssetCreateUrlInput,
   type AssetCreateUrlResult,
   type AssetImageDimensions,
@@ -55,10 +60,15 @@ export function parseAssetCollectionKey(
   }
 }
 
-export function resolveAssetUrl(httpBaseUrl: string, relativeUrl: string): string | null {
+export function resolveAssetUrl(
+  httpBaseUrl: string,
+  relativeUrl: string,
+  mode?: SourceHttpUrlMode,
+): string | null {
   try {
-    return new URL(relativeUrl, httpBaseUrl).toString();
-  } catch {
+    return resolveSourceHttpUrl(httpBaseUrl, relativeUrl, mode);
+  } catch (error) {
+    if (mode?.mode === "factory-relay") throw error;
     return null;
   }
 }
@@ -69,7 +79,7 @@ export const EMPTY_ASSET_URL_ATOM = Atom.make(AsyncResult.initial<never, never>(
 
 export type AssetUrlState =
   | { readonly _tag: "Loading" }
-  | { readonly _tag: "Failure" }
+  | { readonly _tag: "Failure"; readonly error?: SourceHttpUrlError }
   | {
       readonly _tag: "Success";
       readonly url: string;
@@ -82,10 +92,17 @@ export type AssetUrlState =
 export function assetUrlStateFromResult(
   result: AsyncResult.AsyncResult<AssetCreateUrlResult, unknown>,
   httpBaseUrl: string | null,
+  mode?: SourceHttpUrlMode,
 ): AssetUrlState {
   if (result._tag === "Failure") return { _tag: "Failure" };
   if (httpBaseUrl === null || result._tag !== "Success") return { _tag: "Loading" };
-  const url = resolveAssetUrl(httpBaseUrl, result.value.relativeUrl);
+  let url;
+  try {
+    url = resolveAssetUrl(httpBaseUrl, result.value.relativeUrl, mode);
+  } catch (error) {
+    if (error instanceof SourceHttpUrlError) return { _tag: "Failure", error };
+    throw error;
+  }
   if (url === null) return { _tag: "Failure" };
   return {
     _tag: "Success",

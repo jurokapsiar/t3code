@@ -51,6 +51,11 @@ const harness = Effect.gen(function* () {
       const original = yield* Connections.SourceTransport;
       return Connections.SourceTransport.of({
         ...original,
+        connectHttp: (input) =>
+          Effect.sync(() => {
+            relayInputs.push(input);
+            return { execute: () => Effect.die("Only acquisition is tested here.") };
+          }),
         connectRelay: (input) =>
           Effect.gen(function* () {
             relayInputs.push(input);
@@ -700,5 +705,28 @@ it.effect(
         reason: "unavailable",
       });
       expect(h.relayInputs).toHaveLength(2);
+    }),
+);
+
+it.effect(
+  "keeps HTTP credential acquisition on the original owner and rejects an expired lease",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      yield* h.register();
+      yield* h.connections.start;
+      const attempt = yield* Queue.take(h.fake.attempts);
+      yield* attempt.ready(config());
+      yield* h.wait("a", "online");
+      const access = yield* h.connections.resolveTarget(target());
+      const original = h.credentials.get("a")!;
+      h.credentials.set("a", { ...original, token: "replacement-not-owned" });
+      yield* h.connections.openHttp(access);
+      expect(h.relayInputs[0]?.credential.token).toBe("test-token-a");
+      yield* TestClock.adjust("30 days");
+      expect(yield* Effect.flip(h.connections.openHttp(access))).toMatchObject({
+        reason: expect.stringMatching(/authentication|unavailable/),
+      });
+      expect(h.relayInputs).toHaveLength(1);
     }),
 );

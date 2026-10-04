@@ -22,6 +22,10 @@ interface SourceManifest {
 
 const rootDir = NodePath.resolve(NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)), "..");
 const factoryExports = {
+  "./factoryRelayUrl": {
+    types: "./dist/factoryRelayUrl.d.ts",
+    import: "./dist/factoryRelayUrl.js",
+  },
   "./factory": { types: "./dist/factory.d.ts", import: "./dist/factory.js" },
   "./factoryRpc": { types: "./dist/factoryRpc.d.ts", import: "./dist/factoryRpc.js" },
   "./rpc": { types: "./dist/rpc.d.ts", import: "./dist/rpc.js" },
