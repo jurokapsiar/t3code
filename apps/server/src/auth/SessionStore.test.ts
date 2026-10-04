@@ -20,6 +20,7 @@ import {
   SqlitePersistenceMemory,
 } from "../persistence/Layers/Sqlite.ts";
 import * as AuthSessions from "../persistence/AuthSessions.ts";
+import * as SessionRenewal from "./SessionRenewal.ts";
 import * as SessionStore from "./SessionStore.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
 
@@ -180,6 +181,76 @@ it.layer(NodeServices.layer)("SessionStore.layer", (it) => {
         const sessions = yield* SessionStore.SessionStore;
         expect((yield* Effect.flip(sessions.verify(token)))._tag).toBe("SessionTokenRevokedError");
       }).pipe(Effect.provide(reopenedA), Effect.scoped);
+    }),
+  );
+
+  it.effect("persists renewal lineage in WAL without bearer bytes", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-session-renewal-wal-" });
+      const devUrl = new URL("http://127.0.0.1:5173");
+      const paths = yield* ServerConfig.deriveServerPaths(baseDir, devUrl, {
+        baseDirIsExplicit: true,
+      });
+      const layer = yield* makeDiskSessionStoreLayer(baseDir);
+      const evidence = yield* Effect.gen(function* () {
+        const sessions = yield* SessionStore.SessionStore;
+        const root = yield* sessions.issue({
+          subject: "factory-source",
+          method: "bearer-access-token",
+          scopes: ["orchestration:read"],
+        });
+        const principal = {
+          sessionId: root.sessionId,
+          subject: "factory-source",
+          method: "bearer-access-token" as const,
+          scopes: root.scopes,
+        };
+        const renewal = SessionRenewal.make(sessions);
+        const first = yield* renewal.renew({ credential: root.token, principal });
+        expect((yield* sessions.verify(root.token)).sessionId).toBe(root.sessionId);
+        const replacement = yield* renewal.renew({ credential: root.token, principal });
+        expect((yield* Effect.flip(sessions.verify(first.token)))._tag).toBe(
+          "SessionTokenRevokedError",
+        );
+        expect((yield* sessions.verify(root.token)).sessionId).toBe(root.sessionId);
+        expect(yield* sessions.releaseRenewal(replacement.sessionId)).toBe(true);
+        expect((yield* Effect.flip(sessions.verify(root.token)))._tag).toBe(
+          "SessionTokenRevokedError",
+        );
+        expect((yield* sessions.verify(replacement.token)).sessionId).toBe(replacement.sessionId);
+
+        const persistedFiles = yield* Effect.forEach(
+          [paths.dbPath, `${paths.dbPath}-wal`, `${paths.dbPath}-shm`],
+          (file) =>
+            fs
+              .exists(file)
+              .pipe(
+                Effect.flatMap((exists) => (exists ? fs.readFileString(file) : Effect.succeed(""))),
+              ),
+        );
+        return {
+          tokens: [root.token, first.token, replacement.token],
+          persistedFiles,
+          rootToken: root.token,
+          replacementToken: replacement.token,
+          replacementSessionId: replacement.sessionId,
+        };
+      }).pipe(Effect.provide(layer), Effect.scoped);
+
+      for (const token of evidence.tokens) {
+        expect(evidence.persistedFiles.some((contents) => contents.includes(token))).toBe(false);
+      }
+      const reopened = yield* makeDiskSessionStoreLayer(baseDir);
+      yield* Effect.gen(function* () {
+        const sessions = yield* SessionStore.SessionStore;
+        expect((yield* Effect.flip(sessions.verify(evidence.rootToken)))._tag).toBe(
+          "SessionTokenRevokedError",
+        );
+        expect((yield* sessions.verify(evidence.replacementToken)).sessionId).toBe(
+          evidence.replacementSessionId,
+        );
+      }).pipe(Effect.provide(reopened), Effect.scoped);
     }),
   );
 
