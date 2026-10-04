@@ -85,6 +85,11 @@ storage:
 t3 serve --factory --factory-credential-store=file
 ```
 
+Protected-file storage is supported only on POSIX hosts. On Windows, use the
+OS credential vault; file opt-in fails before credentials are written because
+POSIX permissions cannot guarantee an owner-only Windows ACL. There is no
+automatic fallback.
+
 You can also set `T3CODE_FACTORY_CREDENTIAL_STORE=file`. Keep the T3 data
 directory private and encrypt backups that include Factory credentials. The
 protected files are stored under `userdata/secrets/factory-credentials`.

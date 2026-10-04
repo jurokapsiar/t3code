@@ -10,6 +10,8 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
+import { HostProcessPlatform, HostProcessUserId } from "@t3tools/shared/hostProcess";
+
 import * as ServerConfig from "../config.ts";
 
 const StoredCredentialSchema = Schema.Struct({
@@ -29,9 +31,12 @@ export class CredentialStoreError extends Schema.TaggedError<CredentialStoreErro
   {
     operation: Schema.Literals(["secure", "read", "write", "remove", "encode", "decode"]),
     backend: FactoryCredentialStorage,
+    reason: Schema.optionalKey(Schema.Literal("unsupported-platform")),
   },
 ) {
   override get message(): string {
+    if (this.reason === "unsupported-platform")
+      return "Protected-file credentials are not supported on Windows. Use the operating system credential vault.";
     return `The factory credential ${this.operation} operation failed for the selected ${this.backend} store.`;
   }
 }
@@ -130,9 +135,19 @@ const make = Effect.gen(function* () {
   const keyring = selectedBackend === "secure-vault" ? yield* CredentialKeyring : undefined;
   const directory = path.join(config.secretsDir, protectedFileDirectory);
 
-  if (selectedBackend === "protected-file") {
+  const platform = yield* HostProcessPlatform;
+  const userId = yield* HostProcessUserId;
+  if (selectedBackend === "protected-file" && platform === "win32") {
+    return yield* new CredentialStoreError({
+      operation: "secure",
+      backend: selectedBackend,
+      reason: "unsupported-platform",
+    });
+  }
+
+  const secureDirectory = Effect.gen(function* () {
     yield* fileSystem
-      .makeDirectory(directory, { recursive: true })
+      .makeDirectory(directory, { recursive: true, mode: 0o700 })
       .pipe(
         Effect.mapError(
           () => new CredentialStoreError({ operation: "secure", backend: selectedBackend }),
@@ -145,7 +160,23 @@ const make = Effect.gen(function* () {
           () => new CredentialStoreError({ operation: "secure", backend: selectedBackend }),
         ),
       );
-  }
+    const info = yield* fileSystem
+      .stat(directory)
+      .pipe(
+        Effect.mapError(
+          () => new CredentialStoreError({ operation: "secure", backend: selectedBackend }),
+        ),
+      );
+    if (
+      info.type !== "Directory" ||
+      (info.mode & 0o777) !== 0o700 ||
+      userId === undefined ||
+      Option.getOrUndefined(info.uid) !== userId
+    ) {
+      return yield* new CredentialStoreError({ operation: "secure", backend: selectedBackend });
+    }
+  });
+  if (selectedBackend === "protected-file") yield* secureDirectory;
 
   const resolveFilePath = (reference: string) => path.join(directory, `${fileKey(reference)}.json`);
 
@@ -206,8 +237,11 @@ const make = Effect.gen(function* () {
                 const target = resolveFilePath(reference);
                 const temporary = `${target}.${nonce}.tmp`;
                 return Effect.gen(function* () {
-                  yield* fileSystem.writeFileString(temporary, encoded);
-                  yield* fileSystem.chmod(temporary, 0o600);
+                  yield* secureDirectory;
+                  yield* fileSystem.writeFileString(temporary, encoded, {
+                    mode: 0o600,
+                    flag: "wx",
+                  });
                   yield* fileSystem.rename(temporary, target);
                 }).pipe(
                   Effect.catch((_cause) =>

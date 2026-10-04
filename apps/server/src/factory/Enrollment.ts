@@ -540,11 +540,19 @@ const make = Effect.gen(function* () {
                   })
                   .pipe(Effect.exit);
                 if (Exit.isFailure(replacement)) {
-                  if (Option.isSome(previousCredential)) {
-                    yield* credentials.set(reference, previousCredential.value);
-                  } else {
-                    yield* credentials.remove(reference);
-                  }
+                  const restore = Option.isSome(previousCredential)
+                    ? credentials.set(reference, previousCredential.value)
+                    : credentials.remove(reference);
+                  yield* restore.pipe(
+                    Effect.tapError(() =>
+                      Effect.gen(function* () {
+                        // The shared item may still hold the replacement. Reload the owner
+                        // from durable metadata even though enrollment is returning an error.
+                        const current = yield* metadata.getEnrollmentReference(registrationId);
+                        if (current !== undefined) yield* lifecycle.enabled(current.environment);
+                      }),
+                    ),
+                  );
                   return yield* Effect.failCause(replacement.cause);
                 }
                 const now = yield* DateTime.now;

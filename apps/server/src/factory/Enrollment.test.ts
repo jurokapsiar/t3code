@@ -79,6 +79,9 @@ const makeEnrollmentHarness = (options: {
     const credentials = new Map<string, CredentialStore.StoredCredential>();
     const failRemoval = yield* Ref.make(options.failCredentialRemoval ?? false);
     const failWrite = yield* Ref.make(options.failCredentialWrite);
+    let failCompensation = false;
+    const ownerWakes: Array<Parameters<Enrollment.RegistrationLifecycle["Service"]["enabled"]>[0]> =
+      [];
     const supervisorStartsRef = yield* Ref.make(0);
     const issuedAt = yield* DateTime.now;
     const expiresAt = DateTime.add(issuedAt, { days: 1 });
@@ -111,7 +114,10 @@ const makeEnrollmentHarness = (options: {
         get: (reference) => Effect.succeed(Option.fromNullishOr(credentials.get(reference))),
         set: (reference, credential) =>
           Effect.gen(function* () {
-            if (yield* Ref.get(failWrite)) {
+            if (
+              (yield* Ref.get(failWrite)) ||
+              (failCompensation && credential.token === storedCredential)
+            ) {
               return yield* new CredentialStore.CredentialStoreError({
                 operation: "write",
                 backend: "secure-vault",
@@ -201,7 +207,10 @@ const makeEnrollmentHarness = (options: {
     const lifecycleLayer = Layer.succeed(
       Enrollment.RegistrationLifecycle,
       Enrollment.RegistrationLifecycle.of({
-        enabled: () => Ref.update(supervisorStartsRef, (count) => count + 1),
+        enabled: (environment) =>
+          Effect.sync(() => ownerWakes.push(environment)).pipe(
+            Effect.andThen(Ref.update(supervisorStartsRef, (count) => count + 1)),
+          ),
         removing: () => Effect.void,
       }),
     );
@@ -242,6 +251,7 @@ const makeEnrollmentHarness = (options: {
         enrollment.enroll({ ...input, sourceCredential: credential }),
       readRegistration,
       supervisorStarts: Ref.get(supervisorStartsRef),
+      ownerWakes,
       credentials,
       config: isolatedConfig,
       fileSystem,
@@ -250,6 +260,9 @@ const makeEnrollmentHarness = (options: {
       sql,
       failRemoval,
       failWrite,
+      failCompensation: () => {
+        failCompensation = true;
+      },
       renewedTokens,
       assertCredentialFree: (value: unknown) =>
         Effect.gen(function* () {
@@ -835,6 +848,36 @@ it.layer(
       assert.equal(harness.credentials.size, 1);
       assert.equal([...harness.credentials.values()][0]?.token, storedCredential);
     }),
+  );
+
+  it.effect(
+    "wakes the owner with durable current metadata when compensation fails and permits explicit recovery",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* makeEnrollmentHarness({ failCredentialWrite: false });
+        const original = yield* h.enroll();
+        h.advanceRevisionOnNextExchange();
+        h.failCompensation();
+        const error = yield* h.enroll("private-replacement").pipe(Effect.flip);
+        assert.equal(error._tag, "CredentialStoreError");
+        const current = yield* h.readRegistration;
+        assert.equal(current.registrationId, original.registrationId);
+        assert.equal(current.revision, original.revision + 1);
+        assert.equal(current.label, "Concurrent edit");
+        assert.deepEqual(current.credentialExpiresAt, original.credentialExpiresAt);
+        assert.isTrue(current.enabled);
+        assert.equal(
+          [...h.credentials.values()][0]?.token,
+          storedCredential + ":private-replacement",
+        );
+        assert.equal(yield* h.supervisorStarts, 2);
+        assert.deepEqual(h.ownerWakes[1], current);
+        yield* h.assertCredentialFree(error);
+        const recovered = yield* h.enroll("private-recovery");
+        assert.equal(recovered.registrationId, original.registrationId);
+        assert.equal([...h.credentials.values()][0]?.token, storedCredential + ":private-recovery");
+        assert.equal(yield* h.supervisorStarts, 3);
+      }),
   );
 
   it.effect("marks advertised renewal support in the environment view", () =>
