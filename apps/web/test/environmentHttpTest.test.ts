@@ -37,4 +37,35 @@ describe("environment HTTP test renewal endpoint", () => {
     expect(missingCredentialError).toMatchObject({ reason: "missing_credential" });
     expect(await renew("Bearer test-token")).toMatchObject({ reason: "invalid_credential" });
   });
+  it("rejects actual typed release requests without a releasable bearer principal", async () => {
+    const testApi = await installEnvironmentHttpTest({});
+    disposeHttpTest = testApi.dispose;
+    const release = (authorization?: string) =>
+      runPrimaryHttp(
+        PrimaryEnvironmentHttpClient.pipe(
+          Effect.flatMap((client) =>
+            Effect.flip(
+              client.auth.renewRelease({
+                headers: authorization === undefined ? {} : { authorization },
+              }),
+            ),
+          ),
+        ),
+      );
+    for (const authorization of [
+      undefined,
+      "",
+      "Basic fixture",
+      "Bearer ",
+      "Bearer cookie-principal",
+    ]) {
+      const error = await release(authorization);
+      expect(error).toBeInstanceOf(EnvironmentAuthInvalidError);
+      expect(error).toMatchObject({
+        code: "auth_invalid",
+        reason:
+          authorization === "Bearer cookie-principal" ? "invalid_credential" : "missing_credential",
+      });
+    }
+  });
 });

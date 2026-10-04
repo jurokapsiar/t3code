@@ -124,6 +124,19 @@ export async function installEnvironmentHttpTest(scenario: EnvironmentHttpTestSc
                 });
               }),
             )
+            .handle(
+              "renewRelease",
+              Effect.fn("test.environment.auth.renewRelease")(function* ({ headers }) {
+                const credential = headers.authorization?.startsWith("Bearer ")
+                  ? headers.authorization.slice("Bearer ".length).trim()
+                  : "";
+                return yield* new EnvironmentAuthInvalidError({
+                  code: "auth_invalid",
+                  reason: credential ? "invalid_credential" : "missing_credential",
+                  traceId: "test-trace",
+                });
+              }),
+            )
             .handle("pairingLinks", () => unexpectedEndpoint("auth.pairingLinks"))
             .handle("revokePairingLink", () => unexpectedEndpoint("auth.revokePairingLink"))
             .handle("clients", () => unexpectedEndpoint("auth.clients"))
