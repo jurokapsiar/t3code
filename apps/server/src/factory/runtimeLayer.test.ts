@@ -313,6 +313,7 @@ it.layer(
       expect(yield* Effect.flip(factory.getRelayPolicy)).toMatchObject({
         code: "feature-disabled",
       });
+      expect(yield* Effect.flip(factory.getRelay)).toMatchObject({ code: "feature-disabled" });
       expect(transportBuilds).toBe(0);
     }),
   );

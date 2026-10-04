@@ -73,7 +73,7 @@ import * as ProcessRunner from "./processRunner.ts";
 import * as GitManager from "./git/GitManager.ts";
 import * as EnvironmentTheme from "./environmentTheme.ts";
 import * as FactoryRuntime from "./factory/runtimeLayer.ts";
-import { factoryHttpRouteLayer } from "./factory/http.ts";
+import { factoryHttpRouteLayer, factoryWebSocketRouteLayer } from "./factory/http.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
@@ -639,6 +639,7 @@ const makeRoutesLayer = Layer.mergeAll(
     assetRouteLayer,
     attachmentUploadRouteLayer,
     factoryHttpRouteLayer,
+    factoryWebSocketRouteLayer,
     deviceHubProxyRouteLayer,
     staticAndDevRouteLayer,
     websocketRpcRouteLayer,
@@ -664,7 +665,7 @@ const makeRoutesLayer = Layer.mergeAll(
   Layer.provide(httpCompressionLayer),
 );
 
-const makeServerLayer = Layer.unwrap(
+export const layer = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;
     const activation = yield* Deferred.make<void>();
@@ -1033,4 +1034,4 @@ const makeServerLayer = Layer.unwrap(
 );
 
 // The CLI supplies configuration.
-export const runServer = Layer.launch(makeServerLayer);
+export const runServer = Layer.launch(layer);

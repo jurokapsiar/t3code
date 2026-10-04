@@ -12,6 +12,7 @@ import {
 import { ExecutionEnvironmentCapabilities, ExecutionEnvironmentDescriptor } from "./environment.ts";
 import {
   FactoryEnvironmentView,
+  FactorySourceAccess,
   FactoryOverviewEvent,
   FactoryOverviewPatch,
   FactoryOverviewSnapshot,
@@ -61,6 +62,23 @@ const projectSummary = {
 } as const;
 
 describe("factory contracts", () => {
+  it("advertises only relative, query-free source WebSocket routes", () => {
+    const decode = Schema.decodeUnknownSync(FactorySourceAccess);
+    const access = {
+      websocketRoute: "/factory/env/registration-a/ws",
+      capabilities: { websocket: true },
+    };
+    expect(decode(access)).toEqual(access);
+    for (const websocketRoute of [
+      "wss://source.example/ws",
+      "//source.example/ws",
+      "/factory/env/a?token=secret/ws",
+      "/factory/env/a#fragment/ws",
+      "/factory/env/a/ws?wsTicket=secret",
+    ])
+      expect(() => decode({ ...access, websocketRoute })).toThrow();
+  });
+
   it("decodes compact thread summaries with distinct source and factory status", () => {
     expect(decodeThreadSummary(threadSummary)).toEqual(threadSummary);
     expect(FactoryThreadClassification.literals).toEqual([

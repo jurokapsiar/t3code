@@ -1,3 +1,8 @@
+import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
+import * as NodeSocket from "@effect/platform-node/NodeSocket";
+import * as HttpRouter from "effect/unstable/http/HttpRouter";
+import * as HttpServer from "effect/unstable/http/HttpServer";
+import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import { expect, it } from "@effect/vitest";
 import {
   AuthSessionId,
@@ -149,5 +154,117 @@ it.effect(
       expect(socket.readyState).toBe(1);
       yield* Scope.close(scope, Exit.void);
       yield* fake.closed;
+    }),
+);
+
+it.effect(
+  "opens each relay consumer with a new upstream ticket and never the stored token in its URL",
+  () =>
+    Effect.gen(function* () {
+      const fake = yield* FakeSocket.make;
+      const requests: HttpClientRequest.HttpClientRequest[] = [];
+      const http = HttpClient.make((request) =>
+        Effect.sync(() => {
+          requests.push(request);
+          return HttpClientResponse.fromWeb(
+            request,
+            Response.json({
+              ticket: `relay-ticket-${requests.length}`,
+              expiresAt: "2099-01-01T00:00:00Z",
+            }),
+          );
+        }),
+      );
+      const services = yield* Layer.build(
+        NodeSource.layer.pipe(
+          Layer.provide(Layer.merge(fake.layer, Layer.succeed(HttpClient.HttpClient, http))),
+        ),
+      );
+      const transport = Context.get(services, Connections.SourceTransport);
+      const now = yield* DateTime.now;
+      const input = {
+        environment,
+        credential: {
+          token: "test-access-token",
+          sourceSessionId: AuthSessionId.make("session"),
+          scopes: ["orchestration:read"] as const,
+          issuedAt: now,
+          expiresAt: DateTime.add(now, { days: 30 }),
+        },
+      };
+      if (transport.connectRelay === undefined)
+        return yield* Effect.die("Relay transport is unavailable.");
+      const a = yield* transport.connectRelay(input);
+      const b = yield* transport.connectRelay(input);
+      yield* a.reader;
+      yield* b.reader;
+      const first = yield* Queue.take(fake.sockets);
+      const second = yield* Queue.take(fake.sockets);
+      expect(first.url).toBe(
+        "wss://source.example/ws?wsTicket=relay-ticket-1&orchestrationProtocol=2",
+      );
+      expect(second.url).toBe(
+        "wss://source.example/ws?wsTicket=relay-ticket-2&orchestrationProtocol=2",
+      );
+      expect(
+        requests.every(
+          (r) =>
+            r.headers.cookie === undefined &&
+            r.headers.authorization === "Bearer test-access-token",
+        ),
+      ).toBe(true);
+    }),
+);
+
+it.effect.each([401, 403, 426])(
+  "classifies a dedicated upstream upgrade denial %i without reconnect",
+  (status) =>
+    Effect.gen(function* () {
+      const services = yield* Layer.build(
+        HttpRouter.serve(
+          HttpRouter.add("GET", "/ws", HttpServerResponse.text("Denied", { status })),
+          { disableLogger: true, disableListenLog: true },
+        ).pipe(Layer.provideMerge(NodeHttpServer.layerTest)),
+      );
+      const address = Context.get(services, HttpServer.HttpServer).address;
+      if (typeof address === "string" || !("port" in address))
+        return yield* Effect.die("No source address.");
+      let tickets = 0;
+      const http = HttpClient.make((request) =>
+        Effect.sync(() => {
+          tickets++;
+          return HttpClientResponse.fromWeb(
+            request,
+            Response.json({ ticket: "upgrade-ticket", expiresAt: "2099-01-01T00:00:00Z" }),
+          );
+        }),
+      );
+      const transportServices = yield* Layer.build(
+        NodeSource.layer.pipe(
+          Layer.provide(
+            Layer.merge(
+              Layer.succeed(HttpClient.HttpClient, http),
+              NodeSocket.layerWebSocketConstructorWS,
+            ),
+          ),
+        ),
+      );
+      const transport = Context.get(transportServices, Connections.SourceTransport);
+      const now = yield* DateTime.now;
+      if (transport.connectRelay === undefined) return yield* Effect.die("No relay transport.");
+      const error = yield* Effect.flip(
+        transport.connectRelay({
+          environment: { ...environment, endpoint: `http://127.0.0.1:${address.port}` },
+          credential: {
+            token: "test-access-token",
+            sourceSessionId: AuthSessionId.make("session"),
+            scopes: ["orchestration:read"],
+            issuedAt: now,
+            expiresAt: DateTime.add(now, { days: 30 }),
+          },
+        }),
+      );
+      expect(error.reason).toBe(status === 426 ? "protocol" : "authentication");
+      expect(tickets).toBe(1);
     }),
 );

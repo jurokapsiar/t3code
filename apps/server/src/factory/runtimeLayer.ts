@@ -15,6 +15,7 @@ import * as Connections from "./Connections.ts";
 import * as NodeSource from "./NodeSource.ts";
 import * as SourceShell from "./SourceShell.ts";
 import * as RelayPolicy from "./RelayPolicy.ts";
+import * as Relay from "./Relay.ts";
 
 export class FactoryRuntime extends Context.Service<
   FactoryRuntime,
@@ -24,6 +25,7 @@ export class FactoryRuntime extends Context.Service<
     readonly getConnections: Effect.Effect<Connections.Connections["Service"], FactoryError>;
     readonly getSourceShell: Effect.Effect<SourceShell.SourceShell["Service"], FactoryError>;
     readonly getOverview: Effect.Effect<Overview.Overview["Service"], FactoryError>;
+    readonly getRelay: Effect.Effect<Relay.Relay["Service"], FactoryError>;
     readonly getRelayPolicy: Effect.Effect<RelayPolicy.RelayPolicy["Service"], FactoryError>;
     readonly getEnrollment: Effect.Effect<
       Enrollment.Enrollment["Service"],
@@ -55,6 +57,7 @@ export const layer = ({
           getSourceShell: Effect.fail(disabledError),
           getOverview: Effect.fail(disabledError),
           getRelayPolicy: Effect.fail(disabledError),
+          getRelay: Effect.fail(disabledError),
           getEnrollment: Effect.fail(disabledError),
         });
       }
@@ -80,6 +83,8 @@ export const layer = ({
       const overviewLayer = Overview.layer.pipe(Layer.provideMerge(enrollmentLayer));
       const relayPolicyLayer = RelayPolicy.layer.pipe(Layer.provideMerge(overviewLayer));
 
+      const relayLayer = Relay.layer.pipe(Layer.provideMerge(relayPolicyLayer));
+
       return Layer.effect(
         FactoryRuntime,
         Effect.gen(function* () {
@@ -89,6 +94,7 @@ export const layer = ({
           const sourceShell = yield* SourceShell.SourceShell;
           const overview = yield* Overview.Overview;
           const relayPolicy = yield* RelayPolicy.RelayPolicy;
+          const relay = yield* Relay.Relay;
           yield* connections.start;
           yield* sourceShell.start;
           yield* overview.start;
@@ -107,9 +113,10 @@ export const layer = ({
             getSourceShell: Effect.succeed(sourceShell),
             getOverview: Effect.succeed(overview),
             getRelayPolicy: Effect.succeed(relayPolicy),
+            getRelay: Effect.succeed(relay),
             getEnrollment: Effect.succeed(enrollment),
           };
         }),
-      ).pipe(Layer.provide(relayPolicyLayer));
+      ).pipe(Layer.provide(relayLayer));
     }),
   );

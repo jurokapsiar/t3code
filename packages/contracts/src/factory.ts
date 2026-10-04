@@ -125,6 +125,12 @@ export const FactoryRenewalState = Schema.Literals([
 ]);
 export type FactoryRenewalState = typeof FactoryRenewalState.Type;
 
+export const FactorySourceAccess = Schema.Struct({
+  websocketRoute: TrimmedNonEmptyString.check(Schema.isPattern(/^\/factory\/env\/[^\s/?#]+\/ws$/)),
+  capabilities: Schema.Struct({ websocket: Schema.Boolean }),
+});
+export type FactorySourceAccess = typeof FactorySourceAccess.Type;
+
 export const FactoryEnvironmentView = Schema.Struct({
   registrationId: FactoryRegistrationId,
   environmentId: EnvironmentId,
@@ -133,6 +139,7 @@ export const FactoryEnvironmentView = Schema.Struct({
   platform: Schema.NullOr(ExecutionEnvironmentPlatform),
   enabled: Schema.Boolean,
   state: FactoryEnvironmentState,
+  sourceAccess: Schema.optional(FactorySourceAccess),
   credentialStorage: Schema.NullOr(FactoryCredentialStorage),
   credentialExpiresAt: Schema.NullOr(Schema.DateTimeUtc),
   renewal: FactoryRenewalState,

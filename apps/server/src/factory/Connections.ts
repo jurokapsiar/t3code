@@ -30,6 +30,7 @@ import * as Identity from "../environment/ServerEnvironment.ts";
 import * as CredentialRenewal from "./CredentialRenewal.ts";
 import * as Enrollment from "./Enrollment.ts";
 import * as Metadata from "./Metadata.ts";
+import type * as Socket from "effect/unstable/socket/Socket";
 
 export class SourceFailure extends Schema.TaggedError<SourceFailure>()("SourceFailure", {
   reason: Schema.Literals([
@@ -57,6 +58,10 @@ export interface SourceSession {
 export class SourceTransport extends Context.Service<
   SourceTransport,
   {
+    readonly connectRelay?: (input: {
+      readonly environment: FactoryEnvironmentView;
+      readonly credential: CredentialStore.StoredCredential;
+    }) => Effect.Effect<Socket.Socket, SourceFailure, Scope.Scope>;
     readonly connect: (input: {
       readonly environment: FactoryEnvironmentView;
       readonly credential: CredentialStore.StoredCredential;
@@ -99,6 +104,9 @@ export class Connections extends Context.Service<
     readonly resolveTarget: (
       target: FactoryRemoteTarget,
     ) => Effect.Effect<SourceAccess, SourceFailure>;
+    readonly openRelay: (
+      access: SourceAccess,
+    ) => Effect.Effect<Socket.Socket, SourceFailure, Scope.Scope>;
     readonly getStates: Effect.Effect<ReadonlyArray<SourceState>>;
     readonly subscribeStates: Stream.Stream<ReadonlyArray<SourceState>>;
   }
@@ -116,6 +124,7 @@ interface Owner {
   session: SourceSession | undefined;
   authorization?: Pick<CredentialStore.StoredCredential, "scopes" | "expiresAt"> | undefined;
   ended: Deferred.Deferred<never, SourceFailure> | undefined;
+  openRelay?: (() => Effect.Effect<Socket.Socket, SourceFailure, Scope.Scope>) | undefined;
 }
 
 const isEnabled = (environment: FactoryEnvironmentView) =>
@@ -213,6 +222,12 @@ const make = Effect.gen(function* () {
             );
           const ended = yield* Deferred.make<never, SourceFailure>();
           owner.ended = ended;
+          const connectRelay = transport.connectRelay;
+          owner.openRelay =
+            connectRelay === undefined
+              ? undefined
+              : () =>
+                  connectRelay({ environment: reference.environment, credential: stored.value });
           owner.authorization = {
             scopes: Object.freeze([...stored.value.scopes]),
             expiresAt: stored.value.expiresAt,
@@ -221,6 +236,7 @@ const make = Effect.gen(function* () {
             Effect.gen(function* () {
               owner.session = undefined;
               owner.authorization = undefined;
+              owner.openRelay = undefined;
               yield* Deferred.fail(ended, new SourceFailure({ reason: "unavailable" }));
             }),
           );
@@ -517,7 +533,18 @@ const make = Effect.gen(function* () {
       } satisfies SourceAccess;
     });
 
+  const openRelay = Effect.fnUntraced(function* (access: SourceAccess) {
+    yield* access.checkCurrent;
+    const owner = owners.get(access.target.registrationId);
+    if (owner?.session !== access.connectionId || owner.openRelay === undefined)
+      return yield* new SourceFailure({ reason: "unavailable" });
+    const socket = yield* owner.openRelay();
+    yield* access.checkCurrent;
+    return socket;
+  });
+
   return Connections.of({
+    openRelay,
     start,
     connect,
     retry,

@@ -74,6 +74,21 @@ const project = (environmentId: string, projectId: string) =>
   decodeProject({ environmentId, projectId });
 
 metadataLayer("Factory metadata", (it) => {
+  it.effect("advertises a relative source WebSocket route without storing it or a credential", () =>
+    Effect.gen(function* () {
+      const metadata = yield* Metadata.Metadata;
+      yield* metadata.createEnvironment(environment("route/source", "route-environment"));
+      const view = (yield* metadata.listEnvironments)[0];
+      expect(view?.sourceAccess).toEqual({
+        websocketRoute: "/factory/env/route%2Fsource/ws",
+        capabilities: { websocket: true },
+      });
+      const sql = yield* SqlClient.SqlClient;
+      const columns = yield* sql`PRAGMA table_info(factory_environments)`;
+      expect(columns.map((row) => row.name)).not.toContain("source_access");
+    }),
+  );
+
   it.effect("reads the current enrollment reference and forgets it after removal", () =>
     Effect.gen(function* () {
       const metadata = yield* Metadata.Metadata;

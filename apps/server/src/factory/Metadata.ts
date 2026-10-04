@@ -213,7 +213,7 @@ const make = Effect.gen(function* () {
   const changes = yield* PubSub.unbounded<FactoryMetadataCommit>();
   const commitLock = yield* Semaphore.make(1);
 
-  const selectEnvironments = SqlSchema.findAll({
+  const selectEnvironmentRows = SqlSchema.findAll({
     Request: Schema.Struct({ registrationId: Schema.optional(FactoryRegistrationId) }),
     Result: EnvironmentDbRow,
     execute: ({ registrationId }) => sql`
@@ -236,6 +236,19 @@ const make = Effect.gen(function* () {
       ORDER BY label COLLATE NOCASE, registration_id
     `,
   });
+
+  const selectEnvironments = (input: Parameters<typeof selectEnvironmentRows>[0]) =>
+    selectEnvironmentRows(input).pipe(
+      Effect.map((rows) =>
+        rows.map((environment) => ({
+          ...environment,
+          sourceAccess: {
+            websocketRoute: `/factory/env/${encodeURIComponent(environment.registrationId)}/ws`,
+            capabilities: { websocket: true },
+          },
+        })),
+      ),
+    );
 
   const selectGroups = SqlSchema.findAll({
     Request: Schema.Struct({ groupId: Schema.optional(FactoryGroupId) }),

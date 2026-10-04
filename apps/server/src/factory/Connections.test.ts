@@ -33,6 +33,7 @@ import * as FakeSource from "./testkit/FakeSource.ts";
 import * as Enrollment from "./Enrollment.ts";
 
 import { config } from "./testkit/sourceConfig.ts";
+import { memorySocket } from "./testkit/RelaySocket.ts";
 
 const target = (id = "a", env = "env-a") =>
   FactoryRemoteTarget.make({
@@ -42,6 +43,24 @@ const target = (id = "a", env = "env-a") =>
 
 const harness = Effect.gen(function* () {
   const fake = yield* FakeSource.make;
+  const relayInputs: Parameters<Connections.SourceTransport["Service"]["connect"]>[0][] = [];
+  const relaySockets: Array<Effect.Success<typeof memorySocket>> = [];
+  const relayTransportLayer = Layer.effect(
+    Connections.SourceTransport,
+    Effect.gen(function* () {
+      const original = yield* Connections.SourceTransport;
+      return Connections.SourceTransport.of({
+        ...original,
+        connectRelay: (input) =>
+          Effect.gen(function* () {
+            relayInputs.push(input);
+            const socket = yield* memorySocket;
+            relaySockets.push(socket);
+            return socket.socket;
+          }),
+      });
+    }),
+  ).pipe(Layer.provide(fake.layer));
   const credentials = new Map<string, CredentialStore.StoredCredential>();
   const vaultFailed = yield* Ref.make(false);
   const scope = yield* Scope.make();
@@ -49,7 +68,7 @@ const harness = Effect.gen(function* () {
   const dependencies = Layer.mergeAll(
     CredentialMutations.layer,
     Metadata.layer.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
-    fake.layer,
+    relayTransportLayer,
     Layer.succeed(Identity.ServerEnvironmentIdentity, {
       getEnvironmentId: Effect.succeed(EnvironmentId.make("factory")),
     }),
@@ -151,6 +170,8 @@ const harness = Effect.gen(function* () {
   });
   return {
     fake,
+    relayInputs,
+    relaySockets,
     connections,
     metadata,
     states,
@@ -637,5 +658,47 @@ it.effect(
       const access = yield* h.connections.resolveTarget(target());
       yield* Stream.toQueue(access.shell, { capacity: 8 });
       expect(yield* Queue.take(attempt.shellCalls)).toEqual({});
+    }),
+);
+
+it.effect(
+  "opens dedicated consumers from the supervisor credential and releases only their scope",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      yield* h.register();
+      yield* h.connections.start;
+      const overview = yield* Queue.take(h.fake.attempts);
+      yield* overview.ready(config());
+      yield* h.wait("a", "online");
+      const access = yield* h.connections.resolveTarget(target());
+      const original = h.credentials.get("a");
+      if (original === undefined) return yield* Effect.die("No test credential.");
+      h.credentials.set("a", { ...original, token: "unowned-replacement" });
+      const a = yield* Scope.make();
+      const b = yield* Scope.make();
+      yield* Effect.addFinalizer(() => Scope.close(a, Exit.void));
+      yield* Effect.addFinalizer(() => Scope.close(b, Exit.void));
+      const first = yield* h.connections.openRelay(access).pipe(Scope.provide(a));
+      const second = yield* h.connections.openRelay(access).pipe(Scope.provide(b));
+      yield* first.reader.pipe(Scope.provide(a));
+      yield* second.reader.pipe(Scope.provide(b));
+      expect(h.relayInputs.map((input) => input.credential.token)).toEqual([
+        "test-token-a",
+        "test-token-a",
+      ]);
+      expect(first).not.toBe(second);
+      yield* Scope.close(a, Exit.void);
+      const firstSocket = h.relaySockets[0];
+      if (firstSocket === undefined) return yield* Effect.die("No first socket.");
+      yield* firstSocket.closed;
+      yield* access.checkCurrent;
+      expect(h.fake.calls).toHaveLength(1);
+      yield* h.connections.disable(target().registrationId);
+      expect(yield* Effect.flip(access.closed)).toMatchObject({ reason: "unavailable" });
+      expect(yield* Effect.flip(h.connections.openRelay(access))).toMatchObject({
+        reason: "unavailable",
+      });
+      expect(h.relayInputs).toHaveLength(2);
     }),
 );
