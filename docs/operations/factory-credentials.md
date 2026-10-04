@@ -6,6 +6,15 @@ Service, and Windows uses the system credential vault. Make the vault available
 to the account that runs the server. A locked or unavailable vault causes the
 operation to fail; T3 Code does not fall back to files.
 
+The Factory database stores registrations, project groups, memberships,
+favorites, and references to credentials. Source session credentials stay in
+the selected backend; project and thread data stay on each source. On restart,
+use the same T3 home and environment identity with its selected credential
+backend so enabled registrations can reconnect. A database-only restore cannot
+reconnect sources whose credentials are missing. Source sessions expire after
+30 days; a server restart does not renew them. See [remote access](../user/remote-access.md#factory-source-credentials)
+for renewal and re-enrollment guidance.
+
 ## Headless hosts
 
 Use protected-file storage only when the server cannot use an OS vault. Select it

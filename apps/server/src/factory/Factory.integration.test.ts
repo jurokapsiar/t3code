@@ -502,6 +502,18 @@ it.layer(NodeServices.layer)("factory authenticated RPC boundary", (it) => {
       yield* sourceB.nextConfigFeed;
       const shellA = yield* Queue.take(sourceA.shellSubscriptions);
       const shellB = yield* Queue.take(sourceB.shellSubscriptions);
+      const embeddedRoute = yield* factory.runtime.getEmbeddedRoute;
+      const unsynchronizedRoute = yield* Effect.flip(
+        embeddedRoute.get({
+          target: {
+            registrationId: environmentA.registrationId,
+            environmentId: environmentA.environmentId,
+          },
+          threadId: ThreadId.make("same-thread"),
+          callerScopes: ["factory:read"],
+        }),
+      );
+      expect(unsynchronizedRoute).toMatchObject({ _tag: "FactoryError", code: "source-stale" });
       const sourceShellService = yield* factory.runtime.getSourceShell;
       const changes = yield* Stream.toQueue(sourceShellService.subscribe, { capacity: 128 });
       const waiter = sourceUpdateWaiter(changes);

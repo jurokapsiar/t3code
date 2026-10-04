@@ -43,15 +43,22 @@ and browser authorization uses the existing `/pair` page and `/api/auth` routes.
 The server reserves `/factory/bootstrap` and `/factory/env` for its own routes.
 A missing or invalid configured build stops startup. Without a UI directory,
 Factory UI requests return an explicit error; they do not show T3 Code instead.
-When Factory mode is off, the UI directory is not opened.
+When Factory mode is off, the UI directory is not opened. Pair your browser with
+the host at `/pair`, then open Factory and enroll each source with its one-time
+pairing credential. Use project groups to organize projects from different
+sources; memberships and favorites are saved as Factory metadata.
 
 Factory mode connects to enabled, enrolled sources with their stored credentials.
 Each source connects on its own. Network failures reconnect automatically.
 Authentication, credential-store, identity, and protocol failures require an
 administrator retry after the problem is resolved. Disabling or removing a source
 closes the Factory connection; it does not stop work running on that source.
-An online connection does not mean its project and thread summaries are current.
-The combined overview is not yet available.
+The overview shows current projects and non-archived threads from each source.
+Local project and thread IDs are scoped to their source, so matching IDs do not
+merge separate work. Use project groups to organize projects from multiple sources;
+manage their memberships and favorites in Factory. This organization is Factory
+metadata and does not move or copy source project data. A stale or disconnected
+source is not available for new detail or embedded-chat routes until it syncs.
 
 ### Factory source credentials
 
@@ -64,6 +71,8 @@ can issue a replacement for a valid bearer session with the same or narrower
 scopes. Renewal does not revoke the old session. Save the replacement before
 revoking the old session. An expired or revoked session cannot be renewed. A
 source without renewal support needs fresh enrollment after its session expires.
+Restarting the Factory server reconnects enabled sources when their stored
+credentials are still valid; a restart does not extend an expired source session.
 Keep the vault available to the server account: unlock the login Keychain on macOS,
 provide an unlocked Secret Service on Linux, or make the system credential vault
 available on Windows. If the vault is unavailable, enrollment fails. Factory

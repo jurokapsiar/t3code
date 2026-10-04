@@ -2,6 +2,8 @@
 import * as NodeChildProcess from "node:child_process";
 import * as NodeReadline from "node:readline";
 import * as NodeStream from "node:stream";
+import * as NodePath from "node:path";
+import * as NodeURL from "node:url";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import * as Context from "effect/Context";
@@ -32,6 +34,13 @@ import {
   MessageId,
   ProjectId,
   ProviderInstanceId,
+  FactoryFrameErrorCode,
+  FactoryFrameInitMessage,
+  FactoryFrameMessage,
+  FactoryFrameTarget,
+  type FactoryFrameErrorCode as FactoryFrameErrorCodeType,
+  type FactoryFrameInitMessage as FactoryFrameInitMessageType,
+  type FactoryFrameTarget as FactoryFrameTargetType,
   type AuthEnvironmentScope,
 } from "@t3tools/contracts";
 import * as Config from "../../config.ts";
@@ -58,6 +67,40 @@ const Message = Schema.Struct({
   data: Schema.optional(Schema.Unknown),
 });
 const decodeMessage = Schema.decodeUnknownSync(Message);
+const decodeNativeFrameReply = Schema.decodeUnknownSync(
+  Schema.Struct({
+    target: FactoryFrameTarget,
+    message: Schema.NullOr(FactoryFrameMessage),
+  }),
+);
+const decodeFrameInit = Schema.decodeUnknownSync(FactoryFrameInitMessage);
+const decodeFrameInitMilestone = Schema.decodeUnknownSync(
+  Schema.Struct({ href: Schema.String, init: Schema.Unknown }),
+);
+const decodeFrameTargetMismatchMilestone = Schema.decodeUnknownSync(
+  Schema.Struct({
+    href: Schema.String,
+    init: Schema.Unknown,
+    activeTarget: Schema.Unknown,
+  }),
+);
+const decodeFrameErrorMilestone = Schema.decodeUnknownSync(
+  Schema.Struct({
+    href: Schema.String,
+    init: Schema.Unknown,
+    target: Schema.Unknown,
+    code: Schema.String,
+  }),
+);
+const decodeFrameDisconnectedMilestone = Schema.decodeUnknownSync(
+  Schema.Struct({ target: FactoryFrameTarget }),
+);
+const decodeFrameTarget = Schema.decodeUnknownSync(FactoryFrameTarget);
+const decodeFrameErrorCode = Schema.decodeUnknownSync(FactoryFrameErrorCode);
+const nativeFrameHelperPath = NodeURL.fileURLToPath(
+  new URL("./factoryEmbedBoundary.mjs", import.meta.url),
+);
+
 class GateFailure extends Schema.TaggedError<GateFailure>()("GateFailure", {
   detail: Schema.String,
   cause: Schema.optional(Schema.Defect()),
@@ -311,9 +354,141 @@ export const phase2Gate = Effect.gen(function* () {
     if (stored._tag === "None") return yield* Effect.die("No enrolled credential");
     sourceTokens.push(stored.value.token);
   }
+  const sourceOrchestratorB = Context.get(sourceB.services, Orchestrator.OrchestratorV2);
+  const frameSourceAccesses = new Map<
+    string,
+    Effect.Success<ReturnType<typeof connections.resolveTarget>>
+  >();
+  const frameInputs = new Map<
+    string,
+    { readonly href: string; readonly init: FactoryFrameInitMessageType }
+  >();
+  const nativeFrameCli = NodePath.join(uiCheckout, "node_modules", ".bin", "tsx");
+  const nativeFrameExchange = (input: {
+    readonly href: string;
+    readonly init: FactoryFrameInitMessageType;
+    readonly expectedTarget: FactoryFrameTargetType;
+    readonly activeTarget: FactoryFrameTargetType | null;
+    readonly routeTarget: { readonly environmentId: string; readonly threadId: string } | null;
+    readonly connectionPhase: "connecting" | "connected" | "disconnected" | "blocked";
+    readonly threadState: "pending" | "ready" | "missing";
+    readonly failureCode?: FactoryFrameErrorCodeType;
+  }) =>
+    Effect.sync(() => {
+      const stdout = NodeChildProcess.execFileSync(nativeFrameCli, [nativeFrameHelperPath], {
+        cwd: uiCheckout,
+        input: JSON.stringify({ origin: factory.origin, ...input }),
+        encoding: "utf8",
+        timeout: 30_000,
+      });
+      return decodeNativeFrameReply(JSON.parse(stdout));
+    });
+  const bootstrapFrame = (
+    href: string,
+    data: unknown,
+    activeTarget?: FactoryFrameTargetType,
+    failureCode?: FactoryFrameErrorCodeType,
+  ) => {
+    const init = decodeFrameInit(data);
+    return Effect.gen(function* () {
+      const expectedTarget = init.target;
+      const selected =
+        expectedTarget.environmentId === envA.environmentId &&
+        expectedTarget.registrationId === envA.registrationId
+          ? { client: clientA, orchestrator }
+          : expectedTarget.environmentId === envB.environmentId &&
+              expectedTarget.registrationId === envB.registrationId
+            ? { client: clientB, orchestrator: sourceOrchestratorB }
+            : undefined;
+      expect(selected).toBeDefined();
+      if (!selected)
+        return yield* Effect.die("Embedded route did not resolve to an enrolled source");
+      const config = yield* selected.client["server.getConfig"]({});
+      expect(config.environment.environmentId).toBe(expectedTarget.environmentId);
+      expect(config.environment.orchestrationProtocolVersion).toBe(2);
+      const access = yield* connections.resolveTarget({
+        registrationId: expectedTarget.registrationId,
+        environmentId: expectedTarget.environmentId,
+      });
+      frameSourceAccesses.set(expectedTarget.registrationId, access);
+      frameInputs.set(expectedTarget.registrationId, { href, init });
+      const synchronized = yield* sourceShell.isSynchronized(access);
+      const projection = yield* selected.orchestrator.getThreadProjection(
+        ThreadId.make(expectedTarget.threadId),
+      );
+      const reply = yield* nativeFrameExchange({
+        href,
+        init,
+        expectedTarget,
+        activeTarget: activeTarget ?? expectedTarget,
+        routeTarget: projection
+          ? { environmentId: expectedTarget.environmentId, threadId: projection.thread.id }
+          : null,
+        connectionPhase: synchronized ? "connected" : "disconnected",
+        threadState: projection?.thread.id === expectedTarget.threadId ? "ready" : "missing",
+        ...(failureCode === undefined ? {} : { failureCode }),
+      });
+      expect(reply.target).toEqual(expectedTarget);
+      return reply.message;
+    });
+  };
   const handle = (message: typeof Message.Type) =>
     Effect.gen(function* () {
       switch (message.name) {
+        case "frame-init": {
+          const data = decodeFrameInitMilestone(message.data);
+          const reply = yield* bootstrapFrame(data.href, data.init);
+          expect(reply?._tag).toBe("ready");
+          return reply;
+        }
+        case "frame-target-mismatch": {
+          const data = decodeFrameTargetMismatchMilestone(message.data);
+          const reply = yield* bootstrapFrame(
+            data.href,
+            data.init,
+            decodeFrameTarget(data.activeTarget),
+          );
+          expect(reply?._tag).toBe("error");
+          return reply;
+        }
+        case "frame-error": {
+          const data = decodeFrameErrorMilestone(message.data);
+          const target = decodeFrameTarget(data.target);
+          const code = decodeFrameErrorCode(data.code);
+          const reply = yield* bootstrapFrame(data.href, data.init, target, code);
+          expect(reply?._tag).toBe("error");
+          return reply;
+        }
+        case "frame-disconnected": {
+          const data = decodeFrameDisconnectedMilestone(message.data);
+          const target = data.target;
+          const access = frameSourceAccesses.get(target.registrationId);
+          const previous = frameInputs.get(target.registrationId);
+          expect(access).toBeDefined();
+          expect(previous).toBeDefined();
+          if (!access || !previous)
+            return yield* Effect.die("Source access was not established before disconnect");
+          expect(yield* sourceShell.isSynchronized(access)).toBe(false);
+          const config = yield* clientA["server.getConfig"]({});
+          expect(config.environment.environmentId).toBe(target.environmentId);
+          expect(config.environment.orchestrationProtocolVersion).toBe(2);
+          const projection = yield* orchestrator.getThreadProjection(
+            ThreadId.make(target.threadId),
+          );
+          const reply = yield* nativeFrameExchange({
+            href: previous.href,
+            init: previous.init,
+            expectedTarget: target,
+            activeTarget: target,
+            routeTarget: projection
+              ? { environmentId: target.environmentId, threadId: projection.thread.id }
+              : null,
+            connectionPhase: "disconnected",
+            threadState: projection ? "ready" : "missing",
+          });
+          expect(reply.message?._tag).toBe("error");
+          return reply.message;
+        }
         case "drain": {
           if (rollbackDrain) {
             yield* Deferred.succeed(rollbackRelease, undefined);
@@ -695,7 +870,7 @@ export const phase2Gate = Effect.gen(function* () {
       expect(bytes.includes(token)).toBe(false);
     expect(bytes).not.toContain("native project-relative content");
   }
-  for (const token of sourceTokens) {
+  for (const token of [...sourceTokens, pairingA.credential, pairingB.credential]) {
     expect(output.includes(token)).toBe(false);
     expect(JSON.stringify(audit).includes(token)).toBe(false);
     expect(JSON.stringify(yield* overview.getSnapshot).includes(token)).toBe(false);
