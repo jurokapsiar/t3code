@@ -6,7 +6,9 @@ import * as Schema from "effect/Schema";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Console from "effect/Console";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Scope from "effect/Scope";
@@ -186,6 +188,354 @@ describe("checkOverviewLimits", () => {
 });
 
 describe("Factory overview", () => {
+  it.effect.each(["frame", "snapshot", "source"] as const)(
+    "delivers a greater-than-1-MiB %s load and replacement to a live exact consumer",
+    (load) =>
+      Effect.gen(function* () {
+        const remote = target("large-live", "large-live-env");
+        const rows = Array.from({ length: 10_000 }, (_, index) =>
+          thread(remote, `thread-${index}`, "project"),
+        );
+        const harness = yield* makeHarness();
+        const initial = yield* harness.overview.getSnapshot;
+        const bytes = encodedSnapshotBytes({ ...initial, threads: rows });
+        expect(bytes).toBeGreaterThan(1024 * 1024);
+        expect(bytes).toBeLessThanOrEqual(8 * 1024 * 1024);
+        const subscribed = yield* Deferred.make<void>();
+        const loaded = yield* Deferred.make<void>();
+        const replaced = yield* Deferred.make<void>();
+        const actual = new Map<string, FactoryThreadSummary>();
+        let revision = initial.revision;
+        let threadUpserts = 0;
+        const consumer = yield* Stream.runForEach(harness.overview.subscribe, (event) =>
+          Effect.gen(function* () {
+            if (event.type === "snapshot") {
+              expect(event.snapshot.generation).toBe(initial.generation);
+              if (yield* Deferred.isDone(subscribed))
+                expect(event.snapshot.revision).toBe(revision + 1);
+              revision = event.snapshot.revision;
+              actual.clear();
+              for (const row of event.snapshot.threads) actual.set(row.key.threadId, row);
+              yield* Deferred.succeed(subscribed, undefined);
+            } else {
+              expect(event.generation).toBe(initial.generation);
+              expect(event.revision).toBe(revision + 1);
+              revision = event.revision;
+              if (event.patch.kind === "threads") {
+                threadUpserts += event.patch.upserts.length;
+                for (const key of event.patch.removals) actual.delete(key.threadId);
+                for (const row of event.patch.upserts) actual.set(row.key.threadId, row);
+              }
+            }
+            if (actual.size === 10_000) yield* Deferred.succeed(loaded, undefined);
+            if (actual.get("thread-0")?.title === "Changed only row")
+              yield* Deferred.succeed(replaced, undefined);
+          }),
+        ).pipe(Effect.forkScoped);
+        const milestone = (done: Deferred.Deferred<void>) =>
+          Effect.raceFirst(
+            Deferred.await(done),
+            Fiber.join(consumer).pipe(
+              Effect.andThen(Effect.die("Overview ended before complete delivery.")),
+            ),
+          );
+        yield* milestone(subscribed);
+        const frame = {
+          kind: "snapshot" as const,
+          target: remote,
+          sequence: 1,
+          projects: [],
+          threads: rows,
+        };
+        yield* harness.publish(
+          load === "frame"
+            ? { kind: "frame", frame }
+            : load === "snapshot"
+              ? { kind: "snapshot", sources: [sourceState(remote, [], rows)] }
+              : { kind: "source", source: sourceState(remote, [], rows) },
+        );
+        yield* milestone(loaded);
+        const deliveredBytes = encodedSnapshotBytes(yield* harness.overview.getSnapshot);
+        expect(deliveredBytes).toBeGreaterThan(1024 * 1024);
+        expect(deliveredBytes).toBeLessThanOrEqual(8 * 1024 * 1024);
+        yield* Console.log(
+          `Task4 ${load} load: ${deliveredBytes} encoded snapshot bytes, ${actual.size} exact threads, contiguous revision ${revision}`,
+        ).pipe(
+          Effect.provideService(Console.Console, Context.get(Context.empty(), Console.Console)),
+        );
+        expect(actual).toEqual(new Map(rows.map((row) => [row.key.threadId, row])));
+        const changed = rows.map((row, index) =>
+          index === 0 ? { ...row, title: "Changed only row" } : row,
+        );
+        threadUpserts = 0;
+        yield* harness.publish({
+          kind: "frame",
+          frame: { ...frame, sequence: 2, threads: changed },
+        });
+        yield* milestone(replaced);
+        expect(threadUpserts).toBe(1);
+        expect(actual).toEqual(new Map(changed.map((row) => [row.key.threadId, row])));
+        expect((yield* harness.overview.getSnapshot).revision).toBe(revision);
+      }),
+  );
+
+  it.effect(
+    "publishes one complete snapshot for a transaction whose individual patches fit but sum exceeds 1 MiB",
+    () =>
+      Effect.gen(function* () {
+        const remote = target("transaction", "transaction-env");
+        const h = yield* makeHarness([sourceState(remote)]);
+        const queue = yield* Stream.toQueue(h.overview.subscribe, { capacity: 1 });
+        const initial = yield* Queue.take(queue);
+        const p = project(remote, "large", "p".repeat(600_000));
+        const t = { ...thread(remote, "large-thread", "large"), title: "t".repeat(600_000) };
+        yield* h.publish({
+          kind: "frame",
+          frame: {
+            kind: "snapshot",
+            target: remote,
+            sequence: 1,
+            projects: [p],
+            threads: [t],
+          },
+        });
+        const loaded = yield* Queue.take(queue);
+        expect(loaded).toMatchObject({
+          type: "snapshot",
+          snapshot: {
+            generation: initial.type === "snapshot" ? initial.snapshot.generation : "",
+            revision: 1,
+            projects: [p],
+            threads: [t],
+          },
+        });
+        yield* h.publish({
+          kind: "frame",
+          frame: {
+            kind: "project.updated",
+            target: remote,
+            sequence: 2,
+            project: { ...p, title: "Updated" },
+          },
+        });
+        expect(yield* Queue.take(queue)).toMatchObject({
+          type: "patch",
+          revision: 2,
+          patch: { kind: "projects" },
+        });
+        expect((yield* h.overview.getSnapshot).threads).toEqual([t]);
+      }),
+  );
+
+  it.effect.each([256, 257])(
+    "enforces the exact 256-item delta backlog at %i pending updates",
+    (count) =>
+      Effect.gen(function* () {
+        const remote = target("item-boundary", "item-boundary-env");
+        const h = yield* makeHarness([sourceState(remote)]);
+        const subscribed = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const revisions: number[] = [];
+        const consumer = yield* Stream.runForEach(
+          h.overview.subscribe.pipe(Stream.take(257)),
+          (event) =>
+            event.type === "snapshot"
+              ? Deferred.succeed(subscribed, undefined).pipe(
+                  Effect.andThen(Deferred.await(release)),
+                )
+              : Effect.sync(() => {
+                  revisions.push(event.revision);
+                }),
+        ).pipe(Effect.forkScoped);
+        yield* Deferred.await(subscribed);
+        for (let sequence = 1; sequence <= count; sequence++) {
+          yield* h.publish({
+            kind: "frame",
+            frame: {
+              kind: "project.updated",
+              target: remote,
+              sequence,
+              project: project(remote, "mutable", String(sequence)),
+            },
+          });
+        }
+        yield* h.finish;
+        yield* Deferred.succeed(release, undefined);
+        if (count === 256) {
+          yield* Fiber.join(consumer);
+          expect(revisions).toEqual(Array.from({ length: 256 }, (_, index) => index + 1));
+        } else {
+          expect(yield* Effect.flip(Fiber.join(consumer))).toMatchObject({
+            code: "overview-stream-overflow",
+          });
+          expect(revisions).toEqual([]);
+        }
+      }),
+  );
+
+  it.effect.each([0, 1])(
+    "enforces the exact 1-MiB delta byte backlog with %i extra bytes",
+    (extra) =>
+      Effect.gen(function* () {
+        const remote = target("queue-byte-boundary", "queue-byte-boundary-env");
+        const h = yield* makeHarness([sourceState(remote)]);
+        const initial = yield* h.overview.getSnapshot;
+        const first = project(remote, "mutable", "a".repeat(500_000));
+        const smallSecond = project(remote, "mutable", "b");
+        const eventBytes = (row: FactoryProjectSummary, revision: number) =>
+          encodeOverviewEvent({
+            type: "patch",
+            generation: initial.generation,
+            revision,
+            patch: { kind: "projects", upserts: [row], removals: [] },
+          }).pipe(
+            Effect.flatMap(encodeOverviewJson),
+            Effect.map((json) => new TextEncoder().encode(json).byteLength),
+          );
+        const firstBytes = yield* eventBytes(first, 1);
+        const smallBytes = yield* eventBytes(smallSecond, 2);
+        const second = {
+          ...smallSecond,
+          title: "b".repeat(1 + 1024 * 1024 - firstBytes - smallBytes + extra),
+        };
+        const secondBytes = yield* eventBytes(second, 2);
+        expect(firstBytes).toBeLessThan(1024 * 1024);
+        expect(secondBytes).toBeLessThan(1024 * 1024);
+        expect(firstBytes + secondBytes).toBe(1024 * 1024 + extra);
+        const subscribed = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const events: FactoryOverviewEvent[] = [];
+        const consumer = yield* Stream.runForEach(
+          h.overview.subscribe.pipe(Stream.take(3)),
+          (event) =>
+            event.type === "snapshot"
+              ? Deferred.succeed(subscribed, undefined).pipe(
+                  Effect.andThen(Deferred.await(release)),
+                )
+              : Effect.sync(() => {
+                  events.push(event);
+                }),
+        ).pipe(Effect.forkScoped);
+        yield* Deferred.await(subscribed);
+        for (const [index, row] of [first, second].entries()) {
+          yield* h.publish({
+            kind: "frame",
+            frame: { kind: "project.updated", target: remote, sequence: index + 1, project: row },
+          });
+        }
+        yield* h.finish;
+        yield* Deferred.succeed(release, undefined);
+        if (extra === 0) {
+          yield* Fiber.join(consumer);
+          expect(events).toMatchObject([
+            { type: "patch", revision: 1 },
+            { type: "patch", revision: 2 },
+          ]);
+        } else {
+          expect(yield* Effect.flip(Fiber.join(consumer))).toMatchObject({
+            code: "overview-stream-overflow",
+          });
+          expect(events).toEqual([]);
+        }
+        expect((yield* h.overview.getSnapshot).projects).toEqual([second]);
+      }),
+  );
+
+  it.effect("does not republish unchanged rows when an authoritative source snapshot repeats", () =>
+    Effect.gen(function* () {
+      const remote = target("unchanged", "unchanged-env");
+      const p = project(remote, "project");
+      const t = thread(remote, "thread", "project");
+      const h = yield* makeHarness([sourceState(remote, [p], [t])]);
+      const queue = yield* Stream.toQueue(h.overview.subscribe, { capacity: 4 });
+      yield* Queue.take(queue);
+      yield* h.publish({
+        kind: "frame",
+        frame: { kind: "snapshot", target: remote, sequence: 1, projects: [p], threads: [t] },
+      });
+      const changed = { ...p, title: "Changed after identical snapshot" };
+      yield* h.publish({
+        kind: "frame",
+        frame: { kind: "project.updated", target: remote, sequence: 2, project: changed },
+      });
+      expect(yield* Queue.take(queue)).toMatchObject({
+        type: "patch",
+        revision: 1,
+        patch: { kind: "projects", upserts: [changed], removals: [] },
+      });
+      expect((yield* h.overview.getSnapshot).threads).toEqual([t]);
+    }),
+  );
+
+  it.effect(
+    "accepts an exact 8-MiB live snapshot and rejects the next byte without truncation",
+    () =>
+      Effect.gen(function* () {
+        const remote = target("live-byte-boundary", "live-byte-boundary-env");
+        const h = yield* makeHarness([sourceState(remote)]);
+        const queue = yield* Stream.toQueue(h.overview.subscribe, { capacity: 1 });
+        yield* Queue.take(queue);
+        const p = project(remote, "large", "x");
+        const baseline = { ...(yield* h.overview.getSnapshot), revision: 1, projects: [p] };
+        const exact = {
+          ...p,
+          title: "x".repeat(1 + FACTORY_MAX_SNAPSHOT_BYTES - encodedSnapshotBytes(baseline)),
+        };
+        yield* h.publish({
+          kind: "frame",
+          frame: { kind: "snapshot", target: remote, sequence: 1, projects: [exact], threads: [] },
+        });
+        const delivered = yield* Queue.take(queue);
+        expect(delivered.type).toBe("snapshot");
+        if (delivered.type !== "snapshot")
+          return yield* Effect.die("Expected complete live snapshot.");
+        expect(encodedSnapshotBytes(delivered.snapshot)).toBe(8 * 1024 * 1024);
+        expect(delivered.snapshot.projects).toEqual([exact]);
+        yield* h.publish({
+          kind: "frame",
+          frame: {
+            kind: "project.updated",
+            target: remote,
+            sequence: 2,
+            project: { ...exact, title: exact.title + "x" },
+          },
+        });
+        expect(yield* Effect.flip(Stream.runCollect(Stream.fromQueue(queue)))).toMatchObject({
+          code: "overview-too-large",
+        });
+        expect(yield* Effect.flip(h.overview.getSnapshot)).toMatchObject({
+          code: "overview-too-large",
+        });
+      }),
+  );
+
+  it.effect("rejects a live 10,001-thread source load without a truncated snapshot", () =>
+    Effect.gen(function* () {
+      const remote = target("live-count-boundary", "live-count-boundary-env");
+      const h = yield* makeHarness([sourceState(remote)]);
+      const queue = yield* Stream.toQueue(h.overview.subscribe, { capacity: 1 });
+      yield* Queue.take(queue);
+      yield* h.publish({
+        kind: "frame",
+        frame: {
+          kind: "snapshot",
+          target: remote,
+          sequence: 1,
+          projects: [],
+          threads: Array.from({ length: 10_001 }, (_, index) =>
+            thread(remote, `thread-${index}`, "project"),
+          ),
+        },
+      });
+      expect(yield* Effect.flip(Stream.runCollect(Stream.fromQueue(queue)))).toMatchObject({
+        code: "overview-too-large",
+      });
+      expect(yield* Effect.flip(h.overview.getSnapshot)).toMatchObject({
+        code: "overview-too-large",
+      });
+    }),
+  );
+
   it.effect("returns standalone projects and source freshness in a full snapshot", () =>
     Effect.gen(function* () {
       const remote = target("registration", "environment");
@@ -282,7 +632,7 @@ describe("Factory overview", () => {
           upserts: [{ registrationId: remote.registrationId, credentialStorage: "protected-file" }],
         },
       });
-      expect(snapshot.groups).toContainEqual(group);
+      expect(snapshot.groups).toContainEqual({ ...group, revision: 1 });
       expect(snapshot.favorites).toEqual([
         { target: { kind: "group", groupId: group.id }, order: 0 },
       ]);
@@ -573,6 +923,37 @@ describe("Factory overview", () => {
     }),
   );
 
+  it.effect("bounds pending complete snapshots without dropping a slow consumer's data", () =>
+    Effect.gen(function* () {
+      const remote = target("snapshot-slot", "snapshot-slot-env");
+      const h = yield* makeHarness([sourceState(remote)]);
+      const subscribed = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const consumer = yield* Stream.runForEach(h.overview.subscribe, () =>
+        Deferred.succeed(subscribed, undefined).pipe(Effect.andThen(Deferred.await(release))),
+      ).pipe(Effect.forkScoped);
+      yield* Deferred.await(subscribed);
+      for (let sequence = 1; sequence <= 2; sequence++) {
+        yield* h.publish({
+          kind: "frame",
+          frame: {
+            kind: "snapshot",
+            target: remote,
+            sequence,
+            threads: [],
+            projects: [project(remote, "large", String(sequence).repeat(1024 * 1024))],
+          },
+        });
+      }
+      yield* h.finish;
+      yield* Deferred.succeed(release, undefined);
+      expect(yield* Effect.flip(Fiber.join(consumer))).toMatchObject({
+        code: "overview-stream-overflow",
+      });
+      expect((yield* h.overview.getSnapshot).projects[0]?.title).toBe("2".repeat(1024 * 1024));
+    }),
+  );
+
   it.effect("fails a byte-overloaded subscriber without partial success", () =>
     Effect.gen(function* () {
       const remote = target("byte-queue-overflow", "byte-queue-overflow-env");
@@ -580,16 +961,13 @@ describe("Factory overview", () => {
       const queue = yield* Stream.toQueue(harness.overview.subscribe, { capacity: 1 });
       const initial = yield* Queue.take(queue);
       expect(initial.type).toBe("snapshot");
-      const largeProject = project(remote, "large", "x".repeat(1024 * 1024 + 1));
-      yield* harness.publish({
-        kind: "frame",
-        frame: {
-          kind: "project.updated",
-          target: remote,
-          sequence: 1,
-          project: largeProject,
-        },
-      });
+      const largeProject = project(remote, "large", "x".repeat(600_000));
+      for (let sequence = 1; sequence <= 4; sequence++) {
+        yield* harness.publish({
+          kind: "frame",
+          frame: { kind: "project.updated", target: remote, sequence, project: largeProject },
+        });
+      }
       yield* harness.finish;
 
       const error = yield* Effect.flip(Stream.runCollect(Stream.fromQueue(queue)));

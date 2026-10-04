@@ -79,6 +79,8 @@ interface SourceProjection {
 interface Subscriber {
   readonly queue: Array<{ readonly event: FactoryOverviewEvent; readonly bytes: number }>;
   queuedBytes: number;
+  // One complete snapshot has its own 8-MiB budget; delta backlog stays at 1 MiB.
+  snapshotPending: boolean;
   waiting: Deferred.Deferred<void> | undefined;
   failure: FactoryError | undefined;
 }
@@ -259,6 +261,7 @@ const make = Effect.gen(function* () {
     subscriber.failure = error;
     subscriber.queue.length = 0;
     subscriber.queuedBytes = 0;
+    subscriber.snapshotPending = false;
     return wake(subscriber);
   };
 
@@ -269,7 +272,21 @@ const make = Effect.gen(function* () {
 
   const publishPatches = (patches: ReadonlyArray<FactoryOverviewPatch>) =>
     Effect.gen(function* () {
-      const finalRevision = revision + (subscribers.size === 0 ? 0 : patches.length);
+      if (subscribers.size === 0 || patches.length === 0) return;
+      // Preflight the whole transaction, not chunks that can overflow in one producer burst.
+      const patchEvents = patches.map((patch, index) => {
+        const event: FactoryOverviewEvent = {
+          type: "patch",
+          generation,
+          revision: revision + index + 1,
+          patch,
+        };
+        return { event, bytes: encodedJsonBytes(event) };
+      });
+      const completeSnapshot =
+        patches.length > MAX_SUBSCRIBER_QUEUE_ITEMS ||
+        patchEvents.reduce((total, { bytes }) => total + bytes, 0) > MAX_SUBSCRIBER_QUEUE_BYTES;
+      const finalRevision = revision + (completeSnapshot ? 1 : patches.length);
       const limits = checkOverviewLimits({
         threadCount: threads.values.size,
         encodedBytes: snapshotBytes(finalRevision),
@@ -278,20 +295,17 @@ const make = Effect.gen(function* () {
         yield* failSubscribers(tooLargeError());
         return;
       }
-      if (subscribers.size === 0 || patches.length === 0) return;
-      for (const patch of patches) {
-        const event: FactoryOverviewEvent = {
-          type: "patch",
-          generation,
-          revision: ++revision,
-          patch,
-        };
-        const bytes = encodedJsonBytes(event);
+      revision = finalRevision;
+      const events = completeSnapshot
+        ? [{ event: { type: "snapshot" as const, snapshot: yield* snapshotLocked }, bytes: 0 }]
+        : patchEvents;
+      for (const { event, bytes } of events) {
         for (const subscriber of subscribers.values()) {
           if (subscriber.failure !== undefined) continue;
           if (
             subscriber.queue.length >= MAX_SUBSCRIBER_QUEUE_ITEMS ||
-            bytes > MAX_SUBSCRIBER_QUEUE_BYTES - subscriber.queuedBytes
+            bytes > MAX_SUBSCRIBER_QUEUE_BYTES - subscriber.queuedBytes ||
+            (event.type === "snapshot" && subscriber.snapshotPending)
           ) {
             yield* failSubscriber(subscriber, streamOverflowError());
             continue;
@@ -299,6 +313,7 @@ const make = Effect.gen(function* () {
           const wasEmpty = subscriber.queue.length === 0;
           subscriber.queue.push({ event, bytes });
           subscriber.queuedBytes += bytes;
+          if (event.type === "snapshot") subscriber.snapshotPending = true;
           if (wasEmpty) yield* wake(subscriber);
         }
       }
@@ -540,27 +555,35 @@ const make = Effect.gen(function* () {
             patches.push({ kind: "projects", upserts: [...upserts.values()], removals: [] });
           }
         } else {
-          const removed = removeSourceRows(source);
-          for (const value of frame.projects) addProject(source, value);
-          for (const value of frame.threads) addThread(source, value);
-          if (frame.projects.length > 0 || removed.projects.length > 0) {
-            const current = uniqueValues(frame.projects, (value) => projectIdentity(value.key));
+          const projectDiff = replaceSourceRows({
+            projection: projects,
+            keys: source.projectKeys,
+            source,
+            values: frame.projects,
+            identity: (value) => projectIdentity(value.key),
+          });
+          const threadDiff = replaceSourceRows({
+            projection: threads,
+            keys: source.threadKeys,
+            source,
+            values: frame.threads,
+            identity: (value) => threadIdentity(value.key),
+          });
+          if (projectDiff.upserts.length > 0 || projectDiff.removals.length > 0) {
             patches.push({
               kind: "projects",
-              upserts: current,
-              removals: removed.projects
-                .filter((old) => !projects.values.has(projectIdentity(old.key)))
-                .map((value) => ({ key: value.key, target: value.target })),
+              upserts: projectDiff.upserts,
+              removals: projectDiff.removals.map((value) => ({
+                key: value.key,
+                target: value.target,
+              })),
             });
           }
-          if (frame.threads.length > 0 || removed.threads.length > 0) {
-            const current = uniqueValues(frame.threads, (value) => threadIdentity(value.key));
+          if (threadDiff.upserts.length > 0 || threadDiff.removals.length > 0) {
             patches.push({
               kind: "threads",
-              upserts: current,
-              removals: removed.threads
-                .filter((old) => !threads.values.has(threadIdentity(old.key)))
-                .map((value) => value.key),
+              upserts: threadDiff.upserts,
+              removals: threadDiff.removals.map((value) => value.key),
             });
           }
         }
@@ -622,26 +645,34 @@ const make = Effect.gen(function* () {
     return patches;
   };
 
-  const removeSourceRows = (source: SourceProjection) => {
-    const removedProjects: Array<typeof FactoryProjectSummary.Type> = [];
-    const removedThreads: Array<typeof FactoryThreadSummary.Type> = [];
-    for (const key of source.projectKeys) {
-      const current = projects.values.get(key);
-      if (current !== undefined && ownedBy(current.target, source)) {
-        const removed = removeProjected(projects, key);
-        if (removed !== undefined) removedProjects.push(removed);
+  const replaceSourceRows = <Value extends { readonly target: FactoryRemoteTarget }>(input: {
+    readonly projection: Projection<Value>;
+    readonly keys: Set<string>;
+    readonly source: SourceProjection;
+    readonly values: ReadonlyArray<Value>;
+    readonly identity: (value: Value) => string;
+  }) => {
+    const next = new Map(input.values.map((value) => [input.identity(value), value]));
+    const removals: Value[] = [];
+    const upserts: Value[] = [];
+    for (const key of input.keys) {
+      if (next.has(key)) continue;
+      const current = input.projection.values.get(key);
+      if (current !== undefined && ownedBy(current.target, input.source)) {
+        removeProjected(input.projection, key);
+        removals.push(current);
+      }
+      input.keys.delete(key);
+    }
+    for (const [key, value] of next) {
+      input.keys.add(key);
+      const current = input.projection.values.get(key);
+      if (current === undefined || !sameJson(current, value)) {
+        setProjected(input.projection, key, value);
+        upserts.push(value);
       }
     }
-    for (const key of source.threadKeys) {
-      const current = threads.values.get(key);
-      if (current !== undefined && ownedBy(current.target, source)) {
-        const removed = removeProjected(threads, key);
-        if (removed !== undefined) removedThreads.push(removed);
-      }
-    }
-    source.projectKeys.clear();
-    source.threadKeys.clear();
-    return { projects: removedProjects, threads: removedThreads };
+    return { upserts, removals };
   };
 
   const uniqueValues = <Value extends object>(
@@ -770,6 +801,7 @@ const make = Effect.gen(function* () {
             const next = subscriber.queue.shift();
             if (next !== undefined) {
               subscriber.queuedBytes -= next.bytes;
+              if (next.event.type === "snapshot") subscriber.snapshotPending = false;
               return { kind: "event" as const, event: next.event };
             }
             const waiting = yield* Deferred.make<void>();
@@ -800,6 +832,7 @@ const make = Effect.gen(function* () {
         const subscriber: Subscriber = {
           queue: [],
           queuedBytes: 0,
+          snapshotPending: false,
           waiting: undefined,
           failure: undefined,
         };

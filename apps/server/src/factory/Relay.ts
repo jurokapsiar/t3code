@@ -19,7 +19,6 @@ import * as RelayPolicy from "./RelayPolicy.ts";
 export const RELAY_MAX_REQUEST_BYTES = 1024 * 1024;
 export const RELAY_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 export const RELAY_MAX_ITEMS = 128;
-export const RELAY_MAX_TRACKED_IDS = 10_000;
 const configId = "-1";
 // The native envelope has binary codec holes. JSON fills those holes with JSON
 // values; retain its actual envelope fields rather than inventing another RPC.
@@ -35,10 +34,7 @@ const Controls = Schema.Union([
 ]);
 const Chunk = Schema.Struct({
   ...RpcMessage.EncodedSchema.members[5].fields,
-  values: Schema.Array(Schema.Unknown).check(
-    Schema.isMinLength(1),
-    Schema.isMaxLength(RELAY_MAX_ITEMS),
-  ),
+  values: Schema.Array(Schema.Unknown).check(Schema.isMinLength(1)),
 });
 const JsonExit = Schema.toEncoded(
   Schema.toCodecJson(Schema.Exit(Schema.Unknown, Schema.Unknown, Schema.Unknown)),
@@ -207,12 +203,10 @@ const make = Effect.gen(function* () {
             .pipe(Effect.catchTag("SocketError", () => Effect.void)),
         );
         const ready = yield* Deferred.make<void>();
-        // Retain exited IDs for native Ack/Interrupt races as well as duplicate detection.
-        const requests = new Map<
-          string | number,
-          { ack: boolean; interrupted: boolean; exited: boolean }
-        >();
-        let activeCount = 0;
+        const requests = new Map<string | number, { ack: boolean; interrupted: boolean }>();
+        // Native Ack/Interrupt can race Exit. Retain only a bounded recent grace window,
+        // never completed requests in the active/concurrency accounting.
+        const completed = new Map<string | number, { ack: boolean; interrupted: boolean }>();
         let eof = false;
         yield* sourceWriter.write(
           encodeJson({
@@ -259,11 +253,15 @@ const make = Effect.gen(function* () {
                     continue;
                   }
                   const tracked = requests.get(frame.requestId);
-                  if (tracked === undefined || tracked.exited)
+                  if (tracked === undefined)
                     return yield* new RelayRejected({ reason: "unknown-id" });
                   if (frame._tag === "Exit") {
-                    tracked.exited = true;
-                    activeCount--;
+                    requests.delete(frame.requestId);
+                    if (completed.size >= RELAY_MAX_ITEMS) {
+                      const oldest = completed.keys().next();
+                      if (!oldest.done) completed.delete(oldest.value);
+                    }
+                    completed.set(frame.requestId, tracked);
                   } else {
                     if (tracked.ack) return yield* new RelayRejected({ reason: "invalid-ack" });
                     tracked.ack = true;
@@ -297,9 +295,9 @@ const make = Effect.gen(function* () {
                   return yield* new RelayRejected({ reason: classified.reason });
                 const frame = classified.frame;
                 if (frame._tag === "Request") {
-                  if (eof || requests.has(frame.id))
+                  if (eof || requests.has(frame.id) || completed.has(frame.id))
                     return yield* new RelayRejected({ reason: "duplicate-id" });
-                  if (requests.size >= RELAY_MAX_TRACKED_IDS || activeCount >= RELAY_MAX_ITEMS)
+                  if (requests.size >= RELAY_MAX_ITEMS)
                     return yield* new RelayRejected({ reason: "tracking-limit" });
                   const decodePayload = decodePayloads.get(frame.tag);
                   if (decodePayload === undefined)
@@ -316,13 +314,12 @@ const make = Effect.gen(function* () {
                   if (current.connectionId !== access.connectionId)
                     return yield* new RelayRejected({ reason: "target-mismatch" });
                   yield* current.checkCurrent;
-                  requests.set(frame.id, { ack: false, interrupted: false, exited: false });
-                  activeCount++;
+                  requests.set(frame.id, { ack: false, interrupted: false });
                 } else {
                   yield* access.checkCurrent;
                   if (frame._tag === "Eof") eof = true;
                   else if (frame._tag !== "Ping") {
-                    const tracked = requests.get(frame.requestId);
+                    const tracked = requests.get(frame.requestId) ?? completed.get(frame.requestId);
                     if (tracked === undefined)
                       return yield* new RelayRejected({ reason: "unknown-id" });
                     if (frame._tag === "Ack") {

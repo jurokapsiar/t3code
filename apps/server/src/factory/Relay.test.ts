@@ -5,12 +5,21 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Console from "effect/Console";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as RpcClient from "effect/unstable/rpc/RpcClient";
+import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization";
+import * as Socket from "effect/unstable/socket/Socket";
 import * as TestClock from "effect/testing/TestClock";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { EnvironmentId, FactoryRegistrationId, ServerConfigStreamEvent } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  FactoryRegistrationId,
+  ServerConfigStreamEvent,
+  WsRpcGroup,
+} from "@t3tools/contracts";
 import * as Config from "../config.ts";
 import * as Connections from "./Connections.ts";
 import * as SourceShell from "./SourceShell.ts";
@@ -78,7 +87,7 @@ const decodeJson = Schema.decodeSync(
   Schema.fromJsonString(
     Schema.Struct({
       _tag: Schema.String,
-      id: Schema.optional(Schema.String),
+      id: Schema.optional(Schema.Union([Schema.String, Schema.Number])),
       requestId: Schema.optional(Schema.Union([Schema.String, Schema.Number])),
       tag: Schema.optional(Schema.String),
       payload: Schema.optional(Schema.Unknown),
@@ -231,6 +240,93 @@ const testLayer = Config.layerTest(process.cwd(), { prefix: "t3-relay-" }).pipe(
   Layer.provideMerge(NodeServices.layer),
 );
 it.layer(testLayer)("scoped relay", (it) => {
+  it.effect(
+    "passes more than 128 Chunk values to the native RPC client with original IDs and results",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* harness();
+        const socket = Socket.make({
+          reader: Effect.succeed({
+            pull: Queue.take(h.browser.outgoing).pipe(Effect.map((frame) => [frame] as const)),
+            upgrade: () => Effect.void,
+          }),
+          writer: Effect.succeed({
+            write: (frame) =>
+              Socket.isCloseEvent(frame)
+                ? h.browser.close
+                : Queue.offer(
+                    h.browser.incoming,
+                    typeof frame === "string" ? frame : new TextDecoder().decode(frame),
+                  ).pipe(Effect.asVoid),
+            writeAll: (frames) =>
+              Effect.forEach(
+                frames,
+                (frame) =>
+                  Queue.offer(
+                    h.browser.incoming,
+                    typeof frame === "string" ? frame : new TextDecoder().decode(frame),
+                  ),
+                { discard: true },
+              ),
+          }),
+        });
+        const protocol = yield* RpcClient.makeProtocolSocket({ retryTransientErrors: false }).pipe(
+          Effect.provideService(Socket.Socket, socket),
+          Effect.provide(RpcSerialization.layerJson),
+        );
+        const client = yield* RpcClient.make(WsRpcGroup).pipe(
+          Effect.provideService(RpcClient.Protocol, protocol),
+        );
+        const collected = yield* Stream.runCollect(client.subscribeTerminalEvents({})).pipe(
+          Effect.forkScoped,
+        );
+        const original = decodeJson(
+          yield* Effect.raceFirst(
+            Queue.take(h.upstream.outgoing),
+            Fiber.join(h.fiber).pipe(
+              Effect.andThen(Effect.die("Relay ended before native request.")),
+            ),
+          ),
+        );
+        expect(original.tag).toBe("subscribeTerminalEvents");
+        const values = Array.from({ length: 257 }, (_, index) => ({
+          type: "output" as const,
+          threadId: "native-replay-thread",
+          terminalId: "native-replay-terminal",
+          sequence: index,
+          data: `native replay ${index}\n`,
+        }));
+        const chunk = encodeJson({ _tag: "Chunk", requestId: original.id, values });
+        yield* Console.log(
+          `Task4 native chunk: ${values.length} values, ${new TextEncoder().encode(chunk).byteLength} bytes, original ID ${original.id}`,
+        ).pipe(
+          Effect.provideService(Console.Console, Context.get(Context.empty(), Console.Console)),
+        );
+        yield* Queue.offer(h.upstream.incoming, chunk);
+        const ack = yield* Effect.raceFirst(
+          Queue.take(h.upstream.outgoing),
+          Fiber.join(h.fiber).pipe(Effect.andThen(Effect.die("Relay rejected native Chunk."))),
+        );
+        expect(decodeJson(ack)).toEqual({ _tag: "Ack", requestId: original.id });
+        yield* Queue.offer(
+          h.upstream.incoming,
+          encodeJson({
+            _tag: "Exit",
+            requestId: original.id,
+            exit: { _tag: "Success", value: null },
+          }),
+        );
+        expect(
+          yield* Effect.raceFirst(
+            Fiber.join(collected),
+            Fiber.join(h.fiber).pipe(
+              Effect.andThen(Effect.die("Relay ended before native results.")),
+            ),
+          ),
+        ).toEqual(values);
+        expect(h.opens).toBe(1);
+      }),
+  );
   it.effect("preserves request IDs, command payload bytes and source result bytes", () =>
     Effect.gen(function* () {
       const h = yield* harness();
@@ -537,7 +633,7 @@ it.layer(testLayer)("scoped relay", (it) => {
       expect(Exit.isFailure(yield* Fiber.await(h.fiber))).toBe(true);
     }),
   );
-  it.effect("bounds source response bytes and chunk item counts", () =>
+  it.effect("bounds source response bytes and rejects empty native Chunks", () =>
     Effect.gen(function* () {
       const h = yield* harness();
       yield* Queue.offer(h.browser.incoming, request(1));
@@ -566,10 +662,42 @@ it.layer(testLayer)("scoped relay", (it) => {
         encodeJson({
           _tag: "Chunk",
           requestId: 1,
-          values: Array.from({ length: 129 }, () => ({})),
+          values: [],
         }),
       );
       expect(Exit.isFailure(yield* Fiber.await(other.fiber))).toBe(true);
+    }),
+  );
+  it.effect.each(["Chunk", "Exit"] as const)(
+    "rejects unsolicited source %s IDs without fabricating results",
+    (tag) =>
+      Effect.gen(function* () {
+        const h = yield* harness();
+        const frame =
+          tag === "Chunk"
+            ? { _tag: tag, requestId: 999, values: [{}] }
+            : { _tag: tag, requestId: 999, exit: { _tag: "Success", value: null } };
+        yield* Queue.offer(h.upstream.incoming, encodeJson(frame));
+        expect(yield* Effect.flip(Fiber.join(h.fiber))).toMatchObject({ reason: "unknown-id" });
+        expect(yield* Queue.size(h.browser.outgoing)).toBe(0);
+        expect(h.opens).toBe(1);
+      }),
+  );
+  it.effect("rejects a second source Exit for a retired request", () =>
+    Effect.gen(function* () {
+      const h = yield* harness();
+      yield* Queue.offer(h.browser.incoming, request(1));
+      yield* Queue.take(h.upstream.outgoing);
+      const reply = encodeJson({
+        _tag: "Exit",
+        requestId: 1,
+        exit: { _tag: "Success", value: null },
+      });
+      yield* Queue.offer(h.upstream.incoming, reply);
+      expect(yield* Queue.take(h.browser.outgoing)).toBe(reply);
+      yield* Queue.offer(h.upstream.incoming, reply);
+      expect(yield* Effect.flip(Fiber.join(h.fiber))).toMatchObject({ reason: "unknown-id" });
+      expect(yield* Queue.size(h.browser.outgoing)).toBe(0);
     }),
   );
   it.effect("forwards source authentication failures unchanged", () =>
@@ -643,13 +771,20 @@ it.layer(testLayer)("scoped relay", (it) => {
       yield* h.upstream.closed;
     }),
   );
-  it.effect("retains completed IDs and caps lifetime tracking at exactly 10,000", () =>
+  it.effect("retires completed request tracking after more than 10,000 sequential requests", () =>
     Effect.gen(function* () {
       const h = yield* harness();
-      for (let id = 0; id < 10_000; id++) {
+      for (let id = 0; id < 10_005; id++) {
         const raw = request(id);
         yield* Queue.offer(h.browser.incoming, raw);
-        expect(yield* Queue.take(h.upstream.outgoing)).toBe(raw);
+        expect(
+          yield* Effect.raceFirst(
+            Queue.take(h.upstream.outgoing),
+            Fiber.join(h.fiber).pipe(
+              Effect.andThen(Effect.die(`Relay ended at completed request ${id}.`)),
+            ),
+          ),
+        ).toBe(raw);
         const reply = encodeJson({
           _tag: "Exit",
           requestId: id,
@@ -658,7 +793,25 @@ it.layer(testLayer)("scoped relay", (it) => {
         yield* Queue.offer(h.upstream.incoming, reply);
         expect(yield* Queue.take(h.browser.outgoing)).toBe(reply);
       }
-      yield* Queue.offer(h.browser.incoming, request(10_000));
+      yield* Console.log(
+        "Task4 relay: 10005 sequential requests completed with exact original IDs/results",
+      ).pipe(Effect.provideService(Console.Console, Context.get(Context.empty(), Console.Console)));
+      yield* Queue.offer(h.browser.incoming, request("still-active", "subscribeTerminalEvents"));
+      expect(yield* Queue.take(h.upstream.outgoing)).toBe(
+        request("still-active", "subscribeTerminalEvents"),
+      );
+      const cancel = encodeJson({ _tag: "Interrupt", requestId: "still-active" });
+      yield* Queue.offer(h.browser.incoming, cancel);
+      expect(yield* Queue.take(h.upstream.outgoing)).toBe(cancel);
+      const cancelled = encodeJson({
+        _tag: "Exit",
+        requestId: "still-active",
+        exit: encodeNativeExit(Exit.interrupt(42)),
+      });
+      yield* Queue.offer(h.upstream.incoming, cancelled);
+      expect(yield* Queue.take(h.browser.outgoing)).toBe(cancelled);
+      expect(h.opens).toBe(1);
+      yield* Queue.offer(h.browser.incoming, '{"_tag":"Interrupt","requestId":0}');
       expect(Exit.isFailure(yield* Fiber.await(h.fiber))).toBe(true);
       expect(yield* Queue.size(h.upstream.outgoing)).toBe(0);
       const duplicate = yield* harness();
