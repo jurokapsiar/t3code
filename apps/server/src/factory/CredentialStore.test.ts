@@ -25,8 +25,15 @@ const StoredCredentialTestSchema = Schema.Struct({
   expiresAt: Schema.DateTimeUtcFromString,
   scopes: AuthEnvironmentScopes,
   renewalSupported: Schema.optionalKey(Schema.Boolean),
-  predecessorCleanupId: Schema.optionalKey(AuthSessionId),
-  predecessorCleanupPending: Schema.optionalKey(Schema.Boolean),
+  pendingReleases: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        token: Schema.String,
+        sourceSessionId: AuthSessionId,
+        predecessorCleanupId: Schema.optionalKey(AuthSessionId),
+      }),
+    ),
+  ),
 });
 const decodeStoredCredentialJson = Schema.decodeUnknownEffect(
   Schema.fromJsonString(StoredCredentialTestSchema),
@@ -42,8 +49,13 @@ const makeCredential = Effect.gen(function* () {
     expiresAt: DateTime.add(issuedAt, { days: 1 }),
     scopes: ["orchestration:read"],
     renewalSupported: true,
-    predecessorCleanupId: AuthSessionId.make("predecessor-for-store-tests"),
-    predecessorCleanupPending: true,
+    pendingReleases: [
+      {
+        token: "prior-renewal-proof-for-store-tests",
+        sourceSessionId: AuthSessionId.make("prior-source-session-for-store-tests"),
+        predecessorCleanupId: AuthSessionId.make("prior-parent-session-for-store-tests"),
+      },
+    ],
   } satisfies CredentialStore.StoredCredential;
 });
 
@@ -303,6 +315,33 @@ it.layer(
         assert.deepEqual(Option.getOrThrow(yield* store.get("existing-protection")), original);
         assert.notInclude(encodeJson(failure), "private-replacement");
       }),
+  );
+
+  it.effect("normalizes a legacy cleanup ID into a protected release proof", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const services = yield* makeStore({ ...config, factoryCredentialStore: "protected-file" });
+      const store = Context.get(services, CredentialStore.CredentialStore);
+      const credential = yield* makeCredential;
+      const predecessorCleanupId = AuthSessionId.make("legacy-predecessor-session");
+
+      yield* store.set("legacy-cleanup", {
+        ...credential,
+        pendingReleases: [],
+        predecessorCleanupId,
+        predecessorCleanupPending: true,
+      });
+      const restored = Option.getOrThrow(yield* store.get("legacy-cleanup"));
+
+      assert.deepEqual(restored.pendingReleases, [
+        {
+          token: credential.token,
+          sourceSessionId: credential.sourceSessionId,
+          predecessorCleanupId,
+        },
+      ]);
+      assert.isUndefined(restored.predecessorCleanupId);
+    }),
   );
 
   it.effect("treats a missing item as absent and removes it idempotently", () =>

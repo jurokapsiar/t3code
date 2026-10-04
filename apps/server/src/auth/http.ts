@@ -436,6 +436,28 @@ export const authHttpApiLayer = HttpApiBuilder.group(
         ),
       )
       .handle(
+        "renewRelease",
+        Effect.fn("environment.auth.renewRelease")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          const session = yield* EnvironmentAuthenticatedPrincipal;
+          if (
+            session.method !== "bearer-access-token" ||
+            !args.headers.authorization?.startsWith("Bearer ")
+          ) {
+            return yield* failEnvironmentAuthInvalid("invalid_credential");
+          }
+          const released = yield* sessions
+            .releaseRenewal(session.sessionId)
+            .pipe(
+              Effect.catchTag("SessionRevocationError", (error) =>
+                failEnvironmentInternal("session_renewal_release_failed", error),
+              ),
+            );
+          yield* appendCredentialResponseHeaders;
+          return { released };
+        }),
+      )
+      .handle(
         "webSocketTicket",
         Effect.fn("environment.auth.webSocketTicket")(
           function* (args) {

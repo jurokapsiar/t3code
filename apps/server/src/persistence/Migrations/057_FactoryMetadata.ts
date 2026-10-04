@@ -20,6 +20,9 @@ export default Effect.gen(function* () {
       ),
       credential_item_key TEXT,
       credential_expires_at TEXT,
+      renewal TEXT NOT NULL DEFAULT 'unsupported' CHECK (
+        renewal IN ('ready', 'unsupported', 'due', 'failed', 'expired')
+      ),
       last_seen_at TEXT,
       revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
       CHECK ((credential_storage IS NULL) = (credential_item_key IS NULL))

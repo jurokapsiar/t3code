@@ -1,4 +1,5 @@
 import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -41,6 +42,8 @@ export const AuthSessionRecord = Schema.Struct({
   expiresAt: Schema.DateTimeUtcFromString,
   lastConnectedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
   revokedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
+  renewedFrom: Schema.NullOr(AuthSessionId),
+  rootIssuedAt: Schema.DateTimeUtcFromString,
 });
 export type AuthSessionRecord = typeof AuthSessionRecord.Type;
 
@@ -52,6 +55,8 @@ export const CreateAuthSessionInput = Schema.Struct({
   client: AuthSessionClientMetadataRecord,
   issuedAt: Schema.DateTimeUtcFromString,
   expiresAt: Schema.DateTimeUtcFromString,
+  renewedFrom: Schema.optionalKey(Schema.NullOr(AuthSessionId)),
+  rootIssuedAt: Schema.optionalKey(Schema.DateTimeUtcFromString),
 });
 export type CreateAuthSessionInput = typeof CreateAuthSessionInput.Type;
 
@@ -61,6 +66,13 @@ export const CreateReplacingActiveAuthSessionInput = Schema.Struct({
 });
 export type CreateReplacingActiveAuthSessionInput =
   typeof CreateReplacingActiveAuthSessionInput.Type;
+
+export const CreateRenewalAuthSessionInput = Schema.Struct({
+  session: CreateAuthSessionInput,
+  parentSessionId: AuthSessionId,
+  now: Schema.DateTimeUtcFromString,
+});
+export type CreateRenewalAuthSessionInput = typeof CreateRenewalAuthSessionInput.Type;
 
 export const GetAuthSessionByIdInput = Schema.Struct({
   sessionId: AuthSessionId,
@@ -107,6 +119,13 @@ export class AuthSessionRepository extends Context.Service<
     readonly createReplacingActive: (
       input: CreateReplacingActiveAuthSessionInput,
     ) => Effect.Effect<ReadonlyArray<AuthSessionId>, AuthSessionRepositoryError>;
+    readonly createRenewal: (
+      input: CreateRenewalAuthSessionInput,
+    ) => Effect.Effect<Option.Option<ReadonlyArray<AuthSessionId>>, AuthSessionRepositoryError>;
+    readonly releaseRenewal: (input: {
+      readonly replacementSessionId: AuthSessionId;
+      readonly now: DateTime.Utc;
+    }) => Effect.Effect<Option.Option<AuthSessionId>, AuthSessionRepositoryError>;
     readonly createIfAbsent: (
       input: CreateAuthSessionInput,
     ) => Effect.Effect<void, AuthSessionRepositoryError>;
@@ -146,6 +165,8 @@ const AuthSessionDbRow = Schema.Struct({
   expiresAt: Schema.DateTimeUtcFromString,
   lastConnectedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
   revokedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
+  renewedFrom: Schema.NullOr(AuthSessionId),
+  rootIssuedAt: Schema.DateTimeUtcFromString,
 });
 
 const AuthSessionRawDbRow = Schema.Struct({
@@ -163,6 +184,8 @@ const AuthSessionRawDbRow = Schema.Struct({
   expiresAt: Schema.Unknown,
   lastConnectedAt: Schema.Unknown,
   revokedAt: Schema.Unknown,
+  renewedFrom: Schema.Unknown,
+  rootIssuedAt: Schema.Unknown,
 });
 
 const decodeAuthSessionDbRow = Schema.decodeUnknownEffect(AuthSessionDbRow);
@@ -185,6 +208,8 @@ function toAuthSessionRecord(row: typeof AuthSessionDbRow.Type): AuthSessionReco
     expiresAt: row.expiresAt,
     lastConnectedAt: row.lastConnectedAt,
     revokedAt: row.revokedAt,
+    renewedFrom: row.renewedFrom,
+    rootIssuedAt: row.rootIssuedAt,
   };
 }
 
@@ -225,7 +250,9 @@ export const make = Effect.gen(function* () {
           client_browser,
           issued_at,
           expires_at,
-          revoked_at
+          revoked_at,
+          renewed_from,
+          root_issued_at
         )
         VALUES (
           ${input.sessionId},
@@ -240,7 +267,9 @@ export const make = Effect.gen(function* () {
           ${input.client.browser},
           ${input.issuedAt},
           ${input.expiresAt},
-          NULL
+          NULL,
+          ${input.renewedFrom ?? null},
+          ${input.rootIssuedAt ?? input.issuedAt}
         )
         ${ignoreExisting ? sql`ON CONFLICT(session_id) DO NOTHING` : sql``}
       `,
@@ -267,7 +296,9 @@ export const make = Effect.gen(function* () {
           issued_at AS "issuedAt",
           expires_at AS "expiresAt",
           last_connected_at AS "lastConnectedAt",
-          revoked_at AS "revokedAt"
+          revoked_at AS "revokedAt",
+          renewed_from AS "renewedFrom",
+          root_issued_at AS "rootIssuedAt"
         FROM auth_sessions
         WHERE session_id = ${sessionId}
       `,
@@ -286,6 +317,56 @@ export const make = Effect.gen(function* () {
           AND expires_at > ${revokedAt}
         RETURNING session_id AS "sessionId"
       `,
+  });
+
+  const renewalParent = SqlSchema.findOneOption({
+    Request: CreateRenewalAuthSessionInput,
+    Result: Schema.Struct({
+      subject: Schema.String,
+      method: ServerAuthSessionMethod,
+      expiresAt: Schema.String,
+      revokedAt: Schema.NullOr(Schema.String),
+      rootIssuedAt: Schema.String,
+    }),
+    execute: ({ parentSessionId }) => sql`
+      SELECT subject, method, expires_at AS "expiresAt", revoked_at AS "revokedAt",
+        root_issued_at AS "rootIssuedAt"
+      FROM auth_sessions
+      WHERE session_id = ${parentSessionId}
+    `,
+  });
+
+  const revokeUnreleasedRenewalRows = SqlSchema.findAll({
+    Request: CreateRenewalAuthSessionInput,
+    Result: Schema.Struct({ sessionId: AuthSessionId }),
+    execute: ({ parentSessionId, now }) => sql`
+      UPDATE auth_sessions
+      SET revoked_at = ${now}
+      WHERE renewed_from = ${parentSessionId}
+        AND revoked_at IS NULL
+      RETURNING session_id AS "sessionId"
+    `,
+  });
+
+  const releaseRenewalRows = SqlSchema.findAll({
+    Request: Schema.Struct({
+      replacementSessionId: AuthSessionId,
+      now: Schema.DateTimeUtcFromString,
+    }),
+    Result: Schema.Struct({ sessionId: AuthSessionId }),
+    execute: ({ replacementSessionId, now }) => sql`
+      UPDATE auth_sessions
+      SET revoked_at = ${now}
+      WHERE session_id = (
+        SELECT renewed_from FROM auth_sessions
+        WHERE session_id = ${replacementSessionId}
+          AND method = 'bearer-access-token'
+          AND revoked_at IS NULL
+          AND expires_at > ${now}
+      )
+        AND revoked_at IS NULL
+      RETURNING session_id AS "sessionId"
+    `,
   });
 
   const listActiveSessionRows = SqlSchema.findAll({
@@ -307,7 +388,9 @@ export const make = Effect.gen(function* () {
           issued_at AS "issuedAt",
           expires_at AS "expiresAt",
           last_connected_at AS "lastConnectedAt",
-          revoked_at AS "revokedAt"
+          revoked_at AS "revokedAt",
+          renewed_from AS "renewedFrom",
+          root_issued_at AS "rootIssuedAt"
         FROM auth_sessions
         WHERE revoked_at IS NULL
           AND (expires_at > ${now} OR ${sql.in("session_id", connectedSessionIds)})
@@ -396,6 +479,63 @@ export const make = Effect.gen(function* () {
             "AuthSessionRepository.createReplacingActive:query",
             "AuthSessionRepository.createReplacingActive:encodeRequest",
             { sessionId: input.session.sessionId },
+          ),
+        ),
+      );
+
+  const createRenewal: AuthSessionRepository["Service"]["createRenewal"] = (input) =>
+    sql
+      .withTransaction(
+        renewalParent(input).pipe(
+          Effect.flatMap((parentOption) =>
+            Option.match(parentOption, {
+              onNone: () => Effect.succeed(Option.none<ReadonlyArray<AuthSessionId>>()),
+              onSome: (parent) => {
+                const active =
+                  parent.subject === input.session.subject &&
+                  parent.method === "bearer-access-token" &&
+                  input.session.method === "bearer-access-token" &&
+                  parent.revokedAt === null &&
+                  Date.parse(parent.expiresAt) > input.now.epochMilliseconds &&
+                  Date.parse(parent.rootIssuedAt) === input.session.rootIssuedAt?.epochMilliseconds;
+                if (!active || input.session.renewedFrom !== input.parentSessionId) {
+                  return Effect.succeed(Option.none<ReadonlyArray<AuthSessionId>>());
+                }
+                return revokeUnreleasedRenewalRows(input).pipe(
+                  Effect.flatMap((revokedRows) =>
+                    createSessionRow(input.session).pipe(
+                      Effect.as(Option.some(revokedRows.map((row) => row.sessionId))),
+                    ),
+                  ),
+                );
+              },
+            }),
+          ),
+        ),
+      )
+      .pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "AuthSessionRepository.createRenewal:query",
+            "AuthSessionRepository.createRenewal:encodeRequest",
+            { sessionId: input.session.sessionId },
+          ),
+        ),
+      );
+
+  const releaseRenewal: AuthSessionRepository["Service"]["releaseRenewal"] = (input) =>
+    sql
+      .withTransaction(
+        releaseRenewalRows(input).pipe(
+          Effect.map((rows) => Option.fromNullishOr(rows[0]?.sessionId)),
+        ),
+      )
+      .pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "AuthSessionRepository.releaseRenewal:query",
+            "AuthSessionRepository.releaseRenewal:encodeRequest",
+            { sessionId: input.replacementSessionId },
           ),
         ),
       );
@@ -511,6 +651,8 @@ export const make = Effect.gen(function* () {
   return {
     create,
     createReplacingActive,
+    createRenewal,
+    releaseRenewal,
     createIfAbsent,
     getById,
     listActive,

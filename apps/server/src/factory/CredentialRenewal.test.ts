@@ -58,9 +58,9 @@ const makeHarness = (
     readonly issueFailureCount?: number;
     readonly issueLostResponseCount?: number;
     readonly storeFailure?: boolean;
-    readonly revokeFailure?: boolean;
-    readonly revokeFailureCount?: number;
-    readonly revokeLostResponseCount?: number;
+    readonly releaseFailure?: boolean;
+    readonly releaseFailureCount?: number;
+    readonly releaseLostResponseCount?: number;
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -87,16 +87,19 @@ const makeHarness = (
     let issueFailuresRemaining = options.issueFailure
       ? Number.POSITIVE_INFINITY
       : (options.issueFailureCount ?? 0);
-    let revokeFailuresRemaining = options.revokeFailure
+    let releaseFailuresRemaining = options.releaseFailure
       ? Number.POSITIVE_INFINITY
-      : (options.revokeFailureCount ?? 0);
+      : (options.releaseFailureCount ?? 0);
     let issueLostResponsesRemaining = options.issueLostResponseCount ?? 0;
-    let revokeLostResponsesRemaining = options.revokeLostResponseCount ?? 0;
+    let releaseLostResponsesRemaining = options.releaseLostResponseCount ?? 0;
+    let replacementIndex = 0;
     const credentials = new Map<string, CredentialStore.StoredCredential>();
-    const remoteSessions = new Map<string, { readonly token: string; revoked: boolean }>([
-      [oldSessionId, { token: oldToken, revoked: false }],
-    ]);
-    const revokeResults: Array<boolean | "response-lost"> = [];
+    const remoteSessions = new Map<
+      string,
+      { readonly token: string; readonly renewedFrom?: string; revoked: boolean }
+    >([[oldSessionId, { token: oldToken, revoked: false }]]);
+    const releaseResults: Array<boolean | "response-lost"> = [];
+    const releaseParents: Array<string | undefined> = [];
     const scopes = options.scopes ?? ["orchestration:read", "access:write"];
     const expiresAt = DateTime.makeUnsafe(30 * DAY_MS);
     const predecessor: CredentialStore.StoredCredential = {
@@ -130,7 +133,7 @@ const makeHarness = (
           platform: null,
         }),
       exchange: () => Effect.succeed(predecessor),
-      renew: () =>
+      renew: (input) =>
         Effect.gen(function* () {
           calls.push("issue");
           if (issueFailuresRemaining > 0) {
@@ -140,11 +143,24 @@ const makeHarness = (
           const now = yield* Clock.currentTimeMillis;
           const lostResponse = issueLostResponsesRemaining > 0;
           if (lostResponse) issueLostResponsesRemaining -= 1;
+          if (!lostResponse) replacementIndex += 1;
           const sessionId = AuthSessionId.make(
-            lostResponse ? "orphan-replacement-session" : "replacement-session",
+            lostResponse
+              ? "orphan-replacement-session"
+              : replacementIndex === 1
+                ? "replacement-session"
+                : `replacement-session-${replacementIndex}`,
           );
-          const token = lostResponse ? "orphan-replacement-token-test-value" : newToken;
-          remoteSessions.set(sessionId, { token, revoked: false });
+          const token = lostResponse
+            ? "orphan-replacement-token-test-value"
+            : replacementIndex === 1
+              ? newToken
+              : `private-replacement-token-${replacementIndex}-test-value`;
+          remoteSessions.set(sessionId, {
+            token,
+            renewedFrom: input.credential.sourceSessionId,
+            revoked: false,
+          });
           if (lostResponse) {
             return yield* new Enrollment.SourceCredentialExchangeError({ operation: "renew" });
           }
@@ -157,25 +173,35 @@ const makeHarness = (
             renewalSupported: true,
           } satisfies CredentialStore.StoredCredential;
         }),
-      revoke: (input) =>
+      release: (input) =>
         Effect.gen(function* () {
-          calls.push("revoke");
+          calls.push("release");
           const stored = credentials.get(reference);
-          expect(stored?.token).toBe(newToken);
-          expect(stored?.predecessorCleanupId).toBe(oldSessionId);
-          if (revokeFailuresRemaining > 0) {
-            revokeFailuresRemaining -= 1;
-            return yield* new Enrollment.SourceCredentialExchangeError({ operation: "revoke" });
+          expect(stored?.pendingReleases?.some((proof) => proof.token === input.credential)).toBe(
+            true,
+          );
+          const replacement = [...remoteSessions.values()].find(
+            (session) => session.token === input.credential,
+          );
+          const parentId = replacement?.renewedFrom;
+          releaseParents.push(parentId);
+          if (releaseFailuresRemaining > 0) {
+            releaseFailuresRemaining -= 1;
+            return yield* new Enrollment.SourceCredentialExchangeError({ operation: "release" });
           }
-          const predecessor = remoteSessions.get(input.sessionId)!;
-          const revoked = !predecessor.revoked;
-          if (revoked) predecessor.revoked = true;
-          revokeResults.push(revokeLostResponsesRemaining > 0 ? "response-lost" : revoked);
-          if (revokeLostResponsesRemaining > 0) {
-            revokeLostResponsesRemaining -= 1;
-            return yield* new Enrollment.SourceCredentialExchangeError({ operation: "revoke" });
+          const parent = parentId === undefined ? undefined : remoteSessions.get(parentId);
+          if (parent === undefined) {
+            return yield* new Enrollment.SourceCredentialExchangeError({ operation: "release" });
           }
-          return { revoked };
+          const released = !parent.revoked;
+          if (released) parent.revoked = true;
+          if (releaseLostResponsesRemaining > 0) {
+            releaseLostResponsesRemaining -= 1;
+            releaseResults.push("response-lost");
+            return yield* new Enrollment.SourceCredentialExchangeError({ operation: "release" });
+          }
+          releaseResults.push(released);
+          return { released };
         }),
     });
     const infrastructureLayer = Layer.mergeAll(
@@ -209,7 +235,6 @@ const makeHarness = (
       credentialStorage: null,
       credentialExpiresAt: null,
       renewal: "unsupported",
-      cleanupPending: false,
       lastSeenAt: null,
       revision: 0,
     });
@@ -249,7 +274,8 @@ const makeHarness = (
       metadata,
       credentials,
       remoteSessions,
-      revokeResults,
+      releaseResults,
+      releaseParents,
       calls,
       fileSystem,
       config: isolatedConfig,
@@ -269,9 +295,9 @@ it.layer(
       yield* harness.renewal.runOnce;
       const stored = harness.credentials.get(reference);
 
-      expect(harness.calls.slice(0, 3)).toEqual(["issue", "store", "revoke"]);
+      expect(harness.calls).toEqual(["issue", "store", "release", "store"]);
       expect(stored?.token).toBe(newToken);
-      expect(stored?.predecessorCleanupId).toBeUndefined();
+      expect(stored?.pendingReleases).toBeUndefined();
       expect((yield* harness.metadata.listEnvironments)[0]?.renewal).toBe("ready");
     }).pipe(Effect.provide(TestClock.layer()), Random.withSeed("renewal-order")),
   );
@@ -282,7 +308,7 @@ it.layer(
       const harness = yield* makeHarness();
       yield* harness.renewal.start;
 
-      expect(harness.calls.slice(0, 3)).toEqual(["issue", "store", "revoke"]);
+      expect(harness.calls).toEqual(["issue", "store", "release", "store"]);
       expect(harness.credentials.get(reference)?.token).toBe(newToken);
     }).pipe(Effect.provide(TestClock.layer()), Random.withSeed("renewal-startup")),
   );
@@ -305,35 +331,33 @@ it.layer(
     }).pipe(Effect.provide(TestClock.layer()), Random.withSeed("renewal-retry")),
   );
 
-  it.effect(
-    "keeps the replacement when remote revocation commits before its response is lost",
-    () =>
-      Effect.gen(function* () {
-        yield* TestClock.setTime(18 * DAY_MS);
-        const harness = yield* makeHarness({ revokeLostResponseCount: 1 });
-        yield* harness.renewal.runOnce;
-        expect(harness.credentials.get(reference)?.token).toBe(newToken);
-        expect(harness.credentials.get(reference)?.predecessorCleanupId).toBe(oldSessionId);
-        expect(harness.remoteSessions.get(oldSessionId)?.revoked).toBe(true);
-        expect(harness.revokeResults).toEqual(["response-lost"]);
-        expect((yield* harness.metadata.listEnvironments)[0]).toMatchObject({
-          renewal: "ready",
-          cleanupPending: true,
-        });
+  it.effect("keeps the replacement when remote release commits before its response is lost", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(18 * DAY_MS);
+      const harness = yield* makeHarness({ releaseLostResponseCount: 1 });
+      yield* harness.renewal.runOnce;
+      expect(harness.credentials.get(reference)?.token).toBe(newToken);
+      expect(
+        harness.credentials.get(reference)?.pendingReleases?.map((proof) => proof.sourceSessionId),
+      ).toEqual([AuthSessionId.make("replacement-session")]);
+      expect(harness.remoteSessions.get(oldSessionId)?.revoked).toBe(true);
+      expect(harness.releaseResults).toEqual(["response-lost"]);
+      expect((yield* harness.metadata.listEnvironments)[0]).toMatchObject({
+        renewal: "ready",
+      });
 
-        yield* TestClock.adjust("30 seconds");
-        yield* harness.renewal.runOnce;
+      yield* TestClock.adjust("30 seconds");
+      yield* harness.renewal.runOnce;
 
-        expect(harness.credentials.get(reference)?.token).toBe(newToken);
-        expect(harness.credentials.get(reference)?.predecessorCleanupId).toBeUndefined();
-        expect(harness.calls.filter((call) => call === "issue")).toHaveLength(1);
-        expect(harness.calls.filter((call) => call === "revoke")).toHaveLength(2);
-        expect(harness.revokeResults).toEqual(["response-lost", false]);
-        expect((yield* harness.metadata.listEnvironments)[0]).toMatchObject({
-          renewal: "ready",
-          cleanupPending: false,
-        });
-      }).pipe(Effect.provide(TestClock.layer()), Random.withSeed("renewal-lost-revoke")),
+      expect(harness.credentials.get(reference)?.token).toBe(newToken);
+      expect(harness.credentials.get(reference)?.pendingReleases).toBeUndefined();
+      expect(harness.calls.filter((call) => call === "issue")).toHaveLength(1);
+      expect(harness.calls.filter((call) => call === "release")).toHaveLength(2);
+      expect(harness.releaseResults).toEqual(["response-lost", false]);
+      expect((yield* harness.metadata.listEnvironments)[0]).toMatchObject({
+        renewal: "ready",
+      });
+    }).pipe(Effect.provide(TestClock.layer()), Random.withSeed("renewal-lost-revoke")),
   );
 
   it.effect("keeps the predecessor when a remotely issued replacement response is lost", () =>
@@ -398,95 +422,127 @@ it.layer(
   it.effect("retains a stored replacement and reports cleanup failure", () =>
     Effect.gen(function* () {
       yield* TestClock.setTime(18 * DAY_MS);
-      const harness = yield* makeHarness({ revokeFailure: true });
+      const harness = yield* makeHarness({ releaseFailure: true });
       yield* harness.renewal.runOnce;
       const stored = harness.credentials.get(reference);
 
       expect(stored?.token).toBe(newToken);
-      expect(stored?.predecessorCleanupId).toBe(oldSessionId);
+      expect(stored?.pendingReleases?.map((proof) => proof.sourceSessionId)).toEqual([
+        AuthSessionId.make("replacement-session"),
+      ]);
       expect(harness.remoteSessions.get(oldSessionId)?.revoked).toBe(false);
-      expect(harness.revokeResults).toEqual([]);
+      expect(harness.releaseResults).toEqual([]);
       expect((yield* harness.metadata.listEnvironments)[0]).toMatchObject({
         renewal: "ready",
-        cleanupPending: true,
       });
     }).pipe(Effect.provide(TestClock.layer()), Random.withSeed("renewal-cleanup-failure")),
   );
 
-  it.effect("retries a pre-commit revoke failure while retaining the stored replacement", () =>
+  it.effect("retries a pre-commit release failure while retaining the stored replacement", () =>
     Effect.gen(function* () {
       yield* TestClock.setTime(18 * DAY_MS);
-      const harness = yield* makeHarness({ revokeFailureCount: 1 });
+      const harness = yield* makeHarness({ releaseFailureCount: 1 });
       yield* harness.renewal.runOnce;
 
       expect(harness.credentials.get(reference)?.token).toBe(newToken);
-      expect(harness.credentials.get(reference)?.predecessorCleanupId).toBe(oldSessionId);
+      expect(
+        harness.credentials.get(reference)?.pendingReleases?.map((proof) => proof.sourceSessionId),
+      ).toEqual([AuthSessionId.make("replacement-session")]);
       expect(harness.remoteSessions.get(oldSessionId)?.revoked).toBe(false);
-      expect(harness.revokeResults).toEqual([]);
+      expect(harness.releaseResults).toEqual([]);
       expect((yield* harness.metadata.listEnvironments)[0]).toMatchObject({
         renewal: "ready",
-        cleanupPending: true,
       });
 
       yield* TestClock.adjust("30 seconds");
       yield* harness.renewal.runOnce;
 
       expect(harness.credentials.get(reference)?.token).toBe(newToken);
-      expect(harness.credentials.get(reference)?.predecessorCleanupId).toBeUndefined();
+      expect(harness.credentials.get(reference)?.pendingReleases).toBeUndefined();
       expect(harness.remoteSessions.get(oldSessionId)?.revoked).toBe(true);
       expect(harness.calls.filter((call) => call === "issue")).toHaveLength(1);
-      expect(harness.calls.filter((call) => call === "revoke")).toHaveLength(2);
-      expect(harness.revokeResults).toEqual([true]);
+      expect(harness.calls.filter((call) => call === "release")).toHaveLength(2);
+      expect(harness.releaseResults).toEqual([true]);
       expect((yield* harness.metadata.listEnvironments)[0]).toMatchObject({
         renewal: "ready",
-        cleanupPending: false,
       });
     }).pipe(Effect.provide(TestClock.layer()), Random.withSeed("renewal-pre-commit-revoke")),
   );
 
-  it.effect("retries predecessor cleanup after service restart without falling back", () =>
+  it.effect("retries predecessor release after service restart without falling back", () =>
     Effect.gen(function* () {
       yield* TestClock.setTime(18 * DAY_MS);
-      const harness = yield* makeHarness({ revokeFailure: true });
+      const harness = yield* makeHarness({ releaseFailure: true });
       yield* harness.renewal.runOnce;
       const restarted = yield* harness.buildRenewal();
       yield* restarted.runOnce;
 
       expect(harness.credentials.get(reference)?.token).toBe(newToken);
       expect(harness.calls.filter((call) => call === "issue")).toHaveLength(1);
-      expect(harness.calls.filter((call) => call === "revoke")).toHaveLength(2);
+      expect(harness.calls.filter((call) => call === "release")).toHaveLength(2);
       expect((yield* harness.metadata.listEnvironments)[0]).toMatchObject({
         renewal: "ready",
-        cleanupPending: true,
       });
     }).pipe(Effect.provide(TestClock.layer()), Random.withSeed("renewal-restart")),
   );
 
-  it.effect("does not attempt cleanup when the replacement lacks access-write", () =>
+  it.effect("keeps ancestor cleanup proofs across another successful renewal and restart", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(18 * DAY_MS);
+      const harness = yield* makeHarness({ releaseFailureCount: 3 });
+      yield* harness.renewal.runOnce;
+      expect(harness.credentials.get(reference)?.pendingReleases).toHaveLength(1);
+      expect(harness.remoteSessions.get(oldSessionId)?.revoked).toBe(false);
+
+      yield* TestClock.setTime(36 * DAY_MS);
+      yield* harness.renewal.runOnce;
+      const renewed = harness.credentials.get(reference);
+      expect(renewed?.token).toBe("private-replacement-token-2-test-value");
+      expect(renewed?.pendingReleases?.map((proof) => proof.sourceSessionId)).toEqual([
+        AuthSessionId.make("replacement-session"),
+        AuthSessionId.make("replacement-session-2"),
+      ]);
+      expect(renewed?.pendingReleases).toMatchObject([
+        {
+          sourceSessionId: AuthSessionId.make("replacement-session"),
+          predecessorCleanupId: oldSessionId,
+        },
+        {
+          sourceSessionId: AuthSessionId.make("replacement-session-2"),
+          predecessorCleanupId: AuthSessionId.make("replacement-session"),
+        },
+      ]);
+      expect(harness.calls.filter((call) => call === "issue")).toHaveLength(2);
+      expect(harness.remoteSessions.get(oldSessionId)?.revoked).toBe(false);
+      expect(harness.remoteSessions.get("replacement-session")?.revoked).toBe(false);
+
+      const restarted = yield* harness.buildRenewal();
+      yield* restarted.runOnce;
+      expect(harness.credentials.get(reference)?.pendingReleases).toHaveLength(2);
+      expect(harness.calls.filter((call) => call === "issue")).toHaveLength(2);
+
+      yield* TestClock.adjust("30 seconds");
+      yield* restarted.runOnce;
+      expect(harness.credentials.get(reference)?.pendingReleases).toBeUndefined();
+      expect(harness.releaseParents.slice(-2)).toEqual([oldSessionId, "replacement-session"]);
+      expect(harness.remoteSessions.get(oldSessionId)?.revoked).toBe(true);
+      expect(harness.remoteSessions.get("replacement-session")?.revoked).toBe(true);
+      expect(harness.credentials.get(reference)?.token).toBe(
+        "private-replacement-token-2-test-value",
+      );
+    }).pipe(Effect.provide(TestClock.layer()), Random.withSeed("renewal-pending-chain")),
+  );
+
+  it.effect("releases a standard-scope predecessor after storing its replacement", () =>
     Effect.gen(function* () {
       yield* TestClock.setTime(18 * DAY_MS);
       const harness = yield* makeHarness({ scopes: ["orchestration:read"] });
       yield* harness.renewal.runOnce;
-      const stored = harness.credentials.get(reference);
 
-      expect(stored?.token).toBe(newToken);
-      expect(stored?.predecessorCleanupId).toBeUndefined();
-      expect(harness.calls).toEqual(["issue", "store"]);
-      expect((yield* harness.metadata.listEnvironments)[0]).toMatchObject({
-        renewal: "ready",
-        cleanupPending: true,
-      });
-
-      yield* TestClock.setTime(33 * DAY_MS);
-      yield* harness.renewal.runOnce;
-
-      expect(harness.calls).toEqual(["issue", "store", "issue", "store"]);
+      expect(harness.calls).toEqual(["issue", "store", "release", "store"]);
       expect(harness.credentials.get(reference)?.token).toBe(newToken);
-      expect((yield* harness.metadata.listEnvironments)[0]).toMatchObject({
-        renewal: "ready",
-        cleanupPending: true,
-      });
-    }).pipe(Effect.provide(TestClock.layer()), Random.withSeed("renewal-no-access-write")),
+      expect(harness.remoteSessions.get(oldSessionId)?.revoked).toBe(true);
+    }).pipe(Effect.provide(TestClock.layer()), Random.withSeed("renewal-standard-scopes")),
   );
 
   it.effect("reports unsupported sources and expired credentials without attempting renewal", () =>

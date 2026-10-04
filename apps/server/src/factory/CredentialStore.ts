@@ -14,6 +14,12 @@ import { HostProcessPlatform, HostProcessUserId } from "@t3tools/shared/hostProc
 
 import * as ServerConfig from "../config.ts";
 
+const PendingCredentialRelease = Schema.Struct({
+  token: Schema.String,
+  sourceSessionId: AuthSessionId,
+  predecessorCleanupId: Schema.optionalKey(AuthSessionId),
+});
+
 const StoredCredentialSchema = Schema.Struct({
   token: Schema.String,
   sourceSessionId: AuthSessionId,
@@ -21,6 +27,7 @@ const StoredCredentialSchema = Schema.Struct({
   expiresAt: Schema.DateTimeUtc,
   scopes: AuthEnvironmentScopes,
   renewalSupported: Schema.optionalKey(Schema.Boolean),
+  pendingReleases: Schema.optionalKey(Schema.Array(PendingCredentialRelease)),
   predecessorCleanupId: Schema.optionalKey(AuthSessionId),
   predecessorCleanupPending: Schema.optionalKey(Schema.Boolean),
 });
@@ -87,6 +94,34 @@ const StoredCredentialJsonSchema = Schema.Struct({
 const jsonCredential = Schema.fromJsonString(StoredCredentialJsonSchema);
 const encodeCredential = Schema.encodeSync(jsonCredential);
 const decodeCredential = Schema.decodeSync(jsonCredential);
+
+const normalizeCredential = (credential: StoredCredential): StoredCredential => {
+  const pendingReleases = [...(credential.pendingReleases ?? [])];
+  if (
+    (credential.predecessorCleanupPending === true ||
+      credential.predecessorCleanupId !== undefined) &&
+    !pendingReleases.some((pending) => pending.sourceSessionId === credential.sourceSessionId)
+  ) {
+    pendingReleases.push({
+      token: credential.token,
+      sourceSessionId: credential.sourceSessionId,
+      ...(credential.predecessorCleanupId === undefined
+        ? {}
+        : { predecessorCleanupId: credential.predecessorCleanupId }),
+    });
+  }
+  return {
+    token: credential.token,
+    sourceSessionId: credential.sourceSessionId,
+    issuedAt: credential.issuedAt,
+    expiresAt: credential.expiresAt,
+    scopes: credential.scopes,
+    ...(credential.renewalSupported === undefined
+      ? {}
+      : { renewalSupported: credential.renewalSupported }),
+    ...(pendingReleases.length === 0 ? {} : { pendingReleases }),
+  };
+};
 
 /** Native keyring code is loaded only when the selected store performs an operation. */
 export const keyringLayer = Layer.succeed(
@@ -206,7 +241,7 @@ const make = Effect.gen(function* () {
           onNone: () => Effect.succeedNone,
           onSome: (value) =>
             Effect.try({
-              try: () => decodeCredential(value),
+              try: () => normalizeCredential(decodeCredential(value)),
               catch: () =>
                 new CredentialStoreError({ operation: "decode", backend: selectedBackend }),
             }).pipe(Effect.asSome),
@@ -217,7 +252,7 @@ const make = Effect.gen(function* () {
 
   const set: CredentialStore["Service"]["set"] = (reference, credential) =>
     Effect.try({
-      try: () => encodeCredential(credential),
+      try: () => encodeCredential(normalizeCredential(credential)),
       catch: () => new CredentialStoreError({ operation: "encode", backend: selectedBackend }),
     }).pipe(
       Effect.flatMap((encoded) =>

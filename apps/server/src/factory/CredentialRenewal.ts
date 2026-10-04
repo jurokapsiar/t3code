@@ -1,9 +1,4 @@
-import {
-  AuthAccessWriteScope,
-  FactoryError,
-  FactoryRegistrationId,
-  type FactoryRenewalState,
-} from "@t3tools/contracts";
+import { FactoryError, FactoryRegistrationId, type FactoryRenewalState } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -63,7 +58,8 @@ const make = Effect.gen(function* () {
   const mutations = yield* CredentialMutations.CredentialMutations;
   const source = yield* Enrollment.SourceCredentialExchange;
   const schedules = yield* Ref.make(new Map<FactoryRegistrationId, ScheduleEntry>());
-  const retries = yield* Ref.make(new Map<FactoryRegistrationId, RetryEntry>());
+  const renewalRetries = yield* Ref.make(new Map<FactoryRegistrationId, RetryEntry>());
+  const cleanupRetries = yield* Ref.make(new Map<FactoryRegistrationId, RetryEntry>());
   const started = yield* Ref.make(false);
   const renewed = yield* PubSub.unbounded<FactoryRegistrationId>();
   const selectedStorage = config.factoryCredentialStore ?? "secure-vault";
@@ -72,11 +68,7 @@ const make = Effect.gen(function* () {
     registrationId: FactoryRegistrationId,
     status: FactoryRenewalState,
     expiresAt?: DateTime.DateTime,
-    cleanupPending?: boolean,
-  ) =>
-    metadata
-      .setRenewalStatus(registrationId, status, expiresAt, cleanupPending)
-      .pipe(Effect.asVoid);
+  ) => metadata.setRenewalStatus(registrationId, status, expiresAt).pipe(Effect.asVoid);
 
   const clearSchedule = (registrationId: FactoryRegistrationId) =>
     Ref.update(schedules, (current) => {
@@ -85,31 +77,32 @@ const make = Effect.gen(function* () {
       return next;
     });
 
-  const clearRetry = (registrationId: FactoryRegistrationId) =>
-    Ref.update(retries, (current) => {
-      const next = new Map(current);
-      next.delete(registrationId);
-      return next;
-    });
-
-  const retryAt = (registrationId: FactoryRegistrationId) =>
-    Ref.get(retries).pipe(Effect.map((current) => current.get(registrationId)?.retryAtMs ?? 0));
+  const retryAt = (
+    retries: Ref.Ref<Map<FactoryRegistrationId, RetryEntry>>,
+    registrationId: FactoryRegistrationId,
+  ) => Ref.get(retries).pipe(Effect.map((current) => current.get(registrationId)?.retryAtMs ?? 0));
 
   const recordRetry = (
+    retries: Ref.Ref<Map<FactoryRegistrationId, RetryEntry>>,
     registrationId: FactoryRegistrationId,
     nowMs: number,
-    expiresAt: DateTime.DateTime,
-    cleanupPending = false,
-    status: FactoryRenewalState = "failed",
   ) =>
     Ref.update(retries, (current) => {
       const previous = current.get(registrationId);
       const attempt = (previous?.attempt ?? 0) + 1;
       const delay = Math.min(retryMaximumMs, retryBaseMs * 2 ** Math.min(attempt - 1, 10));
+      return new Map(current).set(registrationId, { attempt, retryAtMs: nowMs + delay });
+    });
+
+  const clearRetry = (
+    retries: Ref.Ref<Map<FactoryRegistrationId, RetryEntry>>,
+    registrationId: FactoryRegistrationId,
+  ) =>
+    Ref.update(retries, (current) => {
       const next = new Map(current);
-      next.set(registrationId, { attempt, retryAtMs: nowMs + delay });
+      next.delete(registrationId);
       return next;
-    }).pipe(Effect.andThen(updateStatus(registrationId, status, expiresAt, cleanupPending)));
+    });
 
   const getSchedule = (input: {
     readonly registrationId: FactoryRegistrationId;
@@ -138,19 +131,18 @@ const make = Effect.gen(function* () {
       return schedule;
     });
 
-  const withoutCleanup = (credential: CredentialStore.StoredCredential) =>
-    ({
-      token: credential.token,
-      sourceSessionId: credential.sourceSessionId,
-      issuedAt: credential.issuedAt,
-      expiresAt: credential.expiresAt,
-      scopes: credential.scopes,
-      ...(credential.renewalSupported === undefined
-        ? {}
-        : { renewalSupported: credential.renewalSupported }),
-    }) satisfies CredentialStore.StoredCredential;
+  const storeCredential = (itemKey: string, credential: CredentialStore.StoredCredential) =>
+    credentials.set(itemKey, credential).pipe(
+      Effect.uninterruptible,
+      Effect.as(true),
+      Effect.catchTag("CredentialStoreError", (error) =>
+        Effect.logWarning("Factory credential storage failed; retaining the previous credential.", {
+          operation: error.operation,
+        }).pipe(Effect.as(false)),
+      ),
+    );
 
-  const cleanupPredecessor = (input: {
+  const retryPendingReleases = (input: {
     readonly registrationId: FactoryRegistrationId;
     readonly endpoint: string;
     readonly itemKey: string;
@@ -158,57 +150,57 @@ const make = Effect.gen(function* () {
     readonly nowMs: number;
   }) =>
     Effect.gen(function* () {
-      const predecessorId = input.credential.predecessorCleanupId;
-      if (predecessorId === undefined) {
-        yield* updateStatus(input.registrationId, "ready", input.credential.expiresAt, true);
-        return;
+      let credential = input.credential;
+      let pending = [...(credential.pendingReleases ?? [])];
+      if (
+        pending.length === 0 ||
+        (yield* retryAt(cleanupRetries, input.registrationId)) > input.nowMs
+      ) {
+        return credential;
       }
-      if (!input.credential.scopes.includes(AuthAccessWriteScope)) {
-        yield* updateStatus(input.registrationId, "ready", input.credential.expiresAt, true);
-        return;
+
+      while (pending.length > 0) {
+        const proof = pending[0]!;
+        const released = yield* source
+          .release({ endpoint: input.endpoint, credential: proof.token })
+          .pipe(
+            Effect.as(true),
+            Effect.catchTag("SourceCredentialExchangeError", (error) =>
+              Effect.logWarning(
+                "Factory predecessor release failed; preserving its protected retry proof.",
+                {
+                  registrationId: input.registrationId,
+                  operation: error.operation,
+                },
+              ).pipe(Effect.as(false)),
+            ),
+          );
+        if (!released) {
+          yield* recordRetry(cleanupRetries, input.registrationId, input.nowMs);
+          return credential;
+        }
+
+        pending = pending.slice(1);
+        const updated: CredentialStore.StoredCredential = {
+          token: credential.token,
+          sourceSessionId: credential.sourceSessionId,
+          issuedAt: credential.issuedAt,
+          expiresAt: credential.expiresAt,
+          scopes: credential.scopes,
+          ...(credential.renewalSupported === undefined
+            ? {}
+            : { renewalSupported: credential.renewalSupported }),
+          ...(pending.length === 0 ? {} : { pendingReleases: pending }),
+        };
+        const saved = yield* storeCredential(input.itemKey, updated);
+        if (!saved) {
+          yield* recordRetry(cleanupRetries, input.registrationId, input.nowMs);
+          return credential;
+        }
+        credential = updated;
       }
-      if ((yield* retryAt(input.registrationId)) > input.nowMs) {
-        yield* updateStatus(input.registrationId, "ready", input.credential.expiresAt, true);
-        return;
-      }
-      const revoked = yield* source
-        .revoke({
-          endpoint: input.endpoint,
-          credential: input.credential.token,
-          sessionId: predecessorId,
-        })
-        .pipe(
-          Effect.as(true),
-          Effect.catchTag("SourceCredentialExchangeError", () => Effect.succeed(false)),
-        );
-      if (!revoked) {
-        yield* recordRetry(
-          input.registrationId,
-          input.nowMs,
-          input.credential.expiresAt,
-          true,
-          "ready",
-        );
-        return;
-      }
-      const cleanCredential = withoutCleanup(input.credential);
-      const saved = yield* credentials.set(input.itemKey, cleanCredential).pipe(
-        Effect.uninterruptible,
-        Effect.as(true),
-        Effect.catchTag("CredentialStoreError", () => Effect.succeed(false)),
-      );
-      if (!saved) {
-        yield* recordRetry(
-          input.registrationId,
-          input.nowMs,
-          input.credential.expiresAt,
-          true,
-          "ready",
-        );
-        return;
-      }
-      yield* clearRetry(input.registrationId);
-      yield* updateStatus(input.registrationId, "ready", input.credential.expiresAt, false);
+      yield* clearRetry(cleanupRetries, input.registrationId);
+      return credential;
     });
 
   const renewCredential = (input: {
@@ -217,16 +209,10 @@ const make = Effect.gen(function* () {
     readonly itemKey: string;
     readonly credential: CredentialStore.StoredCredential;
     readonly nowMs: number;
-    readonly cleanupPending: boolean;
   }) =>
     Effect.gen(function* () {
-      if ((yield* retryAt(input.registrationId)) > input.nowMs) {
-        yield* updateStatus(
-          input.registrationId,
-          "failed",
-          input.credential.expiresAt,
-          input.cleanupPending,
-        );
+      if ((yield* retryAt(renewalRetries, input.registrationId)) > input.nowMs) {
+        yield* updateStatus(input.registrationId, "failed", input.credential.expiresAt);
         return;
       }
       const replacement = yield* source
@@ -236,12 +222,8 @@ const make = Effect.gen(function* () {
           Effect.catchTag("SourceCredentialExchangeError", () => Effect.succeedNone),
         );
       if (Option.isNone(replacement)) {
-        yield* recordRetry(
-          input.registrationId,
-          input.nowMs,
-          input.credential.expiresAt,
-          input.cleanupPending,
-        );
+        yield* recordRetry(renewalRetries, input.registrationId, input.nowMs);
+        yield* updateStatus(input.registrationId, "failed", input.credential.expiresAt);
         return;
       }
       const nextCredential = replacement.value;
@@ -249,49 +231,38 @@ const make = Effect.gen(function* () {
         nextCredential.scopes.length === 0 ||
         nextCredential.scopes.some((scope) => !input.credential.scopes.includes(scope))
       ) {
-        yield* recordRetry(
-          input.registrationId,
-          input.nowMs,
-          input.credential.expiresAt,
-          input.cleanupPending,
-        );
+        yield* recordRetry(renewalRetries, input.registrationId, input.nowMs);
+        yield* updateStatus(input.registrationId, "failed", input.credential.expiresAt);
         return;
       }
-      const cleanupPermitted =
-        input.credential.scopes.includes(AuthAccessWriteScope) &&
-        nextCredential.scopes.includes(AuthAccessWriteScope);
+      const pendingReleases = [
+        ...(input.credential.pendingReleases ?? []),
+        {
+          token: nextCredential.token,
+          sourceSessionId: nextCredential.sourceSessionId,
+          predecessorCleanupId: input.credential.sourceSessionId,
+        },
+      ];
       const storedReplacement: CredentialStore.StoredCredential = {
-        ...nextCredential,
+        token: nextCredential.token,
+        sourceSessionId: nextCredential.sourceSessionId,
+        issuedAt: nextCredential.issuedAt,
+        expiresAt: nextCredential.expiresAt,
+        scopes: nextCredential.scopes,
         renewalSupported: true,
-        predecessorCleanupPending: true,
-        ...(cleanupPermitted ? { predecessorCleanupId: input.credential.sourceSessionId } : {}),
+        pendingReleases,
       };
-      const saved = yield* credentials.set(input.itemKey, storedReplacement).pipe(
-        Effect.uninterruptible,
-        Effect.as(true),
-        Effect.catchTag("CredentialStoreError", () => Effect.succeed(false)),
-      );
+      const saved = yield* storeCredential(input.itemKey, storedReplacement);
       if (!saved) {
-        yield* recordRetry(
-          input.registrationId,
-          input.nowMs,
-          input.credential.expiresAt,
-          input.cleanupPending,
-        );
+        yield* recordRetry(renewalRetries, input.registrationId, input.nowMs);
+        yield* updateStatus(input.registrationId, "failed", input.credential.expiresAt);
         return;
       }
       yield* clearSchedule(input.registrationId);
-      yield* clearRetry(input.registrationId);
+      yield* clearRetry(renewalRetries, input.registrationId);
       yield* PubSub.publish(renewed, input.registrationId);
-      yield* updateStatus(input.registrationId, "ready", nextCredential.expiresAt, true);
-      if (!cleanupPermitted) return;
-      yield* cleanupPredecessor({
-        registrationId: input.registrationId,
-        endpoint: input.endpoint,
-        itemKey: input.itemKey,
-        credential: storedReplacement,
-        nowMs: input.nowMs,
-      });
+      yield* updateStatus(input.registrationId, "ready", nextCredential.expiresAt);
+      yield* retryPendingReleases({ ...input, credential: storedReplacement });
     });
 
   const processReference = (observed: Metadata.EnrollmentReference) =>
@@ -329,37 +300,24 @@ const make = Effect.gen(function* () {
           yield* updateStatus(environment.registrationId, "expired");
           return;
         }
-        const credential = stored.value.value;
+        let credential = stored.value.value;
         const expiresAtMs = DateTime.toEpochMillis(credential.expiresAt);
         if (expiresAtMs <= nowMs) {
           yield* clearSchedule(environment.registrationId);
-          yield* clearRetry(environment.registrationId);
+          yield* clearRetry(renewalRetries, environment.registrationId);
           yield* updateStatus(environment.registrationId, "expired", credential.expiresAt);
           return;
         }
-        const cleanupPending =
-          credential.predecessorCleanupPending === true ||
-          credential.predecessorCleanupId !== undefined;
-        const cleanupRetryPermitted =
-          credential.predecessorCleanupId !== undefined &&
-          credential.scopes.includes(AuthAccessWriteScope);
-        if (cleanupRetryPermitted) {
-          yield* cleanupPredecessor({
-            registrationId: environment.registrationId,
-            endpoint: environment.endpoint,
-            itemKey: credentialItemKey,
-            credential,
-            nowMs,
-          });
-          return;
-        }
+
+        credential = yield* retryPendingReleases({
+          registrationId: environment.registrationId,
+          endpoint: environment.endpoint,
+          itemKey: credentialItemKey,
+          credential,
+          nowMs,
+        });
         if (credential.renewalSupported !== true) {
-          yield* updateStatus(
-            environment.registrationId,
-            "unsupported",
-            credential.expiresAt,
-            cleanupPending,
-          );
+          yield* updateStatus(environment.registrationId, "unsupported", credential.expiresAt);
           return;
         }
         const schedule = yield* getSchedule({
@@ -368,27 +326,16 @@ const make = Effect.gen(function* () {
           expiresAtMs,
         });
         if (schedule.dueAtMs > nowMs) {
-          yield* updateStatus(
-            environment.registrationId,
-            "ready",
-            credential.expiresAt,
-            cleanupPending,
-          );
+          yield* updateStatus(environment.registrationId, "ready", credential.expiresAt);
           return;
         }
-        yield* updateStatus(
-          environment.registrationId,
-          "due",
-          credential.expiresAt,
-          cleanupPending,
-        );
+        yield* updateStatus(environment.registrationId, "due", credential.expiresAt);
         yield* renewCredential({
           registrationId: environment.registrationId,
           endpoint: environment.endpoint,
           itemKey: credentialItemKey,
           credential,
           nowMs,
-          cleanupPending,
         });
       }),
     );

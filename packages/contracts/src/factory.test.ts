@@ -119,7 +119,7 @@ describe("factory contracts", () => {
     expect("sourceCredential" in FactoryEnvironmentView.fields).toBe(false);
   });
 
-  it("reports cleanup pending without changing the replacement credential status", () => {
+  it("does not expose protected cleanup state in environment metadata", () => {
     const environment = decodeFactoryEnvironment({
       registrationId: "registration-a",
       environmentId: "source-a",
@@ -131,13 +131,12 @@ describe("factory contracts", () => {
       credentialStorage: "secure-vault",
       credentialExpiresAt: null,
       renewal: "ready",
-      cleanupPending: true,
       lastSeenAt: null,
       revision: 0,
     });
 
     expect(environment.renewal).toBe("ready");
-    expect(environment.cleanupPending).toBe(true);
+    expect("cleanupPending" in environment).toBe(false);
   });
 
   it("requires metadata patches to replace memberships and favorites together", () => {

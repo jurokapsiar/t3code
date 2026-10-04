@@ -1,12 +1,11 @@
 import {
   AuthAccessTokenResult,
-  AuthClientSessionRevokeResult,
   AuthAccessTokenType,
   AuthEnvironmentBootstrapTokenType,
   AuthSessionId,
   AuthSessionState,
   AuthSessionRenewalRequest,
-  AuthRevokeClientSessionInput,
+  AuthSessionRenewalReleaseResult,
   AuthStandardClientScopes,
   AuthTokenExchangeGrantType,
   ExecutionEnvironmentDescriptor,
@@ -58,7 +57,7 @@ const decodeAuthSessionClaimsJson = Schema.decodeUnknownEffect(
 export class SourceCredentialExchangeError extends Schema.TaggedError<SourceCredentialExchangeError>()(
   "SourceCredentialExchangeError",
   {
-    operation: Schema.Literals(["discover", "exchange", "validate", "renew", "revoke"]),
+    operation: Schema.Literals(["discover", "exchange", "validate", "renew", "release"]),
   },
 ) {
   override get message(): string {
@@ -81,11 +80,10 @@ export class SourceCredentialExchange extends Context.Service<
       readonly endpoint: string;
       readonly credential: CredentialStore.StoredCredential;
     }) => Effect.Effect<CredentialStore.StoredCredential, SourceCredentialExchangeError>;
-    readonly revoke: (input: {
+    readonly release: (input: {
       readonly endpoint: string;
       readonly credential: string;
-      readonly sessionId: AuthSessionId;
-    }) => Effect.Effect<AuthClientSessionRevokeResult, SourceCredentialExchangeError>;
+    }) => Effect.Effect<AuthSessionRenewalReleaseResult, SourceCredentialExchangeError>;
   }
 >()("t3/factory/Enrollment/SourceCredentialExchange") {}
 
@@ -308,26 +306,24 @@ const makeSourceCredentialExchange = Effect.gen(function* () {
       } satisfies CredentialStore.StoredCredential;
     });
 
-  const revoke: SourceCredentialExchange["Service"]["revoke"] = (input) =>
+  const release: SourceCredentialExchange["Service"]["release"] = (input) =>
     Effect.gen(function* () {
-      const url = yield* endpointUrl(input.endpoint, "/api/auth/clients/revoke", "revoke");
-      const request = yield* HttpClientRequest.post(url.toString()).pipe(
-        HttpClientRequest.setHeader("authorization", `Bearer ${input.credential}`),
-        HttpClientRequest.bodyJson(
-          AuthRevokeClientSessionInput.make({ sessionId: input.sessionId }),
+      const url = yield* endpointUrl(input.endpoint, "/api/auth/renew/release", "release");
+      const authorization = "Bearer " + input.credential;
+      const request = noStore(
+        HttpClientRequest.post(url.toString()).pipe(
+          HttpClientRequest.setHeader("authorization", authorization),
         ),
-        Effect.map(noStore),
-        Effect.mapError(() => new SourceCredentialExchangeError({ operation: "revoke" })),
       );
       return yield* fetchJson({
         client,
         request,
-        schema: AuthClientSessionRevokeResult,
-        operation: "revoke",
+        schema: AuthSessionRenewalReleaseResult,
+        operation: "release",
       });
     });
 
-  return SourceCredentialExchange.of({ discover, exchange, renew, revoke });
+  return SourceCredentialExchange.of({ discover, exchange, renew, release });
 });
 
 export const sourceLayer = Layer.effect(SourceCredentialExchange, makeSourceCredentialExchange);
@@ -434,9 +430,7 @@ const make = Effect.gen(function* () {
       const existing = current.find((entry) => entry.environmentId === discovered.environmentId);
       if (
         existing !== undefined &&
-        (existing.endpoint !== input.endpoint ||
-          existing.state === "removing" ||
-          existing.cleanupPending)
+        (existing.endpoint !== input.endpoint || existing.state === "removing")
       ) {
         return yield* new FactoryError({
           code: "conflict",
@@ -461,7 +455,6 @@ const make = Effect.gen(function* () {
           credentialStorage: null,
           credentialExpiresAt: null,
           renewal: "unsupported",
-          cleanupPending: false,
           lastSeenAt: null,
           revision: 0,
         });
@@ -477,11 +470,7 @@ const make = Effect.gen(function* () {
             });
           }
           const pending = latest.environment;
-          if (
-            pending.endpoint !== input.endpoint ||
-            pending.state === "removing" ||
-            pending.cleanupPending
-          ) {
+          if (pending.endpoint !== input.endpoint || pending.state === "removing") {
             return yield* new FactoryError({
               code: "conflict",
               message: "This source environment is already registered.",
@@ -521,11 +510,25 @@ const make = Effect.gen(function* () {
               credentialItemKey: reference,
             });
           }
-          const credential = yield* source.exchange({
+          const exchangedCredential = yield* source.exchange({
             endpoint: input.endpoint,
             credential: input.sourceCredential,
             environmentId: pending.environmentId,
           });
+          const previousReleases = Option.isSome(previousCredential)
+            ? (previousCredential.value.pendingReleases ?? [])
+            : [];
+          const credential: CredentialStore.StoredCredential = {
+            ...exchangedCredential,
+            ...(previousReleases.length === 0
+              ? {}
+              : {
+                  pendingReleases: [
+                    ...previousReleases,
+                    ...(exchangedCredential.pendingReleases ?? []),
+                  ],
+                }),
+          };
           return yield* Effect.uninterruptible(
             Effect.gen(function* () {
               yield* credentials.set(reference, credential);

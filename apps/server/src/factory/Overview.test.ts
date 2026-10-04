@@ -587,7 +587,6 @@ describe("Factory overview", () => {
         credentialStorage: null,
         credentialExpiresAt: null,
         renewal: "unsupported",
-        cleanupPending: false,
         lastSeenAt: null,
         revision: 0,
       });

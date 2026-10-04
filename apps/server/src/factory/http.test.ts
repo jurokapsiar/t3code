@@ -440,7 +440,6 @@ const relayHarness = Effect.fnUntraced(function* (
           state: "online",
           credentialStorage: "secure-vault",
           credentialExpiresAt: null,
-          cleanupPending: false,
           renewal: "unsupported",
           lastSeenAt: null,
           revision: 1,

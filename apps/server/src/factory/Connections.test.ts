@@ -125,7 +125,7 @@ const harness = Effect.gen(function* () {
             expiresAt: DateTime.add(now, { days: 30 }),
           })),
         ),
-      revoke: () => Effect.die("Read-only source sessions cannot revoke predecessors."),
+      release: () => Effect.succeed({ released: true }),
     }),
   ).pipe(
     Layer.provideMerge(
@@ -177,7 +177,6 @@ const harness = Effect.gen(function* () {
       state: "pending",
       credentialStorage: null,
       credentialExpiresAt: null,
-      cleanupPending: false,
       renewal: "unsupported",
       lastSeenAt: null,
       revision: 0,

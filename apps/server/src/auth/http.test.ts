@@ -218,6 +218,74 @@ it.effect("sets the selected browser session cookies through the HTTP route", ()
             requestContext,
           );
           expect(emptyScopesResponse.status).toBe(400);
+          const chainedRenewalResponse = await environmentA.handler(
+            postJson(
+              "/api/auth/renew",
+              { scopes: ["orchestration:read"] },
+              { authorization: "Bearer " + renewed.access_token },
+            ),
+            requestContext,
+          );
+          expect(chainedRenewalResponse.status).toBe(200);
+          const chained = (await chainedRenewalResponse.json()) as { access_token: string };
+          const cookieReleaseResponse = await environmentA.handler(
+            postJson("/api/auth/renew/release", {}, { cookie: devCookieHeader }),
+            requestContext,
+          );
+          expect(cookieReleaseResponse.status).toBe(401);
+          const dpopReleaseResponse = await environmentA.handler(
+            postJson(
+              "/api/auth/renew/release",
+              {},
+              { authorization: "DPoP " + chained.access_token },
+            ),
+            requestContext,
+          );
+          expect(dpopReleaseResponse.status).toBe(401);
+          const releaseResponse = await environmentA.handler(
+            postJson(
+              "/api/auth/renew/release",
+              {},
+              { authorization: "Bearer " + chained.access_token },
+            ),
+            requestContext,
+          );
+          expect(releaseResponse.status).toBe(200);
+          expect(await releaseResponse.json()).toEqual({ released: true });
+          const stillValidRoot = await environmentA.handler(
+            new Request("http://127.0.0.1/api/auth/session", {
+              headers: { authorization: "Bearer " + accessToken.access_token },
+            }),
+            requestContext,
+          );
+          expect(stillValidRoot.status).toBe(200);
+          expect(await stillValidRoot.json()).toMatchObject({ authenticated: true });
+          const revokedDirectParent = await environmentA.handler(
+            new Request("http://127.0.0.1/api/auth/session", {
+              headers: { authorization: "Bearer " + renewed.access_token },
+            }),
+            requestContext,
+          );
+          expect(revokedDirectParent.status).toBe(200);
+          expect(await revokedDirectParent.json()).toMatchObject({ authenticated: false });
+          const activeReplacement = await environmentA.handler(
+            new Request("http://127.0.0.1/api/auth/session", {
+              headers: { authorization: "Bearer " + chained.access_token },
+            }),
+            requestContext,
+          );
+          expect(activeReplacement.status).toBe(200);
+          expect(await activeReplacement.json()).toMatchObject({ authenticated: true });
+          const repeatedRelease = await environmentA.handler(
+            postJson(
+              "/api/auth/renew/release",
+              {},
+              { authorization: "Bearer " + chained.access_token },
+            ),
+            requestContext,
+          );
+          expect(repeatedRelease.status).toBe(200);
+          expect(await repeatedRelease.json()).toEqual({ released: false });
         }),
       ([environmentA, environmentB]) =>
         Effect.promise(() => Promise.all([environmentA.dispose(), environmentB.dispose()])),

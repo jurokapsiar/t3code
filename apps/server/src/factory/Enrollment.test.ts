@@ -25,7 +25,6 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   AuthAccessTokenType,
   AuthEnvironmentBootstrapTokenType,
-  AuthRevokeClientSessionInput,
   AuthSessionRenewalRequest,
   AuthSessionId,
   AuthStandardClientScopes,
@@ -47,7 +46,6 @@ afterEach(() => vi.unstubAllGlobals());
 
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decodeRenewalRequest = Schema.decodeEffect(Schema.fromJsonString(AuthSessionRenewalRequest));
-const decodeRevokeInput = Schema.decodeEffect(Schema.fromJsonString(AuthRevokeClientSessionInput));
 
 const sourceCredential = "fixed-source-bootstrap-credential-for-tests";
 const storedCredential = "fixed-source-access-token-for-tests";
@@ -197,11 +195,12 @@ const makeEnrollmentHarness = (options: {
             return {
               ...credential,
               token: credential.token + ":renewed",
+              sourceSessionId: AuthSessionId.make("renewed-source-session"),
               issuedAt: yield* DateTime.now,
             };
           }),
-        revoke: () =>
-          Effect.fail(new Enrollment.SourceCredentialExchangeError({ operation: "revoke" })),
+        release: () =>
+          Effect.fail(new Enrollment.SourceCredentialExchangeError({ operation: "release" })),
       }),
     );
     const lifecycleLayer = Layer.succeed(
@@ -464,7 +463,7 @@ const makeRenewalHttpLayer = (
     readonly headers: Readonly<Record<string, string | undefined>>;
     readonly body: string | undefined;
   }>,
-  revokeStatus = 200,
+  releaseStatus = 200,
   renewalResponse: {
     readonly issuedScope?: string;
     readonly sessionScopes?: ReadonlyArray<string>;
@@ -510,7 +509,7 @@ const makeRenewalHttpLayer = (
       }
       return HttpClientResponse.fromWeb(
         request,
-        Response.json({ revoked: true }, { status: revokeStatus }),
+        Response.json({ released: true }, { status: releaseStatus }),
       );
     }),
   );
@@ -540,23 +539,22 @@ it.effect("renews through the existing source endpoint and narrows scopes", () =
       endpoint: "https://source.example",
       credential: oldCredential,
     });
-    const revoked = yield* source.revoke({
+    const released = yield* source.release({
       endpoint: "https://source.example",
       credential: renewed.token,
-      sessionId: oldCredential.sourceSessionId,
     });
 
     assert.equal(renewed.token, replacementToken);
     assert.equal(renewed.sourceSessionId, AuthSessionId.make("replacement-session"));
     assert.deepEqual(renewed.scopes, ["orchestration:read"]);
     assert.isTrue(renewed.renewalSupported);
-    assert.isTrue(revoked.revoked);
+    assert.isTrue(released.released);
     assert.deepEqual(
       requests.map(({ method, url }) => [method, url]),
       [
         ["POST", "https://source.example/api/auth/renew"],
         ["GET", "https://source.example/api/auth/session"],
-        ["POST", "https://source.example/api/auth/clients/revoke"],
+        ["POST", "https://source.example/api/auth/renew/release"],
       ],
     );
     assert.equal(requests[0]?.headers.authorization, `Bearer ${oldCredential.token}`);
@@ -565,9 +563,7 @@ it.effect("renews through the existing source endpoint and narrows scopes", () =
       scopes: ["orchestration:read", "access:write"],
     });
     assert.equal(requests[2]?.headers.authorization, `Bearer ${replacementToken}`);
-    assert.deepEqual(yield* decodeRevokeInput(requests[2]?.body ?? "{}"), {
-      sessionId: oldCredential.sourceSessionId,
-    });
+    assert.isUndefined(requests[2]?.body);
   }),
 );
 
@@ -599,21 +595,20 @@ it.effect("rejects a renewal whose validated session duplicates scopes", () =>
   }),
 );
 
-it.effect("keeps a forbidden revoke response credential-free", () =>
+it.effect("keeps a forbidden release response credential-free", () =>
   Effect.gen(function* () {
     const requests: Parameters<typeof makeRenewalHttpLayer>[0] = [];
     const { layer } = makeRenewalHttpLayer(requests, 403);
     const services = yield* Layer.build(layer);
     const source = Context.get(services, Enrollment.SourceCredentialExchange);
     const failure = yield* source
-      .revoke({
+      .release({
         endpoint: "https://source.example",
         credential: "replacement-secret-for-denial-test",
-        sessionId: AuthSessionId.make("previous-session"),
       })
       .pipe(Effect.flip);
 
-    assert.equal(failure.operation, "revoke");
+    assert.equal(failure.operation, "release");
     assert.notInclude(String(failure), "replacement-secret-for-denial-test");
     assert.notInclude(encodeJson(failure), "replacement-secret-for-denial-test");
   }),
@@ -698,8 +693,13 @@ it.layer(
       yield* read.attempted;
       yield* gate.release;
       yield* Fiber.join(renewal);
-      assert.isTrue(Exit.isFailure(yield* Fiber.join(enrollment)));
-      assert.equal([...h.credentials.values()][0]?.token, storedCredential + ":renewed");
+      assert.isTrue(Exit.isSuccess(yield* Fiber.join(enrollment)));
+      const currentCredential = [...h.credentials.values()][0];
+      assert.equal(currentCredential?.token, storedCredential + ":private-post-renewal-bootstrap");
+      assert.deepEqual(
+        currentCredential?.pendingReleases?.map((proof) => proof.token),
+        [storedCredential + ":renewed"],
+      );
       assert.equal(h.credentials.size, 1);
       yield* h.assertCredentialFree(yield* h.metadata.getSnapshot);
     }),

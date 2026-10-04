@@ -2,9 +2,12 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { AuthSessionId } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as TestClock from "effect/testing/TestClock";
+import * as Stream from "effect/Stream";
 
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
@@ -21,6 +24,8 @@ const currentSession: SessionStore.VerifiedSession = {
   expiresAt: DateTime.makeUnsafe(1_800_000_000_000),
   subject: "factory-source",
   scopes: ["orchestration:read"],
+  renewedFrom: null,
+  rootIssuedAt: DateTime.toUtc(DateTime.makeUnsafe(1_800_000_000_000)),
 };
 
 const principal = {
@@ -48,7 +53,7 @@ it.effect("does not call the issuer when the requested scopes widen the bearer",
         verifyCalls += 1;
         return Effect.succeed(currentSession);
       },
-      issue: () => {
+      issueRenewal: () => {
         issueCalls += 1;
         return Effect.die("Invalid scopes reached session issuance.");
       },
@@ -86,7 +91,7 @@ it.effect("does not verify or issue a bearer with no scopes", () =>
         verifyCalls += 1;
         return Effect.succeed(currentSession);
       },
-      issue: () => {
+      issueRenewal: () => {
         issueCalls += 1;
         return Effect.die("Empty scopes reached session issuance.");
       },
@@ -108,10 +113,10 @@ it.effect("does not verify or issue a bearer with no scopes", () =>
 
 it.effect("issues an unchanged-scope normal bearer session and leaves its predecessor valid", () =>
   Effect.gen(function* () {
-    const issueInputs: Parameters<SessionRenewal.Issuer["issue"]>[0][] = [];
+    const issueInputs: Parameters<SessionRenewal.Issuer["issueRenewal"]>[0][] = [];
     const renewal = SessionRenewal.make({
       verify: () => Effect.succeed(currentSession),
-      issue: (input) => {
+      issueRenewal: (input) => {
         issueInputs.push(input);
         const now = DateTime.makeUnsafe(1_800_000_000_000);
         return Effect.succeed({
@@ -120,7 +125,9 @@ it.effect("issues an unchanged-scope normal bearer session and leaves its predec
           method: "bearer-access-token",
           client: input?.client ?? currentSession.client,
           expiresAt: DateTime.add(now, { days: 30 }),
-          scopes: input?.scopes ?? [],
+          scopes: input.scopes,
+          renewedFrom: input.parentSessionId,
+          rootIssuedAt: input.rootIssuedAt,
         });
       },
     });
@@ -134,14 +141,13 @@ it.effect("issues an unchanged-scope normal bearer session and leaves its predec
     expect(replacement.method).toBe("bearer-access-token");
     expect(replacement.scopes).toEqual(currentSession.scopes);
     expect(issueInputs).toHaveLength(1);
-    expect(issueInputs[0]).toMatchObject({
+    expect(issueInputs[0]).toEqual({
+      parentSessionId: currentSession.sessionId,
       subject: currentSession.subject,
-      method: "bearer-access-token",
       scopes: currentSession.scopes,
       client: currentSession.client,
-      ttl: Duration.days(30),
+      rootIssuedAt: currentSession.rootIssuedAt,
     });
-    expect(issueInputs[0]?.replaceActiveForSubjectAndMethod).toBeUndefined();
   }),
 );
 
@@ -154,6 +160,232 @@ const makeSessionStoreLayer = () =>
   );
 
 it.layer(NodeServices.layer)("SessionRenewal with SessionStore", (it) => {
+  it.effect(
+    "records direct renewal lineage and invalidates only unreleased successors on retry",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* SessionStore.SessionStore;
+        const root = yield* sessions.issue({
+          subject: "factory-source",
+          method: "bearer-access-token",
+          scopes: ["orchestration:read"],
+        });
+        const principal = {
+          sessionId: root.sessionId,
+          subject: "factory-source",
+          method: "bearer-access-token" as const,
+          scopes: root.scopes,
+        };
+        const removed = yield* Deferred.make<void>();
+        yield* sessions.streamChanges.pipe(
+          Stream.runForEach((change) =>
+            change.type === "clientRemoved" && change.sessionId !== root.sessionId
+              ? Deferred.succeed(removed, undefined).pipe(Effect.asVoid)
+              : Effect.void,
+          ),
+          Effect.forkChild({ startImmediately: true }),
+        );
+        const renewal = SessionRenewal.make(sessions);
+        const first = yield* renewal.renew({ credential: root.token, principal });
+        const firstVerified = yield* sessions.verify(first.token);
+        expect(firstVerified.renewedFrom).toBe(root.sessionId);
+        expect(firstVerified.rootIssuedAt).toEqual(root.rootIssuedAt);
+        yield* sessions.markConnected(first.sessionId);
+        const retry = yield* renewal.renew({ credential: root.token, principal });
+
+        expect((yield* Effect.flip(sessions.verify(first.token)))._tag).toBe(
+          "SessionTokenRevokedError",
+        );
+        expect((yield* sessions.verify(root.token)).sessionId).toBe(root.sessionId);
+        expect((yield* sessions.verify(retry.token)).sessionId).toBe(retry.sessionId);
+        yield* Deferred.await(removed);
+        const active = yield* sessions.listActive();
+        expect(active.find((session) => session.sessionId === first.sessionId)).toBeUndefined();
+      }).pipe(Effect.provide(makeSessionStoreLayer())),
+  );
+
+  it.effect("serializes concurrent renewals and idempotent releases in SQLite", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionStore.SessionStore;
+      const root = yield* sessions.issue({
+        subject: "factory-source",
+        method: "bearer-access-token",
+        scopes: ["orchestration:read"],
+      });
+      const principal = {
+        sessionId: root.sessionId,
+        subject: "factory-source",
+        method: "bearer-access-token" as const,
+        scopes: root.scopes,
+      };
+      const renewal = SessionRenewal.make(sessions);
+      const attempts = yield* Effect.all(
+        [0, 1].map(() => Effect.exit(renewal.renew({ credential: root.token, principal }))),
+        { concurrency: "unbounded" },
+      );
+      const issued = attempts.flatMap((attempt) =>
+        attempt._tag === "Success" ? [attempt.value] : [],
+      );
+      expect(issued.length).toBeGreaterThan(0);
+      const checks = yield* Effect.all(
+        issued.map((session) => Effect.exit(sessions.verify(session.token))),
+        { concurrency: "unbounded" },
+      );
+      const active = issued.filter((_, index) => checks[index]?._tag === "Success");
+      expect(active).toHaveLength(1);
+      expect((yield* sessions.verify(root.token)).sessionId).toBe(root.sessionId);
+
+      const releases = yield* Effect.all(
+        [0, 1].map(() => sessions.releaseRenewal(active[0]!.sessionId)),
+        { concurrency: "unbounded" },
+      );
+      expect(releases.filter(Boolean)).toHaveLength(1);
+      expect((yield* Effect.flip(sessions.verify(root.token)))._tag).toBe(
+        "SessionTokenRevokedError",
+      );
+      expect((yield* sessions.verify(active[0]!.token)).sessionId).toBe(active[0]!.sessionId);
+    }).pipe(Effect.provide(makeSessionStoreLayer())),
+  );
+
+  it.effect("linearizes a renewal racing its direct-parent release", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionStore.SessionStore;
+      const root = yield* sessions.issue({
+        subject: "factory-source",
+        method: "bearer-access-token",
+        scopes: ["orchestration:read"],
+      });
+      const principal = {
+        sessionId: root.sessionId,
+        subject: "factory-source",
+        method: "bearer-access-token" as const,
+        scopes: root.scopes,
+      };
+      const renewal = SessionRenewal.make(sessions);
+      const first = yield* renewal.renew({ credential: root.token, principal });
+      const [retry, released] = yield* Effect.all(
+        [
+          Effect.exit(renewal.renew({ credential: root.token, principal })),
+          sessions.releaseRenewal(first.sessionId),
+        ],
+        { concurrency: "unbounded" },
+      );
+
+      if (retry._tag === "Success") {
+        expect(released).toBe(false);
+        expect((yield* sessions.verify(root.token)).sessionId).toBe(root.sessionId);
+        expect((yield* sessions.verify(retry.value.token)).sessionId).toBe(retry.value.sessionId);
+        expect((yield* Effect.flip(sessions.verify(first.token)))._tag).toBe(
+          "SessionTokenRevokedError",
+        );
+      } else {
+        expect(released).toBe(true);
+        expect((yield* Effect.flip(sessions.verify(root.token)))._tag).toBe(
+          "SessionTokenRevokedError",
+        );
+        expect((yield* sessions.verify(first.token)).sessionId).toBe(first.sessionId);
+      }
+    }).pipe(Effect.provide(makeSessionStoreLayer())),
+  );
+
+  it.effect("caps a chained renewal at 90 days from its root issuance", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(0);
+      const sessions = yield* SessionStore.SessionStore;
+      const root = yield* sessions.issue({
+        subject: "factory-source",
+        ttl: Duration.days(120),
+        method: "bearer-access-token",
+        scopes: ["orchestration:read"],
+      });
+      yield* TestClock.setTime(75 * 24 * 60 * 60 * 1000);
+
+      const replacement = yield* SessionRenewal.make(sessions).renew({
+        credential: root.token,
+        principal: {
+          sessionId: root.sessionId,
+          subject: "factory-source",
+          method: "bearer-access-token",
+          scopes: root.scopes,
+        },
+      });
+
+      expect(replacement.expiresAt.epochMilliseconds).toBe(90 * 24 * 60 * 60 * 1000);
+      expect((yield* sessions.verify(root.token)).sessionId).toBe(root.sessionId);
+    }).pipe(Effect.provide(Layer.merge(makeSessionStoreLayer(), TestClock.layer()))),
+  );
+
+  it.effect("rejects renewal after the immutable root lifetime cap", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(0);
+      const sessions = yield* SessionStore.SessionStore;
+      const root = yield* sessions.issue({
+        ttl: Duration.days(120),
+        subject: "factory-source",
+        method: "bearer-access-token",
+        scopes: ["orchestration:read"],
+      });
+      yield* TestClock.setTime(90 * 24 * 60 * 60 * 1000);
+      const error = yield* Effect.flip(
+        SessionRenewal.make(sessions).renew({
+          credential: root.token,
+          principal: {
+            sessionId: root.sessionId,
+            subject: "factory-source",
+            method: "bearer-access-token",
+            scopes: root.scopes,
+          },
+        }),
+      );
+      expect(error._tag).toBe("SessionRenewalCredentialError");
+      expect((yield* sessions.verify(root.token)).sessionId).toBe(root.sessionId);
+    }).pipe(Effect.provide(Layer.merge(makeSessionStoreLayer(), TestClock.layer()))),
+  );
+
+  it.effect("releases only its direct parent idempotently and emits the database revocation", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionStore.SessionStore;
+      const root = yield* sessions.issue({
+        subject: "factory-source",
+        method: "bearer-access-token",
+        scopes: ["orchestration:read"],
+      });
+      const renewal = SessionRenewal.make(sessions);
+      const principal = {
+        sessionId: root.sessionId,
+        subject: "factory-source",
+        method: "bearer-access-token" as const,
+        scopes: root.scopes,
+      };
+      const directParent = yield* renewal.renew({ credential: root.token, principal });
+      const replacement = yield* renewal.renew({
+        credential: directParent.token,
+        principal: {
+          ...principal,
+          sessionId: directParent.sessionId,
+        },
+      });
+      const removed = yield* Deferred.make<void>();
+      yield* sessions.streamChanges.pipe(
+        Stream.runForEach((change) =>
+          change.type === "clientRemoved" && change.sessionId === directParent.sessionId
+            ? Deferred.succeed(removed, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+        ),
+        Effect.forkChild({ startImmediately: true }),
+      );
+      yield* sessions.markConnected(directParent.sessionId);
+      expect(yield* sessions.releaseRenewal(replacement.sessionId)).toBe(true);
+      yield* Deferred.await(removed);
+      expect((yield* Effect.flip(sessions.verify(directParent.token)))._tag).toBe(
+        "SessionTokenRevokedError",
+      );
+      expect((yield* sessions.verify(root.token)).sessionId).toBe(root.sessionId);
+      expect((yield* sessions.verify(replacement.token)).sessionId).toBe(replacement.sessionId);
+      expect(yield* sessions.releaseRenewal(replacement.sessionId)).toBe(false);
+    }).pipe(Effect.provide(makeSessionStoreLayer())),
+  );
+
   it.effect("issues narrowed scopes with the normal lifetime and keeps the predecessor valid", () =>
     Effect.gen(function* () {
       const sessions = yield* SessionStore.SessionStore;
@@ -192,9 +424,9 @@ it.layer(NodeServices.layer)("SessionRenewal with SessionStore", (it) => {
       let issueCalls = 0;
       const renewal = SessionRenewal.make({
         verify: sessions.verify,
-        issue: (input) => {
+        issueRenewal: (input) => {
           issueCalls += 1;
-          return sessions.issue(input);
+          return sessions.issueRenewal(input);
         },
       });
       const expired = yield* sessions.issue({
@@ -244,7 +476,7 @@ it.layer(NodeServices.layer)("SessionRenewal with SessionStore", (it) => {
       });
       const renewal = SessionRenewal.make({
         verify: sessions.verify,
-        issue: () =>
+        issueRenewal: () =>
           Effect.fail(
             new SessionStore.SessionCredentialIssueError({ cause: new Error("storage failed") }),
           ),

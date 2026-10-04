@@ -46,6 +46,8 @@ export interface IssuedSession {
   readonly client: AuthClientMetadata;
   readonly expiresAt: DateTime.DateTime;
   readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+  readonly renewedFrom: AuthSessionId | null;
+  readonly rootIssuedAt: DateTime.Utc;
   readonly proofKeyThumbprint?: string;
 }
 
@@ -57,6 +59,8 @@ export interface VerifiedSession {
   readonly expiresAt?: DateTime.DateTime;
   readonly subject: string;
   readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+  readonly renewedFrom: AuthSessionId | null;
+  readonly rootIssuedAt: DateTime.Utc;
   readonly proofKeyThumbprint?: string;
 }
 
@@ -380,7 +384,17 @@ export class SessionStore extends Context.Service<
        */
       readonly replaceActiveForSubjectAndMethod?: boolean;
     }) => Effect.Effect<IssuedSession, SessionCredentialInternalError>;
+    readonly issueRenewal: (input: {
+      readonly parentSessionId: AuthSessionId;
+      readonly subject: string;
+      readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+      readonly client: AuthClientMetadata;
+      readonly rootIssuedAt: DateTime.Utc;
+    }) => Effect.Effect<IssuedSession, SessionCredentialError>;
     readonly verify: (token: string) => Effect.Effect<VerifiedSession, SessionCredentialError>;
+    readonly releaseRenewal: (
+      replacementSessionId: AuthSessionId,
+    ) => Effect.Effect<boolean, SessionRevocationError>;
     readonly issueWebSocketToken: (
       sessionId: AuthSessionId,
       input?: {
@@ -646,25 +660,52 @@ export const make = Effect.gen(function* () {
     );
 
   const encodeClaims = Schema.encodeEffect(Schema.fromJsonString(SessionClaims));
-  const issue: SessionStore["Service"]["issue"] = Effect.fn("SessionStore.issue")(
-    function* (input) {
+  const issueSession = (
+    input: {
+      readonly ttl?: Duration.Duration;
+      readonly subject?: string;
+      readonly method?: ServerAuthSessionMethod;
+      readonly scopes?: ReadonlyArray<AuthEnvironmentScope>;
+      readonly client?: AuthClientMetadata;
+      readonly proofKeyThumbprint?: string;
+      readonly replaceActiveForSubjectAndMethod?: boolean;
+    },
+    lineage?: {
+      readonly parentSessionId: AuthSessionId;
+      readonly rootIssuedAt: DateTime.Utc;
+    },
+  ) =>
+    Effect.gen(function* () {
       const sessionId = AuthSessionId.make(
         yield* crypto.randomUUIDv4.pipe(
           Effect.mapError((cause) => new SessionCredentialIssueError({ cause })),
         ),
       );
-      const issuedAt = yield* DateTime.now;
-      const expiresAt = DateTime.add(issuedAt, {
-        milliseconds: Duration.toMillis(input?.ttl ?? DEFAULT_SESSION_TTL),
-      });
+      const issuedAt = DateTime.toUtc(yield* DateTime.now);
+      const rootIssuedAt = lineage?.rootIssuedAt ?? issuedAt;
+      const requestedExpiry =
+        issuedAt.epochMilliseconds + Duration.toMillis(input.ttl ?? DEFAULT_SESSION_TTL);
+      const chainExpiry = rootIssuedAt.epochMilliseconds + Duration.toMillis(Duration.days(90));
+      const expiresAt = DateTime.toUtc(
+        DateTime.makeUnsafe(
+          lineage === undefined ? requestedExpiry : Math.min(requestedExpiry, chainExpiry),
+        ),
+      );
+      if (lineage !== undefined && expiresAt.epochMilliseconds <= issuedAt.epochMilliseconds) {
+        return yield* new SessionTokenExpiredError({
+          sessionId: lineage.parentSessionId,
+          expiresAt: DateTime.makeUnsafe(chainExpiry),
+          observedAt: issuedAt,
+        });
+      }
       const claims: SessionClaims = {
         v: 1,
         kind: "session",
         sid: sessionId,
-        sub: input?.subject ?? "browser",
-        scopes: input?.scopes ?? AuthStandardClientScopes,
-        method: input?.method ?? "browser-session-cookie",
-        ...(input?.proofKeyThumbprint ? { jkt: input.proofKeyThumbprint } : {}),
+        sub: input.subject ?? "browser",
+        scopes: input.scopes ?? AuthStandardClientScopes,
+        method: input.method ?? "browser-session-cookie",
+        ...(input.proofKeyThumbprint ? { jkt: input.proofKeyThumbprint } : {}),
         iat: issuedAt.epochMilliseconds,
         exp: expiresAt.epochMilliseconds,
       };
@@ -684,7 +725,7 @@ export const make = Effect.gen(function* () {
         ),
       );
       const signature = signPayload(encodedPayload, signingSecret);
-      const client = input?.client ?? createDefaultClientMetadata();
+      const client = input.client ?? createDefaultClientMetadata();
       const sessionRecord = {
         sessionId,
         subject: claims.sub,
@@ -700,12 +741,67 @@ export const make = Effect.gen(function* () {
         },
         issuedAt,
         expiresAt,
+        renewedFrom: lineage?.parentSessionId ?? null,
+        rootIssuedAt,
       } satisfies AuthSessions.CreateAuthSessionInput;
-      const replacedSessionIds = yield* (
-        input?.replaceActiveForSubjectAndMethod
-          ? authSessions.createReplacingActive({ session: sessionRecord, revokedAt: issuedAt })
-          : authSessions.create(sessionRecord).pipe(Effect.as([] as ReadonlyArray<AuthSessionId>))
-      ).pipe(Effect.mapError((cause) => new SessionCredentialIssueError({ sessionId, cause })));
+      const replacedSessionIds = yield* lineage === undefined
+        ? input.replaceActiveForSubjectAndMethod
+          ? authSessions
+              .createReplacingActive({ session: sessionRecord, revokedAt: issuedAt })
+              .pipe(
+                Effect.mapError((cause) => new SessionCredentialIssueError({ sessionId, cause })),
+              )
+          : authSessions.create(sessionRecord).pipe(
+              Effect.as([] as ReadonlyArray<AuthSessionId>),
+              Effect.mapError((cause) => new SessionCredentialIssueError({ sessionId, cause })),
+            )
+        : authSessions
+            .createRenewal({
+              session: sessionRecord,
+              parentSessionId: lineage.parentSessionId,
+              now: issuedAt,
+            })
+            .pipe(
+              Effect.mapError((cause) => new SessionCredentialIssueError({ sessionId, cause })),
+              Effect.flatMap(
+                Option.match({
+                  onSome: Effect.succeed,
+                  onNone: (): Effect.Effect<ReadonlyArray<AuthSessionId>, SessionCredentialError> =>
+                    authSessions.getById({ sessionId: lineage.parentSessionId }).pipe(
+                      Effect.mapError(
+                        (cause) => new SessionCredentialIssueError({ sessionId, cause }),
+                      ),
+                      Effect.flatMap(
+                        (
+                          parent,
+                        ): Effect.Effect<ReadonlyArray<AuthSessionId>, SessionCredentialError> =>
+                          Option.match(parent, {
+                            onNone: () =>
+                              Effect.fail(
+                                new UnknownSessionTokenError({
+                                  sessionId: lineage.parentSessionId,
+                                }),
+                              ),
+                            onSome: (record) =>
+                              record.revokedAt !== null
+                                ? Effect.fail(
+                                    new SessionTokenRevokedError({
+                                      sessionId: record.sessionId,
+                                      revokedAt: record.revokedAt,
+                                    }),
+                                  )
+                                : Effect.fail(
+                                    new SessionTokenRevokedError({
+                                      sessionId: record.sessionId,
+                                      revokedAt: issuedAt,
+                                    }),
+                                  ),
+                          }),
+                      ),
+                    ),
+                }),
+              ),
+            );
       if (replacedSessionIds.length > 0) {
         yield* Ref.update(connectedSessionsRef, (current) => {
           const next = new Map(current);
@@ -738,12 +834,32 @@ export const make = Effect.gen(function* () {
         token: `${encodedPayload}.${signature}`,
         method: claims.method,
         client,
-        expiresAt: expiresAt,
+        expiresAt,
         scopes: claims.scopes,
+        renewedFrom: lineage?.parentSessionId ?? null,
+        rootIssuedAt,
         ...(claims.jkt ? { proofKeyThumbprint: claims.jkt } : {}),
       } satisfies IssuedSession;
-    },
+    });
+
+  const issue: SessionStore["Service"]["issue"] = Effect.fn("SessionStore.issue")((input) =>
+    issueSession(input ?? {}).pipe(
+      Effect.catchIf(isSessionCredentialInvalidError, (cause) =>
+        Effect.fail(new SessionCredentialIssueError({ cause })),
+      ),
+    ),
   );
+
+  const issueRenewal: SessionStore["Service"]["issueRenewal"] = (input) =>
+    issueSession(
+      {
+        subject: input.subject,
+        method: "bearer-access-token",
+        scopes: input.scopes,
+        client: input.client,
+      },
+      { parentSessionId: input.parentSessionId, rootIssuedAt: input.rootIssuedAt },
+    );
 
   const verify: SessionStore["Service"]["verify"] = Effect.fn("SessionStore.verify")(
     function* (token) {
@@ -781,6 +897,8 @@ export const make = Effect.gen(function* () {
           expiresAt: row.value.expiresAt,
           subject: row.value.subject,
           scopes: row.value.scopes,
+          renewedFrom: row.value.renewedFrom,
+          rootIssuedAt: row.value.rootIssuedAt,
         } satisfies VerifiedSession;
       }
       const [encodedPayload, signature] = token.split(".");
@@ -838,6 +956,8 @@ export const make = Effect.gen(function* () {
         expiresAt: expiresAt.value,
         subject: claims.sub,
         scopes: claims.scopes,
+        renewedFrom: row.value.renewedFrom,
+        rootIssuedAt: row.value.rootIssuedAt,
         ...(claims.jkt ? { proofKeyThumbprint: claims.jkt } : {}),
       } satisfies VerifiedSession;
     },
@@ -947,6 +1067,8 @@ export const make = Effect.gen(function* () {
       expiresAt: row.value.expiresAt,
       subject: row.value.subject,
       scopes: row.value.scopes,
+      renewedFrom: row.value.renewedFrom,
+      rootIssuedAt: row.value.rootIssuedAt,
     } satisfies VerifiedSession;
   });
 
@@ -997,6 +1119,29 @@ export const make = Effect.gen(function* () {
     },
   );
 
+  const releaseRenewal: SessionStore["Service"]["releaseRenewal"] = Effect.fn(
+    "SessionStore.releaseRenewal",
+  )(function* (replacementSessionId) {
+    const now = DateTime.toUtc(yield* DateTime.now);
+    const revoked = yield* authSessions
+      .releaseRenewal({ replacementSessionId, now })
+      .pipe(
+        Effect.mapError(
+          (cause) => new SessionRevocationError({ sessionId: replacementSessionId, cause }),
+        ),
+      );
+    if (Option.isSome(revoked)) {
+      yield* Ref.update(connectedSessionsRef, (current) => {
+        const next = new Map(current);
+        next.delete(revoked.value);
+        return next;
+      });
+      yield* emitRemoved(revoked.value);
+      return true;
+    }
+    return false;
+  });
+
   const revokeAllExcept: SessionStore["Service"]["revokeAllExcept"] = Effect.fn(
     "SessionStore.revokeAllExcept",
   )(function* (sessionId) {
@@ -1035,7 +1180,9 @@ export const make = Effect.gen(function* () {
     cookieName,
     legacyCookieName,
     issue,
+    issueRenewal,
     verify,
+    releaseRenewal,
     issueWebSocketToken,
     verifyWebSocketToken,
     listActive,

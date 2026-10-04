@@ -8,7 +8,7 @@ import * as Schema from "effect/Schema";
 
 import * as SessionStore from "./SessionStore.ts";
 
-export type Issuer = Pick<SessionStore.SessionStore["Service"], "verify" | "issue">;
+export type Issuer = Pick<SessionStore.SessionStore["Service"], "verify" | "issueRenewal">;
 
 export interface AuthenticatedSessionPrincipal {
   readonly sessionId: AuthSessionId;
@@ -122,14 +122,14 @@ export const make = (issuer: Issuer): SessionRenewalService => ({
             );
           }
           return issuer
-            .issue({
+            .issueRenewal({
+              parentSessionId: current.sessionId,
               subject: current.subject,
-              method: "bearer-access-token",
               scopes: selection.scopes,
               client: current.client,
-              ttl: SessionStore.DEFAULT_SESSION_TTL,
+              rootIssuedAt: current.rootIssuedAt,
             })
-            .pipe(Effect.mapError((cause) => new SessionRenewalInternalError({ cause })));
+            .pipe(Effect.mapError(mapVerificationError));
         },
       ),
     );

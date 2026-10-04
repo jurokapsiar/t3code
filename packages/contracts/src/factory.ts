@@ -200,7 +200,6 @@ export const FactoryEnvironmentView = Schema.Struct({
   credentialStorage: Schema.NullOr(FactoryCredentialStorage),
   credentialExpiresAt: Schema.NullOr(Schema.DateTimeUtc),
   renewal: FactoryRenewalState,
-  cleanupPending: Schema.Boolean,
   lastSeenAt: Schema.NullOr(Schema.DateTimeUtc),
   revision: NonNegativeInt,
 });

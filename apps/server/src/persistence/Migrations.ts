@@ -71,8 +71,7 @@ import Migration0054 from "./Migrations/054_ProjectionThreadsAutoSettleDisabledA
 import Migration0055 from "./Migrations/055_OrchestrationV2.ts";
 import Migration0056 from "./Migrations/056_RemoveRedundantProjectionIndexes.ts";
 import Migration0057 from "./Migrations/057_FactoryMetadata.ts";
-import Migration0058 from "./Migrations/058_FactoryCredentialRenewal.ts";
-import Migration0059 from "./Migrations/059_FactoryCredentialCleanupPending.ts";
+import Migration0060 from "./Migrations/060_AuthSessionRenewalLineage.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -144,8 +143,7 @@ export const migrationEntries = [
   [55, "OrchestrationV2", Migration0055],
   [56, "RemoveRedundantProjectionIndexes", Migration0056],
   [57, "FactoryMetadata", Migration0057],
-  [58, "FactoryCredentialRenewal", Migration0058],
-  [59, "FactoryCredentialCleanupPending", Migration0059],
+  [60, "AuthSessionRenewalLineage", Migration0060],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

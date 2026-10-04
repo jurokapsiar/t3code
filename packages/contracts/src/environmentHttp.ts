@@ -100,6 +100,7 @@ export const EnvironmentInternalErrorReason = Schema.Literals([
   "browser_session_cookie_failed",
   "access_token_issuance_failed",
   "session_renewal_failed",
+  "session_renewal_release_failed",
   "websocket_ticket_issuance_failed",
   "pairing_credential_issuance_failed",
   "pairing_links_load_failed",
@@ -429,6 +430,11 @@ export const AuthSessionRenewalRequest = Schema.Struct({
 });
 export type AuthSessionRenewalRequest = typeof AuthSessionRenewalRequest.Type;
 
+export const AuthSessionRenewalReleaseResult = Schema.Struct({
+  released: Schema.Boolean,
+});
+export type AuthSessionRenewalReleaseResult = typeof AuthSessionRenewalReleaseResult.Type;
+
 export const AuthOtherClientSessionsRevokeResult = Schema.Struct({
   revokedCount: Schema.Number,
 });
@@ -473,6 +479,13 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
         EnvironmentAuthInvalidError,
         EnvironmentInternalError,
       ],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("renewRelease", "/api/auth/renew/release", {
+      headers: OptionalBearerHeaders,
+      success: AuthSessionRenewalReleaseResult,
+      error: [EnvironmentAuthInvalidError, EnvironmentInternalError],
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
