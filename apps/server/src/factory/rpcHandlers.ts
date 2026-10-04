@@ -55,6 +55,16 @@ export const makeFactoryRpcHandlers = (
     );
 
   return FactoryRpcGroup.of({
+    [FactoryRpcMethods.controlAuthorization]: (input) =>
+      observeRpcEffect(
+        FactoryRpcMethods.controlAuthorization,
+        factoryRuntime.getRelayPolicy.pipe(
+          Effect.flatMap((policy) =>
+            policy.observeControl({ ...input, callerScopes: currentSession.scopes }),
+          ),
+        ),
+        { "rpc.aggregate": "factory" },
+      ),
     [FactoryRpcMethods.overviewSubscribe]: (_input) =>
       observeRpcStreamEffect(
         FactoryRpcMethods.overviewSubscribe,

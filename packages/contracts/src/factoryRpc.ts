@@ -20,11 +20,13 @@ import {
   FactoryMembership,
   FactoryOverviewEvent,
   FactoryProjectKey,
+  FactoryRemoteTarget,
   FactoryRegistrationId,
 } from "./factory.ts";
 import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 export const FactoryRpcMethods = {
+  controlAuthorization: "factory.source.controlAuthorization",
   environmentsList: "factory.environments.list",
   environmentsEnroll: "factory.environments.enroll",
   environmentsUpdate: "factory.environments.update",
@@ -53,6 +55,7 @@ export const FactoryRelayScope = Schema.Union([FactoryRpcScope, AuthSourceMethod
 export type FactoryRelayScope = typeof FactoryRelayScope.Type;
 
 export const FactoryRpcMethodScopes = {
+  [FactoryRpcMethods.controlAuthorization]: AuthFactoryReadScope,
   [FactoryRpcMethods.environmentsList]: AuthFactoryReadScope,
   [FactoryRpcMethods.environmentsEnroll]: AuthFactoryAdminScope,
   [FactoryRpcMethods.environmentsUpdate]: AuthFactoryAdminScope,
@@ -70,6 +73,48 @@ export const FactoryRpcMethodScopes = {
 } as const satisfies Record<FactoryRpcMethod, FactoryRpcScope>;
 
 const FactoryRpcError = Schema.Union([FactoryError, EnvironmentAuthorizationError]);
+
+export const FactoryControlOperation = Schema.Literals([
+  "launch",
+  "message.dispatch",
+  "run.interrupt",
+  "queue.resume",
+  "thread.settle",
+  "thread.unsettle",
+  "runtime-request.respond",
+  "checkpoint.rollback",
+]);
+export type FactoryControlOperation = typeof FactoryControlOperation.Type;
+
+export const FactoryControlDenialReason = Schema.Literals([
+  "feature-disabled",
+  "method-not-allowed",
+  "operation-not-allowed",
+  "scope-required",
+  "source-scope-required",
+  "source-stale",
+  "capability-required",
+  "bounded-detail-required",
+  "invalid-target",
+  "target-mismatch",
+  "source-unavailable",
+  "source-authentication",
+  "source-protocol",
+  "source-credential-store",
+  "source-transport",
+]);
+export const FactoryControlAdmission = Schema.Union([
+  Schema.Struct({ allowed: Schema.Literal(true) }),
+  Schema.Struct({ allowed: Schema.Literal(false), reason: FactoryControlDenialReason }),
+]);
+export type FactoryControlAdmission = typeof FactoryControlAdmission.Type;
+
+export const FactoryControlAuthorizationRpc = Rpc.make(FactoryRpcMethods.controlAuthorization, {
+  payload: Schema.Struct({ target: FactoryRemoteTarget, operation: FactoryControlOperation }),
+  success: FactoryControlAdmission,
+  error: FactoryRpcError,
+});
+
 const EmptyInput = Schema.Struct({});
 const FactoryRevisionInput = Schema.Struct({ revision: NonNegativeInt });
 const FactoryProjectMembershipInput = Schema.Struct({
@@ -196,6 +241,7 @@ export const FactoryOverviewSubscribeRpc = Rpc.make(FactoryRpcMethods.overviewSu
 });
 
 export const FactoryRpcGroup = RpcGroup.make(
+  FactoryControlAuthorizationRpc,
   FactoryEnvironmentsListRpc,
   FactoryEnvironmentsEnrollRpc,
   FactoryEnvironmentsUpdateRpc,

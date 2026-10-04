@@ -171,7 +171,10 @@ it.layer(
       const runtime = Layer.mock(FactoryRuntime.FactoryRuntime)({
         enabled: true,
         getRelayPolicy: Effect.succeed(
-          RelayPolicy.RelayPolicy.of({ authorize: () => Effect.succeed(access) }),
+          RelayPolicy.RelayPolicy.of({
+            authorize: () => Effect.succeed(access),
+            observeControl: () => Effect.die("Unexpected control observation in upgrade fixture."),
+          }),
         ),
         getRelay: Effect.succeed({
           serve: () => Effect.fail(new Connections.SourceFailure({ reason: "authentication" })),

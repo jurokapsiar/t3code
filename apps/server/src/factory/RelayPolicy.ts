@@ -1,5 +1,8 @@
 import {
   FactoryRegistrationId,
+  FactoryControlDenialReason,
+  type FactoryControlOperation,
+  type FactoryControlAdmission,
   ORCHESTRATION_PROTOCOL_VERSION,
   type AuthEnvironmentScope,
   type ExecutionEnvironmentCapabilities,
@@ -19,23 +22,7 @@ import * as SourceShell from "./SourceShell.ts";
 const isRegistrationId = Schema.is(FactoryRegistrationId);
 const isRemoteTarget = Schema.is(FactoryRemoteTarget);
 
-const DenialReason = Schema.Literals([
-  "feature-disabled",
-  "method-not-allowed",
-  "operation-not-allowed",
-  "scope-required",
-  "source-scope-required",
-  "source-stale",
-  "capability-required",
-  "bounded-detail-required",
-  "invalid-target",
-  "target-mismatch",
-  "source-unavailable",
-  "source-authentication",
-  "source-protocol",
-  "source-credential-store",
-  "source-transport",
-]);
+const DenialReason = FactoryControlDenialReason;
 type DenialReason = typeof DenialReason.Type;
 
 export class RelayDenied extends Schema.TaggedError<RelayDenied>()("RelayDenied", {
@@ -256,6 +243,11 @@ export const authorizeRelayRequest = (
 export class RelayPolicy extends Context.Service<
   RelayPolicy,
   {
+    readonly observeControl: (input: {
+      readonly target: FactoryRemoteTarget;
+      readonly callerScopes: ReadonlyArray<AuthEnvironmentScope>;
+      readonly operation: FactoryControlOperation;
+    }) => Effect.Effect<FactoryControlAdmission>;
     readonly authorize: (
       input: Request & { readonly target: FactoryRemoteTarget },
     ) => Effect.Effect<Connections.SourceAccess, RelayDenied>;
@@ -321,7 +313,27 @@ const make = Effect.gen(function* () {
     if (!decision.allowed) return yield* new RelayDenied({ reason: decision.reason });
     return access;
   });
-  return RelayPolicy.of({ authorize });
+  const observeControl = Effect.fnUntraced(function* (input: {
+    readonly target: FactoryRemoteTarget;
+    readonly callerScopes: ReadonlyArray<AuthEnvironmentScope>;
+    readonly operation: FactoryControlOperation;
+  }) {
+    return yield* authorize({
+      target: input.target,
+      callerScopes: input.callerScopes,
+      method:
+        input.operation === "launch"
+          ? "orchestration.launchThread"
+          : "orchestration.dispatchCommand",
+      ...(input.operation === "launch" ? {} : { payload: { type: input.operation } }),
+    }).pipe(
+      Effect.match({
+        onSuccess: (): FactoryControlAdmission => ({ allowed: true }),
+        onFailure: (error): FactoryControlAdmission => ({ allowed: false, reason: error.reason }),
+      }),
+    );
+  });
+  return RelayPolicy.of({ authorize, observeControl });
 });
 
 export const layer = Layer.effect(RelayPolicy, make);

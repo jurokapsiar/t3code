@@ -514,3 +514,36 @@ it("gates signed upload grants but not signed asset inspection on freshness and 
     }
   }
 });
+
+it.effect.each([
+  { scopes: ["factory:read", "factory:control"], options: {}, expected: { allowed: true } },
+  { scopes: ["factory:read"], options: {}, expected: { allowed: false, reason: "scope-required" } },
+  {
+    scopes: ["factory:read", "factory:control"],
+    options: { sourceScopes: ["orchestration:read"] },
+    expected: { allowed: false, reason: "source-scope-required" },
+  },
+  {
+    scopes: ["factory:read", "factory:control"],
+    options: { synchronized: false },
+    expected: { allowed: false, reason: "source-stale" },
+  },
+  {
+    scopes: ["factory:read", "factory:control"],
+    options: { expiredLease: true },
+    expected: { allowed: false, reason: "source-authentication" },
+  },
+] as const)(
+  "observes control admission through the authoritative service: %s",
+  ({ scopes, options, expected }) =>
+    Effect.gen(function* () {
+      const policy = yield* RelayPolicy.RelayPolicy;
+      expect(
+        yield* policy.observeControl({
+          target,
+          callerScopes: scopes,
+          operation: "message.dispatch",
+        }),
+      ).toEqual(expected);
+    }).pipe(Effect.provide(policyLayer(options))),
+);
