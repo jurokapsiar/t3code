@@ -20,6 +20,8 @@ import type {
   ProviderAdapterV2TurnInput,
 } from "../../orchestration-v2/ProviderAdapter.ts";
 
+export const controlledRollbackBarriers = new Map<string, Effect.Effect<void>>();
+
 /** Only the external provider SPI is controlled. Policy, intake, worker and projections stay real. */
 export function controlledProviderDriver(slug: string, rollback: boolean): ProviderDriver<{}> {
   const driver = ProviderDriverKind.make(slug);
@@ -228,12 +230,19 @@ export function controlledProviderDriver(slug: string, rollback: boolean): Provi
                     }),
                   rollbackThread: (args) =>
                     rollback
-                      ? Effect.succeed({
-                          providerThread: args.providerThread,
-                          providerTurns: [],
-                          messages: [],
-                          runtimeRequests: [],
-                        })
+                      ? (
+                          (args.providerThread.appThreadId === null
+                            ? undefined
+                            : controlledRollbackBarriers.get(args.providerThread.appThreadId)) ??
+                          Effect.void
+                        ).pipe(
+                          Effect.as({
+                            providerThread: args.providerThread,
+                            providerTurns: [],
+                            messages: [],
+                            runtimeRequests: [],
+                          }),
+                        )
                       : Effect.die("Unsupported provider rollback reached external runtime"),
                   forkThread: () => Effect.die("Fork is phase3/out of this gate"),
                 };

@@ -364,6 +364,14 @@ export const executorLayer: Layer.Layer<
                   : { restoreFiles: effect.request.restoreFiles }),
               })
               .pipe(
+                Effect.andThen(() =>
+                  threads.dispatch({
+                    type: "checkpoint.rollback.complete",
+                    commandId: CommandId.make(`${effect.commandId}:rollback-completed`),
+                    threadId: effect.threadId,
+                    requestId: effect.commandId,
+                  }),
+                ),
                 // The last failed attempt tells waiting clients it failed,
                 // instead of leaving them to time out. Clients get a fixed
                 // message; the worker logs the full cause for each attempt.
@@ -395,6 +403,7 @@ export const executorLayer: Layer.Layer<
                       cause,
                     }),
                 ),
+                Effect.asVoid,
               );
           case "checkpoint.capture":
             return runFinalization

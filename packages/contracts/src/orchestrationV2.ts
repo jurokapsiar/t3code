@@ -416,8 +416,10 @@ export const OrchestrationV2AppThread = Schema.Struct({
       }),
     ),
   ),
-  /** Latest accepted rollback. Only its failure is recorded in `rollbackFailure`. */
+  /** Latest accepted rollback; acceptance does not mean the effect completed. */
   rollbackRequestId: Schema.optional(CommandId),
+  /** Latest rollback whose provider and checkpoint effect completed successfully. */
+  rollbackCompletedRequestId: Schema.optional(CommandId),
   /** Latest rollback that failed after every retry; cleared when the next rollback starts. */
   rollbackFailure: Schema.optional(
     Schema.NullOr(
@@ -2869,6 +2871,12 @@ export type OrchestrationV2Command = typeof OrchestrationV2Command.Type;
  * send them.
  */
 const OrchestrationV2InternalCommand = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("checkpoint.rollback.complete"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    requestId: CommandId,
+  }),
   /** Records that the provider rollback `requestId` failed for good. */
   Schema.Struct({
     type: Schema.Literal("checkpoint.rollback.fail"),

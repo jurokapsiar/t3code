@@ -254,14 +254,11 @@ export const layer: Layer.Layer<
               };
             });
 
-      const snapshot =
-        runsToRollback.length === 0
-          ? { providerThread }
-          : yield* session.rollbackThread({
-              providerThread,
-              target: rollbackTarget,
-              providerThreadTurns,
-            });
+      const snapshot = yield* session.rollbackThread({
+        providerThread,
+        target: rollbackTarget,
+        providerThreadTurns,
+      });
       if (input.restoreFiles !== false) yield* checkpoints.restore({ scope, checkpoint });
       const staleCheckpoints = projection.checkpoints.filter(
         (candidate) =>

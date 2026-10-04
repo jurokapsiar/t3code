@@ -391,6 +391,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "runtime-request.respond":
     case "thread.user-input.dismiss":
     case "checkpoint.rollback":
+    case "checkpoint.rollback.complete":
     case "checkpoint.rollback.fail":
     case "thread.background-work.settle":
     case "provider.switch":
@@ -8235,6 +8236,37 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ]);
     });
 
+  const dispatchCheckpointRollbackComplete = (
+    command: Extract<
+      OrchestrationV2InternalCommand,
+      { readonly type: "checkpoint.rollback.complete" }
+    >,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) =>
+    Effect.gen(function* () {
+      const thread = yield* projectionStore
+        .getThread(command.threadId)
+        .pipe(mapDispatchError(command));
+      // A late success must not confirm a newer rollback that is still pending.
+      if (thread.deletedAt !== null || thread.rollbackRequestId !== command.requestId) return;
+      const now = yield* DateTime.now;
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "thread.metadata-updated",
+        threadId: command.threadId,
+        providerInstanceId: thread.providerInstanceId,
+        occurredAt: now,
+        payload: {
+          ...thread,
+          rollbackCompletedRequestId: command.requestId,
+          rollbackFailure: null,
+          updatedAt: now,
+        },
+      });
+    });
+
   /**
    * Records a provider rollback that failed after every retry, so clients
    * waiting on it stop and show the reason. A newer rollback clears it, and a
@@ -9254,6 +9286,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "checkpoint.rollback":
         yield* dispatchCheckpointRollback(command, events, effects);
         break;
+      case "checkpoint.rollback.complete":
+        yield* dispatchCheckpointRollbackComplete(command, events);
+        break;
       case "checkpoint.rollback.fail":
         yield* dispatchCheckpointRollbackFail(command, events);
         break;
@@ -9353,9 +9388,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
     const plan = yield* dispatchOnce(command).pipe(
       Effect.flatMap((planned) =>
-        // A settle that finds the provider already ended everything has
-        // nothing to record, which is its expected outcome, not a failure.
-        planned.events.length > 0 || command.type === "thread.background-work.settle"
+        // Already-settled work and superseded rollback completions have nothing to record.
+        planned.events.length > 0 ||
+        command.type === "thread.background-work.settle" ||
+        command.type === "checkpoint.rollback.complete"
           ? Effect.succeed(planned)
           : Effect.fail(
               new OrchestratorDispatchError({
@@ -9403,8 +9439,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     );
 
     if (plan.events.length === 0) {
-      // A settle that ended nothing still records its receipt: a replayed Stop
-      // effect then finds it instead of settling work that appeared since.
+      // Record no-op receipts so replayed effects cannot change later work.
       const resultSequence = yield* Effect.gen(function* () {
         const sequence = yield* eventSink.latestSequence({ threadId: commandThreadId(command) });
         yield* commandReceipts.insertIfAbsent({

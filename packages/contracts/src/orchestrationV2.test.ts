@@ -22,6 +22,7 @@ import {
   TurnItemId,
 } from "./index.ts";
 import {
+  OrchestrationV2AppThreadJson,
   OrchestrationV2Checkpoint,
   OrchestrationV2CheckpointScope,
   OrchestrationV2Command,
@@ -42,6 +43,9 @@ import {
   OrchestrationV2TurnItem,
   OrchestrationV2TurnItemJson,
 } from "./orchestrationV2.ts";
+
+const encodeAppThreadJson = Schema.encodeSync(OrchestrationV2AppThreadJson);
+const decodeAppThreadJson = Schema.decodeUnknownSync(OrchestrationV2AppThreadJson);
 
 const now = DateTime.makeUnsafe("2026-04-20T00:00:00.000Z");
 const LegacyShellStreamItem = Schema.Union([
@@ -890,6 +894,26 @@ describe("orchestration V2 contracts", () => {
       contextTransfers: [],
       updatedAt: now,
     });
+
+    // Legacy stored/wire payloads do not invent a success at acceptance.
+    expect(projection.thread.rollbackCompletedRequestId).toBeUndefined();
+    const completion = {
+      ...projection.thread,
+      rollbackRequestId: CommandId.make("rollback-accepted"),
+      rollbackCompletedRequestId: CommandId.make("rollback-completed"),
+    };
+    const json = encodeAppThreadJson(completion);
+    const decoded = decodeAppThreadJson(json);
+    expect(decoded.rollbackRequestId).toBe("rollback-accepted");
+    expect(decoded.rollbackCompletedRequestId).toBe("rollback-completed");
+    expect(() =>
+      decodeOrchestrationV2Command({
+        type: "checkpoint.rollback.complete",
+        commandId: "forged",
+        threadId: "thread-1",
+        requestId: "rollback-accepted",
+      }),
+    ).toThrow();
 
     expect(projection.turnItems.map((item) => item.type)).toEqual(["command_execution"]);
 

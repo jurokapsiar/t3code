@@ -174,6 +174,7 @@ it("checks exact dispatch tags and never treats unknown commands as reads", () =
     { type: "unknown" },
     { type: "toString" },
     { type: "checkpoint.rollback.fail" },
+    { type: "checkpoint.rollback.complete" },
     { type: "prepared-run.fail" },
     { type: "thread.auto-settle" },
     { operation: "message.dispatch" },

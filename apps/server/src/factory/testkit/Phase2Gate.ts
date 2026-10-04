@@ -7,6 +7,9 @@ import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
+import * as Scope from "effect/Scope";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
@@ -46,6 +49,8 @@ import {
   productionEventSink,
   productionCommandReceipts,
 } from "./ProductionServer.ts";
+
+import { controlledRollbackBarriers } from "./ControlledProvider.ts";
 
 const Message = Schema.Struct({
   id: Schema.Number,
@@ -275,6 +280,17 @@ export const phase2Gate = Effect.gen(function* () {
       HISTFILE: `${sourceA.config.baseDir}/test-history`,
     },
   });
+  const rollbackStarted = yield* Deferred.make<void>();
+  const rollbackRelease = yield* Deferred.make<void>();
+  controlledRollbackBarriers.set(
+    threadId,
+    Deferred.succeed(rollbackStarted, undefined).pipe(
+      Effect.andThen(Deferred.await(rollbackRelease)),
+    ),
+  );
+  let rollbackCheckpoint: { readonly id: string; readonly ref: string | null } | undefined;
+  let rollbackDrain: Fiber.Fiber<number, EffectWorker.OrchestrationEffectWorkerError> | undefined;
+  yield* Effect.addFinalizer(() => Effect.sync(() => controlledRollbackBarriers.delete(threadId)));
   let drains = 0;
   let audit: unknown;
   const metadata = yield* runtime.getMetadata;
@@ -299,7 +315,11 @@ export const phase2Gate = Effect.gen(function* () {
     Effect.gen(function* () {
       switch (message.name) {
         case "drain": {
-          yield* worker.drain();
+          if (rollbackDrain) {
+            yield* Deferred.succeed(rollbackRelease, undefined);
+            yield* Fiber.join(rollbackDrain);
+            rollbackDrain = undefined;
+          } else yield* worker.drain();
           drains++;
           if (drains === 1)
             yield* awaitProjection((p) =>
@@ -322,12 +342,84 @@ export const phase2Gate = Effect.gen(function* () {
                   run.checkpointId !== null,
               ),
             );
-          if (drains === 5)
-            yield* awaitProjection(
-              (p) =>
-                p.thread.rollbackRequestId === "native-rollback" &&
-                p.runs.some((run) => run.status === "rolled_back"),
+          if (drains === 5) {
+            const completed = yield* awaitProjection(
+              (p) => p.thread.rollbackCompletedRequestId === "native-rollback",
             );
+            expect(completed.thread.rollbackCompletedRequestId).toBe("native-rollback");
+            expect(rollbackCheckpoint?.ref?.startsWith("refs/")).toBe(true);
+            expect(
+              completed.checkpoints.find((checkpoint) => checkpoint.id === rollbackCheckpoint?.id)
+                ?.ref,
+            ).toBe(rollbackCheckpoint?.ref);
+            expect(completed.runs.some((run) => run.status === "rolled_back")).toBe(true);
+            yield* Effect.log(
+              "PHASE2_ROLLBACK_SUCCESS",
+              JSON.stringify({
+                accepted: completed.thread.rollbackRequestId,
+                completed: completed.thread.rollbackCompletedRequestId,
+              }),
+            );
+          }
+          return null;
+        }
+        case "rollback-start": {
+          rollbackDrain = yield* worker.drain().pipe(Effect.forkScoped);
+          yield* Deferred.await(rollbackStarted);
+          const pending = yield* orchestrator.getThreadProjection(threadId);
+          rollbackCheckpoint = pending.checkpoints.find(
+            (checkpoint) => checkpoint.status === "ready",
+          );
+          expect(pending.thread.rollbackRequestId).toBe("native-rollback");
+          expect(pending.thread.rollbackCompletedRequestId).toBeUndefined();
+          return null;
+        }
+        case "rollback-unrelated-update": {
+          const pending = yield* orchestrator.getThreadProjection(threadId);
+          const providerThread = pending.providerThreads.find(
+            (thread) => thread.id === pending.thread.activeProviderThreadId,
+          )!;
+          const checkpoint = pending.checkpoints.find(
+            (checkpoint) => checkpoint.status === "ready",
+          )!;
+          const now = DateTime.add(providerThread.updatedAt, { milliseconds: 1 });
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make("unrelated-provider-update"),
+                type: "provider-thread.updated",
+                threadId,
+                providerInstanceId: providerThread.providerInstanceId,
+                occurredAt: now,
+                payload: {
+                  ...providerThread,
+                  lastRunOrdinal: checkpoint.appRunOrdinal || null,
+                  updatedAt: now,
+                },
+              },
+            ],
+          });
+          const unrelated = yield* orchestrator.getThreadProjection(threadId);
+          expect(unrelated.thread.rollbackCompletedRequestId).toBeUndefined();
+          const updatedProvider = unrelated.providerThreads.find(
+            (thread) => thread.id === providerThread.id,
+          )!;
+          expect(updatedProvider.lastRunOrdinal).toBe(checkpoint.appRunOrdinal || null);
+          expect(DateTime.toEpochMillis(updatedProvider.updatedAt)).toBeGreaterThan(
+            DateTime.toEpochMillis(providerThread.updatedAt),
+          );
+          yield* Effect.log(
+            "PHASE2_ROLLBACK_PENDING",
+            JSON.stringify({
+              accepted: unrelated.thread.rollbackRequestId,
+              completed: null,
+              sameOrdinal: unrelated.providerThreads.find(
+                (thread) => thread.id === providerThread.id,
+              )?.lastRunOrdinal,
+              providerUpdatedAtNewer: true,
+              effectBlockedInProvider: true,
+            }),
+          );
           return null;
         }
         case "seed-question": {
@@ -472,6 +564,7 @@ export const phase2Gate = Effect.gen(function* () {
           return yield* Effect.die(`Unexpected UI milestone ${message.name}`);
       }
     });
+  const gateScope = yield* Scope.Scope;
   let output = "";
   const run = Effect.callback<void, GateFailure>((resume) => {
     const cancellation = new AbortController();
@@ -520,7 +613,10 @@ export const phase2Gate = Effect.gen(function* () {
         return;
       }
       void Effect.runPromise(
-        handle(message).pipe(Effect.provideService(FileSystem.FileSystem, fs)),
+        handle(message).pipe(
+          Effect.provideService(FileSystem.FileSystem, fs),
+          Effect.provideService(Scope.Scope, gateScope),
+        ),
         { signal: cancellation.signal },
       ).then(
         (value) => child.stdin.write(JSON.stringify({ id: message.id, value }) + "\n"),

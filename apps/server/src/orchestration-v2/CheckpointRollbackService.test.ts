@@ -344,7 +344,8 @@ it.effect.each([
   { restoreFiles: false, shared: "worktree" },
   { restoreFiles: true, shared: "historical" },
   { restoreFiles: false, shared: "none", targetOrdinal: 1 },
-])("rewinds safely with %s", ({ restoreFiles, shared, targetOrdinal = 0 }) => {
+  { restoreFiles: false, shared: "none", targetOrdinal: 0, noRuns: true },
+])("rewinds safely with %s", ({ restoreFiles, shared, targetOrdinal = 0, noRuns = false }) => {
   const threadId = ThreadId.make("rewind-files");
   const providerThreadId = ProviderThreadId.make("rewind-provider");
   const providerSessionId = ProviderSessionId.make("rewind-session");
@@ -366,7 +367,7 @@ it.effect.each([
     providerThreads: [providerThread],
     providerSessions: [],
     // Turn 3 remains in the audit history after an earlier rollback.
-    providerTurns: [1, 2, 3].map((ordinal) => ({
+    providerTurns: (noRuns ? [] : [1, 2, 3]).map((ordinal) => ({
       id: `turn-${ordinal}`,
       providerThreadId,
       runAttemptId: `attempt-${ordinal}`,
@@ -379,7 +380,7 @@ it.effect.each([
       { id: checkpointId, scopeId, status: "ready", appRunOrdinal: targetOrdinal || null },
     ],
     checkpointScopes: [{ id: scopeId, cwd: process.cwd() }],
-    runs: [1, 2, 3].map((ordinal) => ({
+    runs: (noRuns ? [] : [1, 2, 3]).map((ordinal) => ({
       id: `run-${ordinal}`,
       ordinal,
       status: ordinal === 3 ? "rolled_back" : "completed",
@@ -400,8 +401,10 @@ it.effect.each([
           write: ({ events }) =>
             Effect.sync(() => {
               assert.ok(
-                events.some(
-                  (event) => event.type === "run.updated" && event.payload.status === "rolled_back",
+                events.some((event) =>
+                  noRuns
+                    ? event.type === "provider-thread.updated"
+                    : event.type === "run.updated" && event.payload.status === "rolled_back",
                 ),
               );
               calls.push("projection");
@@ -441,7 +444,7 @@ it.effect.each([
               rollbackThread: (input: ProviderAdapterV2RollbackThreadInput) =>
                 Effect.gen(function* () {
                   const count = yield* resolveCodexRollbackTurnCount(input);
-                  assert.equal(count, 2 - targetOrdinal);
+                  assert.equal(count, noRuns ? 0 : 2 - targetOrdinal);
                   calls.push("provider");
                   return { providerThread };
                 }),

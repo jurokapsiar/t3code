@@ -330,6 +330,38 @@ it.effect("memory recovery selection includes unfinished items from missing runs
 
 it.layer(TestLayer)("ProjectionStoreV2", (it) => {
   it.effect(
+    "preserves explicit rollback completion in stored bounded projections without inferring it",
+    () =>
+      Effect.gen(function* () {
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const threadId = yield* addRolledBackRecoveryCandidate("rollback-completion-wire");
+        const legacy = yield* store.getThreadSnapshotWindow(threadId, { rowLimit: 75 });
+        assert.equal(legacy.projection.thread.rollbackCompletedRequestId, undefined);
+        const acceptedId = CommandId.make("bounded-rollback");
+        const now = yield* DateTime.now;
+        yield* store.apply({
+          id: EventId.make("bounded-rollback-accepted"),
+          type: "thread.metadata-updated",
+          threadId,
+          occurredAt: now,
+          payload: { ...legacy.projection.thread, rollbackRequestId: acceptedId },
+        });
+        const pending = yield* store.getThreadSnapshotWindow(threadId, { rowLimit: 75 });
+        assert.equal(pending.projection.thread.rollbackRequestId, acceptedId);
+        assert.equal(pending.projection.thread.rollbackCompletedRequestId, undefined);
+        yield* store.apply({
+          id: EventId.make("bounded-rollback-completed"),
+          type: "thread.metadata-updated",
+          threadId,
+          occurredAt: now,
+          payload: { ...pending.projection.thread, rollbackCompletedRequestId: acceptedId },
+        });
+        const completed = yield* store.getThreadSnapshotWindow(threadId, { rowLimit: 75 });
+        assert.equal(completed.projection.thread.rollbackCompletedRequestId, acceptedId);
+        assert.equal(completed.projection.thread.rollbackRequestId, acceptedId);
+      }),
+  );
+  it.effect(
     "keeps restart-cancelled work through a stale run.updated",
     () => restartCancelledWorkSurvivesStaleRunUpdate,
   );

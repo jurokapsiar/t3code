@@ -216,7 +216,7 @@ const TestLayer = Layer.mergeAll(
   ThreadCommandExecutor.layer,
 ).pipe(
   Layer.provide(McpSessionRegistryTestkit.layer),
-  Layer.provide(SqlitePersistenceMemory),
+  Layer.provideMerge(SqlitePersistenceMemory),
   Layer.provide(CheckpointStoreTestLayer),
   Layer.provide(ServerConfigLayer),
   Layer.provide(ServerSettings.layerTest()),
@@ -549,6 +549,55 @@ it.layer(TestLayer)("OrchestrationV2LayerLive", (it) => {
       };
     });
 
+  it.effect(
+    "records only the matching internal rollback completion and deduplicates request IDs",
+    () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const sql = yield* SqlClient.SqlClient;
+        const { threadId, rollback } = yield* seedFailingRollbackThread(
+          "runtime-rollback-completion",
+        );
+        const requestId = CommandId.make("runtime-rollback-completion-request");
+        const accepted = yield* rollback(requestId);
+        const duplicate = yield* rollback(requestId);
+        assert.equal(duplicate.sequence, accepted.sequence);
+        assert.equal((yield* outbox.listByCommandId(requestId)).length, 1);
+        assert.equal(
+          (yield* orchestrator.getThreadProjection(threadId)).thread.rollbackCompletedRequestId,
+          undefined,
+        );
+        const complete = {
+          type: "checkpoint.rollback.complete" as const,
+          commandId: CommandId.make("runtime-rollback-completion-success"),
+          threadId,
+          requestId,
+        };
+        const completed = yield* orchestrator.dispatch(complete);
+        assert.equal(completed.storedEvents.length, 1);
+        const repeated = yield* orchestrator.dispatch(complete);
+        assert.equal(repeated.sequence, completed.sequence);
+        assert.deepEqual(repeated.storedEvents, completed.storedEvents);
+        const projection = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(projection.thread.rollbackRequestId, requestId);
+        assert.equal(projection.thread.rollbackCompletedRequestId, requestId);
+        const rows = yield* sql<{
+          completed: string;
+        }>`SELECT json_extract(payload_json, '$.rollbackCompletedRequestId') AS completed FROM orchestration_v2_projection_threads WHERE thread_id = ${threadId}`;
+        assert.equal(rows[0]?.completed, requestId);
+        yield* rollback(CommandId.make("runtime-rollback-completion-next"));
+        const late = yield* orchestrator.dispatch({
+          ...complete,
+          commandId: CommandId.make("runtime-rollback-completion-late"),
+        });
+        assert.equal(late.storedEvents.length, 0);
+        const next = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(next.thread.rollbackRequestId, "runtime-rollback-completion-next");
+        assert.equal(next.thread.rollbackCompletedRequestId, requestId);
+      }),
+  );
+
   it.effect("projects a rollback that fails every attempt and clears it on the next one", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -567,6 +616,7 @@ it.layer(TestLayer)("OrchestrationV2LayerLive", (it) => {
       const [rollbackEffect] = yield* outbox.listByCommandId(rollbackCommandId);
       assert.equal(rollbackEffect?.status, "failed");
       const failed = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(failed.thread.rollbackCompletedRequestId, undefined);
       assert.deepEqual(failed.thread.rollbackFailure, {
         requestId: rollbackCommandId,
         message: ROLLBACK_FAILED_MESSAGE,
@@ -611,6 +661,7 @@ it.layer(TestLayer)("OrchestrationV2LayerLive", (it) => {
       const [newerEffect] = yield* outbox.listByCommandId(newerCommandId);
       assert.equal(newerEffect?.status, "failed");
       const failed = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(failed.thread.rollbackCompletedRequestId, undefined);
       assert.deepEqual(failed.thread.rollbackFailure, {
         requestId: newerCommandId,
         message: ROLLBACK_FAILED_MESSAGE,
