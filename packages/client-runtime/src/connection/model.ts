@@ -1,4 +1,5 @@
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId, FactoryRegistrationId } from "@t3tools/contracts";
+import type { SourceHttpUrlMode } from "@t3tools/contracts/factoryRelayUrl";
 import * as Schema from "effect/Schema";
 
 const ConnectionTargetBase = {
@@ -30,6 +31,15 @@ export class RelayConnectionTarget extends Schema.TaggedClass<RelayConnectionTar
   },
 ) {}
 
+export class FactoryEmbeddedConnectionTarget extends Schema.TaggedClass<FactoryEmbeddedConnectionTarget>()(
+  "FactoryEmbeddedConnectionTarget",
+  {
+    ...ConnectionTargetBase,
+    registrationId: FactoryRegistrationId,
+    origin: Schema.String,
+  },
+) {}
+
 export class SshConnectionTarget extends Schema.TaggedClass<SshConnectionTarget>()(
   "SshConnectionTarget",
   {
@@ -43,6 +53,7 @@ export const ConnectionTarget = Schema.Union([
   BearerConnectionTarget,
   RelayConnectionTarget,
   SshConnectionTarget,
+  FactoryEmbeddedConnectionTarget,
 ]);
 export type ConnectionTarget = typeof ConnectionTarget.Type;
 
@@ -125,6 +136,14 @@ export interface PreparedConnection {
   readonly socketUrl: string;
   readonly httpAuthorization: PreparedHttpAuthorization | null;
   readonly target: ConnectionTarget;
+}
+
+export function factoryEmbeddedHttpUrlMode(
+  prepared: PreparedConnection,
+): SourceHttpUrlMode | undefined {
+  return prepared.target._tag === "FactoryEmbeddedConnectionTarget"
+    ? { mode: "factory-relay", environmentId: prepared.environmentId }
+    : undefined;
 }
 
 export type SupervisorConnectionPhase =

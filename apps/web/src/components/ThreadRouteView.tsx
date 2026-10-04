@@ -1,7 +1,7 @@
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
-import type { ScopedThreadRef } from "@t3tools/contracts";
+import type { FactoryFrameTarget, ScopedThreadRef } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import ChatView from "./ChatView";
 import { resolveDraftPromotionNavigationTarget, threadHasStarted } from "./ChatView.logic";
@@ -15,6 +15,15 @@ import {
 } from "../composerDraftStore";
 import { useSidebarPendingFileDropStore } from "../sidebarPendingFileDropStore";
 import { useEnvironmentThreadRefs, useThreadRefs, useThreadShell } from "../state/entities";
+import { useEnvironment } from "../state/environments";
+import {
+  isFactoryEmbedRequested,
+  parseFactoryEmbedRoute,
+  reportFactoryEmbedError,
+  reportFactoryEmbedReady,
+  resolveFactoryEmbedHandshakeMessage,
+  subscribeFactoryEmbedTarget,
+} from "../factoryEmbed";
 import { useEnvironmentQuery } from "../state/query";
 import { environmentShell } from "../state/shell";
 import {
@@ -106,6 +115,96 @@ export function ThreadRouteView({ target }: { target: ThreadRouteTarget }) {
   });
   const serverThreadStarted = threadHasStarted(serverThreadShell);
   const environmentHasAnyThreads = environmentThreadRefs.length > 0 || environmentHasDraftThreads;
+  const embeddedRouteTarget =
+    typeof window === "undefined"
+      ? null
+      : (parseFactoryEmbedRoute(window.location.href)?.target ?? null);
+  const embeddedEnvironment = useEnvironment(
+    serverThreadRef?.environmentId ??
+      (target.kind === "server" ? target.threadRef.environmentId : null),
+  );
+  const [activeFactoryEmbedTarget, setActiveFactoryEmbedTarget] =
+    useState<FactoryFrameTarget | null>(null);
+  const embeddedReadyRef = useRef(false);
+  const embeddedErrorRef = useRef<string | null>(null);
+  const embeddedConnectionPhase = embeddedEnvironment?.connection.phase;
+  const embeddedTargetEnvironmentId = embeddedRouteTarget?.environmentId ?? null;
+  const embeddedTargetThreadId = embeddedRouteTarget?.threadId ?? null;
+  const embeddedRegistrationId = embeddedRouteTarget?.registrationId ?? null;
+  const embeddedRouteEnvironmentId =
+    target.kind === "server" ? target.threadRef.environmentId : null;
+  const embeddedRouteThreadId = target.kind === "server" ? target.threadRef.threadId : null;
+  const embeddedFailureCode =
+    embeddedConnectionPhase === "unsupported"
+      ? "source-protocol"
+      : embeddedConnectionPhase === "error"
+        ? "connection-failed"
+        : undefined;
+
+  useEffect(() => {
+    if (
+      embeddedTargetEnvironmentId === null ||
+      embeddedTargetThreadId === null ||
+      embeddedRegistrationId === null
+    )
+      return;
+    return subscribeFactoryEmbedTarget(setActiveFactoryEmbedTarget);
+  }, [embeddedRegistrationId, embeddedTargetEnvironmentId, embeddedTargetThreadId]);
+
+  useEffect(() => {
+    if (
+      embeddedTargetEnvironmentId === null ||
+      embeddedTargetThreadId === null ||
+      embeddedRegistrationId === null
+    )
+      return;
+    const expectedTarget = {
+      environmentId: embeddedTargetEnvironmentId,
+      threadId: embeddedTargetThreadId,
+      registrationId: embeddedRegistrationId,
+    };
+    const embeddedHandshakeMessage = resolveFactoryEmbedHandshakeMessage({
+      expectedTarget,
+      activeTarget: activeFactoryEmbedTarget,
+      routeTarget:
+        embeddedRouteEnvironmentId === null || embeddedRouteThreadId === null
+          ? null
+          : { environmentId: embeddedRouteEnvironmentId, threadId: embeddedRouteThreadId },
+      connectionPhase:
+        embeddedConnectionPhase === "connected"
+          ? "connected"
+          : embeddedConnectionPhase === "error" || embeddedConnectionPhase === "unsupported"
+            ? "blocked"
+            : embeddedConnectionPhase === "connecting" || embeddedConnectionPhase === "reconnecting"
+              ? "connecting"
+              : "disconnected",
+      threadState:
+        renderState === "missing" ? "missing" : renderState === "ready" ? "ready" : "pending",
+      ...(embeddedFailureCode === undefined ? {} : { failureCode: embeddedFailureCode }),
+      alreadyReady: embeddedReadyRef.current,
+    });
+    if (embeddedHandshakeMessage === null) return;
+    if (embeddedHandshakeMessage._tag === "ready") {
+      if (reportFactoryEmbedReady(embeddedHandshakeMessage.target)) {
+        embeddedReadyRef.current = true;
+        embeddedErrorRef.current = null;
+      }
+      return;
+    }
+    if (embeddedErrorRef.current === embeddedHandshakeMessage.code) return;
+    if (reportFactoryEmbedError(embeddedHandshakeMessage.target, embeddedHandshakeMessage.code))
+      embeddedErrorRef.current = embeddedHandshakeMessage.code;
+  }, [
+    activeFactoryEmbedTarget,
+    embeddedConnectionPhase,
+    embeddedFailureCode,
+    embeddedRegistrationId,
+    embeddedRouteEnvironmentId,
+    embeddedRouteThreadId,
+    embeddedTargetEnvironmentId,
+    embeddedTargetThreadId,
+    renderState,
+  ]);
 
   useEffect(() => {
     if (!inferredThreadRef || draftSession?.promotedTo) {
@@ -142,7 +241,7 @@ export function ThreadRouteView({ target }: { target: ThreadRouteTarget }) {
   }, [canonicalThreadRef, draftSession, navigate, target.kind]);
 
   useEffect(() => {
-    if (target.kind !== "server" || !bootstrapComplete) {
+    if (target.kind !== "server" || !bootstrapComplete || isFactoryEmbedRequested()) {
       return;
     }
     // Navigation already resolved onto this path, so a drop aimed here

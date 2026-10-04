@@ -22,6 +22,7 @@ import {
   rememberCheckoutIsRepo,
 } from "./ChatView.logic";
 import { useLoadBalancedEnvironment } from "../hooks/useLoadBalancedEnvironment";
+import { isFactoryEmbedRequested } from "../factoryEmbed";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 import {
   latestExecutedRun,
@@ -1511,6 +1512,7 @@ export default function ChatView(props: ChatViewProps) {
     reserveTitleBarControlInset = true,
     forceExpandedMobileComposer = false,
   } = props;
+  const factoryEmbedded = typeof window !== "undefined" && isFactoryEmbedRequested();
   const draftId = routeKind === "draft" ? props.draftId : null;
   const handleNewThread = useNewThreadHandler();
   const { settleThread, pinThread, confirmAndUnpinThread } = useThreadActions();
@@ -2869,7 +2871,8 @@ export default function ChatView(props: ChatViewProps) {
   });
   const modelPickerLockedProvider = supportsProviderSwitchingViaHandoff ? null : lockedProvider;
   const pullRequestsCapabilityKnown = serverConfig !== null;
-  const supportsPullRequests = serverConfig?.environment.capabilities.pullRequests === true;
+  const supportsPullRequests =
+    !factoryEmbedded && serverConfig?.environment.capabilities.pullRequests === true;
   const attachmentEnvironmentConfig = environmentById.get(environmentId)?.serverConfig ?? null;
   const attachmentUploadsCapabilityKnown = attachmentEnvironmentConfig !== null;
   const supportsQuestionAttachments =
@@ -5035,7 +5038,7 @@ export default function ChatView(props: ChatViewProps) {
     useRightPanelStore.getState().open(activeThreadRef, "files");
   }, [activeProject, activeThreadRef]);
   const supportsThreadPullRequests =
-    serverConfig?.environment.capabilities.threadPullRequests === true;
+    !factoryEmbedded && serverConfig?.environment.capabilities.threadPullRequests === true;
   const visiblePullRequests = visibleThreadPullRequests(
     (activeThreadShell ?? activeThread)?.pullRequests ?? [],
   );
@@ -5047,7 +5050,7 @@ export default function ChatView(props: ChatViewProps) {
     useRightPanelStore.getState().open(activeThreadRef, "pull-requests");
   }, [activeThreadRef, pullRequestsSurfaceAvailable]);
   const { state: deviceState, loaded: deviceStateLoaded } = useDeviceState(
-    activeThreadRef?.environmentId ?? null,
+    factoryEmbedded ? null : (activeThreadRef?.environmentId ?? null),
   );
   const [deviceSetupThread, setDeviceSetupThread] = useState<ScopedThreadRef | null>(null);
   const addDeviceSurface = useCallback(() => {
@@ -10604,6 +10607,7 @@ export default function ChatView(props: ChatViewProps) {
           {!rightPanelControlsAtRoot && !rightPanelControlsInPanel ? panelLayoutControls : null}
           {inlineRightPanelOwnsTitleBar ? threadPanelHeaderControl : null}
           <ChatHeader
+            factoryEmbedded={factoryEmbedded}
             activeThreadEnvironmentId={activeThread.environmentId}
             activeThreadId={activeThread.id}
             isServerThread={isServerThread}
@@ -11222,7 +11226,7 @@ export default function ChatView(props: ChatViewProps) {
           filesAvailable={activeProject !== null}
           pullRequestAvailable={pullRequestSurfaceAvailable}
           pullRequestsAvailable={pullRequestsSurfaceAvailable}
-          deviceAvailable={activeThreadRef !== null}
+          deviceAvailable={!factoryEmbedded && activeThreadRef !== null}
         >
           {rightPanelContent}
         </RightPanelTabs>
@@ -11277,7 +11281,7 @@ export default function ChatView(props: ChatViewProps) {
             filesAvailable={activeProject !== null}
             pullRequestAvailable={pullRequestSurfaceAvailable}
             pullRequestsAvailable={pullRequestsSurfaceAvailable}
-            deviceAvailable={activeThreadRef !== null}
+            deviceAvailable={!factoryEmbedded && activeThreadRef !== null}
           >
             {rightPanelContent}
           </RightPanelTabs>

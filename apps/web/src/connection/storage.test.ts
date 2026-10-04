@@ -1,8 +1,9 @@
 import {
   ConnectionTransientError,
   PrimaryConnectionTarget,
+  RelayConnectionTarget,
 } from "@t3tools/client-runtime/connection";
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId, type OrchestrationV2ShellSnapshot } from "@t3tools/contracts";
 import { ConnectionCatalogDocument } from "@t3tools/client-runtime/platform";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -16,6 +17,8 @@ import {
   makeBrowserGitHubRoutingPermissions,
   makeCatalogBackend,
   makeCatalogStore,
+  makeConnectionTargetStore,
+  factoryEmbeddedEnvironmentCacheStore,
 } from "./storage";
 
 const emptyCatalog = {
@@ -196,5 +199,55 @@ describe("browser GitHub routing permissions", () => {
       );
       expect(yield* second.get(entry)).toBe("off");
     }).pipe(Effect.scoped),
+  );
+});
+
+it.effect("does not reuse source-local shell caches in embedded mode", () =>
+  Effect.gen(function* () {
+    const environmentId = EnvironmentId.make("source-a");
+    const staleShell = {
+      schemaVersion: 1,
+      snapshotSequence: 1,
+      projects: [],
+      threads: [],
+      archivedThreads: [],
+    } satisfies OrchestrationV2ShellSnapshot;
+
+    yield* factoryEmbeddedEnvironmentCacheStore.saveShell(environmentId, staleShell);
+    expect(
+      Option.isNone(yield* factoryEmbeddedEnvironmentCacheStore.loadShell(environmentId)),
+    ).toBe(true);
+  }),
+);
+
+describe("embedded connection storage", () => {
+  it.effect("does not read persisted remote targets or disabled state", () =>
+    Effect.gen(function* () {
+      let reads = 0;
+      const catalog = {
+        read: Effect.sync(() => {
+          reads += 1;
+          return {
+            ...emptyCatalog,
+            targets: [
+              new RelayConnectionTarget({
+                environmentId: EnvironmentId.make("persisted-source"),
+                label: "Persisted source",
+              }),
+            ],
+            disabledEnvironmentIds: [EnvironmentId.make("disabled-source")],
+          };
+        }),
+      };
+      const embeddedStore = makeConnectionTargetStore(catalog, true);
+      expect(yield* embeddedStore.list).toEqual([]);
+      expect(yield* embeddedStore.listDisabled).toEqual([]);
+      expect(reads).toBe(0);
+
+      const ordinaryStore = makeConnectionTargetStore(catalog, false);
+      expect(yield* ordinaryStore.list).toHaveLength(1);
+      expect(yield* ordinaryStore.listDisabled).toEqual([EnvironmentId.make("disabled-source")]);
+      expect(reads).toBe(2);
+    }),
   );
 });

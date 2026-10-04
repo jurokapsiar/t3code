@@ -7,6 +7,7 @@ import {
   PrimaryConnectionTarget,
   RelayConnectionTarget,
   SshConnectionTarget,
+  FactoryEmbeddedConnectionTarget,
   type ConnectionTarget,
 } from "./model.ts";
 
@@ -80,6 +81,11 @@ export class BearerConnectionRegistration extends Schema.TaggedClass<BearerConne
   },
 ) {}
 
+export class FactoryEmbeddedConnectionRegistration extends Schema.TaggedClass<FactoryEmbeddedConnectionRegistration>()(
+  "FactoryEmbeddedConnectionRegistration",
+  { target: FactoryEmbeddedConnectionTarget },
+) {}
+
 export class SshConnectionRegistration extends Schema.TaggedClass<SshConnectionRegistration>()(
   "SshConnectionRegistration",
   {
@@ -107,15 +113,20 @@ export type ConnectionRegistration = typeof ConnectionRegistration.Type;
 export const PlatformConnectionRegistration = Schema.Union([
   PrimaryConnectionRegistration,
   BearerConnectionRegistration,
+  FactoryEmbeddedConnectionRegistration,
 ]);
 export type PlatformConnectionRegistration = typeof PlatformConnectionRegistration.Type;
 
 export function connectionRegistrationCatalogEntry(
-  registration: ConnectionRegistration | PrimaryConnectionRegistration,
+  registration:
+    | ConnectionRegistration
+    | PrimaryConnectionRegistration
+    | FactoryEmbeddedConnectionRegistration,
 ): ConnectionCatalogEntry {
   switch (registration._tag) {
     case "PrimaryConnectionRegistration":
     case "RelayConnectionRegistration":
+    case "FactoryEmbeddedConnectionRegistration":
       return {
         target: registration.target,
         profile: Option.none(),

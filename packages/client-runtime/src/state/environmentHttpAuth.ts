@@ -9,7 +9,11 @@ import * as Result from "effect/Result";
 import { FetchHttpClient, type HttpMethod } from "effect/unstable/http";
 
 import type { RemoteEnvironmentAuthorization } from "../authorization/service.ts";
-import type { PreparedConnection, PreparedHttpAuthorization } from "../connection/model.ts";
+import {
+  factoryEmbeddedHttpUrlMode,
+  type PreparedConnection,
+  type PreparedHttpAuthorization,
+} from "../connection/model.ts";
 import type { ManagedRelayDpopSigner } from "../relay/managedRelay.ts";
 import {
   executeEnvironmentHttpRequest,
@@ -110,6 +114,7 @@ export const executeAuthenticatedEnvironmentHttpRequest = Effect.fn(
 >(input: {
   readonly prepared: PreparedConnection;
   readonly httpUrlMode?: SourceHttpUrlMode;
+  readonly factoryOriginRequest?: boolean;
   readonly signer: Option.Option<ManagedRelayDpopSigner["Service"]>;
   readonly remoteAuthorization?: Option.Option<RemoteEnvironmentAuthorization["Service"]>;
   readonly method: HttpMethod.HttpMethod;
@@ -128,10 +133,13 @@ export const executeAuthenticatedEnvironmentHttpRequest = Effect.fn(
   Effect.Services<ReturnType<typeof makeEnvironmentHttpApiGroupClient<Group>>> | R
 > {
   let httpBaseUrl = input.prepared.httpBaseUrl;
+  const requestedMode =
+    input.httpUrlMode ??
+    (input.factoryOriginRequest === true ? undefined : factoryEmbeddedHttpUrlMode(input.prepared));
   const mode =
-    input.httpUrlMode === undefined
+    requestedMode === undefined
       ? undefined
-      : { ...input.httpUrlMode, environmentId: input.prepared.environmentId };
+      : { ...requestedMode, environmentId: input.prepared.environmentId };
   if (mode !== undefined && input.prepared.httpAuthorization !== null)
     return yield* new RemoteEnvironmentAuthFetchError({
       message: "Factory HTTP uses only the factory browser session.",

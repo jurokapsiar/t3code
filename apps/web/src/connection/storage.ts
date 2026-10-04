@@ -36,6 +36,7 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import { projectFaviconCache } from "../assets/projectFaviconCache";
+import { isFactoryEmbedRequested } from "../factoryEmbed";
 
 const DATABASE_NAME = "t3code:connection-runtime";
 const DATABASE_VERSION = 4;
@@ -45,6 +46,43 @@ const THREAD_STORE_NAME = "thread";
 const SERVER_CONFIG_STORE_NAME = "server-config";
 const VCS_REFS_STORE_NAME = "vcs-refs";
 const CATALOG_KEY = "document";
+
+export const factoryEmbeddedEnvironmentCacheStore = Persistence.EnvironmentCacheStore.of({
+  loadShell: () => Effect.succeedNone,
+  saveShell: () => Effect.void,
+  loadThread: () => Effect.succeedNone,
+  saveThread: () => Effect.void,
+  removeThread: () => Effect.void,
+  loadServerConfig: () => Effect.succeedNone,
+  saveServerConfig: () => Effect.void,
+  loadVcsRefs: () => Effect.succeedNone,
+  saveVcsRefs: () => Effect.void,
+  removeVcsRefs: () => Effect.void,
+  clearVcsRefs: () => Effect.void,
+  clear: () => Effect.void,
+});
+
+export function makeConnectionTargetStore(
+  catalog: {
+    readonly read: Effect.Effect<ConnectionCatalogDocumentType, ConnectionTransientError>;
+  },
+  embedded: boolean,
+) {
+  return Persistence.ConnectionTargetStore.of({
+    list: embedded
+      ? Effect.succeed([])
+      : catalog.read.pipe(
+          Effect.map((document) => document.targets),
+          Effect.mapError((cause) => persistenceError("list-targets", cause)),
+        ),
+    listDisabled: embedded
+      ? Effect.succeed([])
+      : catalog.read.pipe(
+          Effect.map((document) => document.disabledEnvironmentIds),
+          Effect.mapError((cause) => persistenceError("list-disabled-targets", cause)),
+        ),
+  });
+}
 const StoredShellSnapshot = StoredOrchestrationShellSnapshot;
 const StoredShellSnapshotJson = Schema.fromJsonString(StoredShellSnapshot);
 const StoredThreadSnapshot = StoredOrchestrationThreadSnapshot;
@@ -463,16 +501,8 @@ export const connectionStorageLayer = Layer.effectContext(
     const catalog = yield* makeCatalogStore(makeCatalogBackend(database));
     const githubRoutingPermissions = makeBrowserGitHubRoutingPermissions();
 
-    const targetStore = Persistence.ConnectionTargetStore.of({
-      list: catalog.read.pipe(
-        Effect.map((document) => document.targets),
-        Effect.mapError((cause) => persistenceError("list-targets", cause)),
-      ),
-      listDisabled: catalog.read.pipe(
-        Effect.map((document) => document.disabledEnvironmentIds),
-        Effect.mapError((cause) => persistenceError("list-disabled-targets", cause)),
-      ),
-    });
+    const embedded = isFactoryEmbedRequested();
+    const targetStore = makeConnectionTargetStore(catalog, embedded);
     const registrationStore = Persistence.ConnectionRegistrationStore.of({
       register: (registration) =>
         catalog
@@ -558,7 +588,7 @@ export const connectionStorageLayer = Layer.effectContext(
           ),
         })),
     });
-    const cacheStore = Persistence.EnvironmentCacheStore.of({
+    const persistentCacheStore = Persistence.EnvironmentCacheStore.of({
       loadShell: (environmentId) =>
         readDatabaseValue(database, SHELL_STORE_NAME, environmentId).pipe(
           Effect.tap(() => Effect.promise(() => projectFaviconCache.hydrate())),
@@ -758,6 +788,7 @@ export const connectionStorageLayer = Layer.effectContext(
           { concurrency: "unbounded", discard: true },
         ).pipe(Effect.mapError((cause) => persistenceError("clear-environment", cause))),
     });
+    const cacheStore = embedded ? factoryEmbeddedEnvironmentCacheStore : persistentCacheStore;
 
     return Context.make(Persistence.ConnectionTargetStore, targetStore).pipe(
       Context.add(GitHubRoutingPermissions, githubRoutingPermissions),

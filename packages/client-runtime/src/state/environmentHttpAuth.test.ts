@@ -1,6 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 import {
   EnvironmentId,
+  FactoryRegistrationId,
   ORCHESTRATION_PROTOCOL_HEADER,
   ORCHESTRATION_PROTOCOL_VERSION_TEXT,
   ProjectId,
@@ -22,6 +23,7 @@ import type { HttpClient } from "effect/unstable/http";
 import * as RemoteEnvironmentAuthorization from "../authorization/service.ts";
 import {
   ConnectionTransientError,
+  FactoryEmbeddedConnectionTarget,
   RelayConnectionTarget,
   type PreparedConnection,
   type PreparedHttpAuthorization,
@@ -32,6 +34,7 @@ import * as PullRequestDiffLoader from "./pullRequestDiffHttp.ts";
 import { withOrchestrationProtocolHeader } from "./environmentHttpAuth.ts";
 import { fetchEnvironmentSessionState } from "./session.ts";
 import { fetchEnvironmentShellSnapshot } from "./shellSnapshotHttp.ts";
+import * as ShellSnapshotHttp from "./shellSnapshotHttp.ts";
 import * as ThreadSnapshotLoader from "./threadSnapshotHttp.ts";
 import {
   boundedThreadSnapshotLoaderLayer,
@@ -42,6 +45,8 @@ import { v2Projection } from "./orchestrationV2TestFixtures.ts";
 
 const encodeThreadSnapshot = Schema.encodeSync(OrchestrationV2ThreadDetailSnapshot);
 const encodeBoundedSnapshot = Schema.encodeSync(OrchestrationV2ThreadBoundedSnapshot);
+const decodeFactoryRegistrationIdSync = Schema.decodeSync(FactoryRegistrationId);
+const decodeFactoryRegistrationId = Schema.decodeEffect(FactoryRegistrationId);
 
 const TARGET = new RelayConnectionTarget({
   environmentId: EnvironmentId.make("environment-1"),
@@ -55,6 +60,25 @@ const PREPARED: PreparedConnection = {
   httpAuthorization: { _tag: "Dpop", accessToken: "expired-token", expiresAtEpochMs: 0 },
   target: TARGET,
 };
+function embeddedPreparedConnection(): PreparedConnection {
+  const environmentId = EnvironmentId.make("source-a");
+  const target = new FactoryEmbeddedConnectionTarget({
+    environmentId,
+    label: "Embedded source",
+    registrationId: decodeFactoryRegistrationIdSync("registration-a"),
+    origin: "https://factory.test",
+  });
+  return {
+    environmentId,
+    label: target.label,
+    httpBaseUrl: "https://factory.test/factory/env/registration-a/?environmentId=source-a",
+    socketUrl:
+      "wss://factory.test/factory/env/registration-a/ws?environmentId=source-a&orchestrationProtocol=2",
+    httpAuthorization: null,
+    target,
+  };
+}
+
 const CURRENT_ORIGIN = "https://current.example.test";
 const RENEWED_ORIGIN = "https://renewed.example.test";
 const DIFF = {
@@ -242,6 +266,73 @@ const LOADERS: ReadonlyArray<{
 ];
 
 describe("authenticated environment HTTP requests", () => {
+  it.effect("checks embedded Factory session permissions at the Factory origin", () =>
+    Effect.gen(function* () {
+      const harness = makeHarness(() => Response.json(SESSION));
+      const result = yield* fetchEnvironmentSessionState({
+        ...harness.input,
+        prepared: embeddedPreparedConnection(),
+      }).pipe(Effect.provide(harness.httpLayer));
+
+      expect(result).toEqual(SESSION);
+      expect(harness.calls).toHaveLength(1);
+      expect(harness.calls[0]!.url).toBe("https://factory.test/api/auth/session");
+      expect(new Headers(harness.calls[0]!.init.headers).get("authorization")).toBeNull();
+      expect(harness.calls[0]!.init.credentials).toBe("include");
+      expect(harness.authorizations).toEqual([]);
+    }),
+  );
+
+  it.effect("uses the embedded shell WebSocket snapshot instead of an unlisted HTTP path", () =>
+    Effect.gen(function* () {
+      const harness = makeHarness(() => Response.json(SHELL));
+      const layer = ShellSnapshotHttp.layer.pipe(Layer.provide(harness.httpLayer));
+      const loader = yield* ShellSnapshotHttp.ShellSnapshotLoader.pipe(Effect.provide(layer));
+
+      expect(Option.isNone(yield* loader.load(embeddedPreparedConnection()))).toBe(true);
+      expect(harness.calls).toHaveLength(0);
+    }),
+  );
+
+  it.effect.each(
+    LOADERS.filter((loader) =>
+      ["thread snapshot", "bounded thread snapshot", "older thread history"].includes(loader.name),
+    ),
+  )("keeps embedded $name traffic under the selected Factory relay", (loader) =>
+    Effect.gen(function* () {
+      const environmentId = EnvironmentId.make("source-a");
+      const registrationId = yield* decodeFactoryRegistrationId("registration-a");
+      const target = new FactoryEmbeddedConnectionTarget({
+        environmentId,
+        label: "Embedded source",
+        registrationId,
+        origin: "https://factory.test",
+      });
+      const harness = makeHarness(() => Response.json(loader.response));
+      const result = yield* loader
+        .load({
+          ...harness.input,
+          prepared: {
+            ...embeddedPreparedConnection(),
+            environmentId,
+            target,
+          },
+        })
+        .pipe(Effect.provide(harness.httpLayer));
+
+      expect(result).toEqual(loader.expected);
+      expect(harness.calls).toHaveLength(1);
+      const request = harness.calls[0]!;
+      const url = new URL(request.url);
+      expect(url.origin).toBe("https://factory.test");
+      expect(url.pathname).toBe(`/factory/env/registration-a${loader.path}`);
+      expect(url.searchParams.get("environmentId")).toBe("source-a");
+      expect(new Headers(request.init.headers).get("authorization")).toBeNull();
+      expect(request.init.credentials).toBe("include");
+      expect(harness.authorizations).toEqual([]);
+    }),
+  );
+
   it.effect.each(LOADERS)("rejects an invalid $name response", (loader) =>
     Effect.gen(function* () {
       const harness = makeHarness(() => Response.json({}));

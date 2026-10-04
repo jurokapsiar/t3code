@@ -517,6 +517,12 @@ describe("project favicon URL cache", () => {
 it("resolves relay assets without dropping their prefix and exposes rejection", () => {
   const mode = { mode: "factory-relay" as const, environmentId: "env-a" };
   expect(
+    resolveAssetUrl(
+      "https://factory.test/factory/env/a/?environmentId=env-a",
+      "/api/assets/signed/file.png",
+    ),
+  ).toBe("https://factory.test/factory/env/a/api/assets/signed/file.png?environmentId=env-a");
+  expect(
     resolveAssetUrl("https://factory.test/factory/env/a/", "/api/assets/signed/file.png", mode),
   ).toBe("https://factory.test/factory/env/a/api/assets/signed/file.png?environmentId=env-a");
   expect(

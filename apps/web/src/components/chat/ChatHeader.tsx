@@ -38,6 +38,7 @@ interface ChatHeaderProps {
   activeThreadTitle: string;
   /** Drafts have no server thread yet, so the title carries no action menu. */
   isServerThread: boolean;
+  factoryEmbedded: boolean;
   activeProject: EnvironmentProject | null;
   rightPanelOpen: boolean;
   onNewThreadInProject: () => void;
@@ -70,6 +71,7 @@ export const ChatHeader = memo(function ChatHeader({
   activeThreadId,
   activeThreadTitle,
   isServerThread,
+  factoryEmbedded,
   activeProject,
   rightPanelOpen,
   onNewThreadInProject,
@@ -134,7 +136,7 @@ export const ChatHeader = memo(function ChatHeader({
     [activeThreadEnvironmentId, activeThreadId, activeThreadTitle, updateThreadMetadata],
   );
   const { openMenu, closeMenu } = useThreadActionMenu({
-    threadRef: isServerThread ? activeThreadRef : null,
+    threadRef: isServerThread && !factoryEmbedded ? activeThreadRef : null,
     projectCwd: activeProjectCwd,
     onStartRename: startRename,
   });
@@ -234,7 +236,7 @@ export const ChatHeader = memo(function ChatHeader({
         "flex min-w-0 flex-1 items-center gap-2 sm:gap-3",
         rightPanelOpen ? "pr-10" : "pr-24",
       )}
-      onContextMenu={handleHeaderContextMenu}
+      onContextMenu={factoryEmbedded ? undefined : handleHeaderContextMenu}
     >
       <WorkspaceBreadcrumb
         ariaLabel="Thread breadcrumb"
@@ -246,24 +248,33 @@ export const ChatHeader = memo(function ChatHeader({
         {activeProject ? (
           <>
             <WorkspaceBreadcrumbItem className="shrink">
-              <Tooltip>
-                <TooltipTrigger
-                  render={
-                    <button
-                      type="button"
-                      aria-label={`New thread in ${activeProjectName}`}
-                      onClick={onNewThreadInProject}
-                      className="inline-flex min-w-0 max-w-full cursor-pointer items-center gap-1.5 rounded-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-                    />
-                  }
-                >
+              {factoryEmbedded ? (
+                <div className="inline-flex min-w-0 max-w-full items-center gap-1.5 text-muted-foreground">
                   <ProjectFavicon project={activeProject} className="size-3.5" />
                   <WorkspaceBreadcrumbText className="max-w-40">
                     {activeProjectName}
                   </WorkspaceBreadcrumbText>
-                </TooltipTrigger>
-                <TooltipPopup side="top">New thread in {activeProjectName}</TooltipPopup>
-              </Tooltip>
+                </div>
+              ) : (
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <button
+                        type="button"
+                        aria-label={`New thread in ${activeProjectName}`}
+                        onClick={onNewThreadInProject}
+                        className="inline-flex min-w-0 max-w-full cursor-pointer items-center gap-1.5 rounded-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                      />
+                    }
+                  >
+                    <ProjectFavicon project={activeProject} className="size-3.5" />
+                    <WorkspaceBreadcrumbText className="max-w-40">
+                      {activeProjectName}
+                    </WorkspaceBreadcrumbText>
+                  </TooltipTrigger>
+                  <TooltipPopup side="top">New thread in {activeProjectName}</TooltipPopup>
+                </Tooltip>
+              )}
             </WorkspaceBreadcrumbItem>
             <WorkspaceBreadcrumbSeparator>
               <WorkspaceBreadcrumbText>/</WorkspaceBreadcrumbText>
@@ -293,7 +304,7 @@ export const ChatHeader = memo(function ChatHeader({
               onFocus={(event) => event.currentTarget.select()}
               onKeyDown={handleRenameKeyDown}
             />
-          ) : isServerThread ? (
+          ) : isServerThread && !factoryEmbedded ? (
             <Tooltip>
               <TooltipTrigger
                 render={

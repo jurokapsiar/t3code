@@ -207,6 +207,9 @@ function ChatRouteGlobalShortcuts() {
 }
 
 function ChatRouteLayout() {
+  const embedded =
+    typeof window !== "undefined" &&
+    new URL(window.location.href).searchParams.has("factoryEmbedded");
   // Both thread routes render here, not in their own leaf components, so the
   // draft-to-thread promotion keeps one ChatView mounted across the swap.
   const threadTarget = useParams({
@@ -215,7 +218,7 @@ function ChatRouteLayout() {
   });
   return (
     <>
-      <ChatRouteGlobalShortcuts />
+      {embedded ? null : <ChatRouteGlobalShortcuts />}
       {threadTarget ? <ThreadRouteView target={threadTarget} /> : <Outlet />}
     </>
   );
@@ -223,6 +226,7 @@ function ChatRouteLayout() {
 
 export const Route = createFileRoute("/_chat")({
   beforeLoad: async ({ context }) => {
+    if (context.authGateState.status === "factory-embedded") return;
     if (
       context.authGateState.status !== "authenticated" &&
       context.authGateState.status !== "hosted-static"

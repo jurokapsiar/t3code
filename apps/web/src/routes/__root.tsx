@@ -80,6 +80,16 @@ import {
 import { getDesktopSnapShotBridge } from "../lib/desktopSnapShot";
 import { installDesktopPasteAsText } from "../lib/desktopPasteAsText";
 import { shouldResumeSnapShotSetupOnStartup } from "../lib/snapShotSetupResume";
+import {
+  activateFactoryEmbed,
+  isFactoryEmbedRequested,
+  parseFactoryEmbedRoute,
+  postFactoryEmbedError,
+  reportFactoryEmbedError,
+  waitForFactoryFrameInit,
+  type FactoryEmbedRoute,
+  type FactoryEmbedError,
+} from "../factoryEmbed";
 
 export const Route = createRootRoute({
   beforeLoad: async ({ location }) => {
@@ -88,6 +98,14 @@ export const Route = createRootRoute({
         authGateState: {
           status: "hosted-pairing",
         } as const,
+        factoryEmbedRoute: null,
+      };
+    }
+
+    if (location.pathname !== "/pair" && isFactoryEmbedRequested(window.location.href)) {
+      return {
+        authGateState: { status: "factory-embedded" } as const,
+        factoryEmbedRoute: parseFactoryEmbedRoute(window.location.href),
       };
     }
 
@@ -96,6 +114,7 @@ export const Route = createRootRoute({
         authGateState: {
           status: "hosted-static",
         } as const,
+        factoryEmbedRoute: null,
       };
     }
 
@@ -110,6 +129,7 @@ export const Route = createRootRoute({
     }
     return {
       authGateState,
+      factoryEmbedRoute: null,
     };
   },
   component: RootRouteView,
@@ -119,6 +139,87 @@ export const Route = createRootRoute({
     meta: [{ name: "title", content: APP_DISPLAY_NAME }],
   }),
 });
+
+function FactoryEmbeddedFrameRoot({
+  route,
+  children,
+}: {
+  readonly route: FactoryEmbedRoute | null;
+  readonly children: React.ReactNode;
+}) {
+  const target = route?.target ?? null;
+  const [status, setStatus] = useState<{
+    readonly kind: "waiting" | "connecting" | "ready" | "error";
+    readonly code?: string;
+  }>(target === null ? { kind: "error", code: "invalid-route" } : { kind: "waiting" });
+
+  useEffect(() => {
+    document.title = APP_DISPLAY_NAME;
+    if (target === null) return;
+    let activeCleanup: (() => void) | undefined;
+    let readyTimeout: number | undefined;
+    let cancelled = false;
+    const onMessage = (message: import("@t3tools/contracts").FactoryFrameMessage) => {
+      if (message._tag === "ready") {
+        if (readyTimeout !== undefined) window.clearTimeout(readyTimeout);
+        setStatus({ kind: "ready" });
+      } else {
+        if (readyTimeout !== undefined) window.clearTimeout(readyTimeout);
+        setStatus({ kind: "error", code: message.code });
+      }
+    };
+    void waitForFactoryFrameInit(target).then(
+      () => {
+        if (cancelled) return;
+        activeCleanup = activateFactoryEmbed(target, onMessage);
+        setStatus({ kind: "connecting" });
+        readyTimeout = window.setTimeout(() => reportFactoryEmbedError(target, "timeout"), 20_000);
+      },
+      (error: FactoryEmbedError) => {
+        if (cancelled) return;
+        const code = error?._tag === "FactoryEmbedError" ? error.code : "invalid-message";
+        postFactoryEmbedError(target, code);
+        setStatus({ kind: "error", code });
+      },
+    );
+    return () => {
+      cancelled = true;
+      if (readyTimeout !== undefined) window.clearTimeout(readyTimeout);
+      activeCleanup?.();
+    };
+  }, [target]);
+
+  const errorCopy: Record<string, string> = {
+    "invalid-route": "This embedded chat route is not valid.",
+    "invalid-parent": "Open this chat from Factory.",
+    "invalid-message": "Factory did not send a valid chat request.",
+    "target-mismatch": "This thread does not match the selected source.",
+    "thread-unavailable": "This thread is not available on the source.",
+    "source-unavailable": "The source is not connected.",
+    "source-stale": "The source data is not up to date.",
+    "source-authentication": "The source did not accept the Factory connection.",
+    "source-protocol": "Update Factory and the source to compatible versions.",
+    "connection-failed": "Factory could not connect to the source.",
+    timeout: "Factory did not finish opening this chat in time.",
+  };
+  if (status.kind === "error") {
+    return (
+      <main className="flex min-h-svh items-center justify-center bg-background p-6 text-foreground">
+        <p role="alert" className="max-w-md text-center text-sm">
+          {errorCopy[status.code ?? "invalid-route"] ?? "Factory could not open this chat."}
+        </p>
+      </main>
+    );
+  }
+  if (status.kind === "waiting") {
+    return (
+      <main className="flex min-h-svh items-center justify-center bg-background p-6 text-muted-foreground">
+        <p className="text-sm">Waiting for Factory…</p>
+      </main>
+    );
+  }
+  return <>{children}</>;
+}
 
 function RootRouteNotFoundView() {
   return (
@@ -138,7 +239,7 @@ function RootRouteNotFoundView() {
 function RootRouteView() {
   useEffect(() => installDesktopPasteAsText(window.desktopBridge, window), []);
   const pathname = useLocation({ select: (location) => location.pathname });
-  const { authGateState } = Route.useRouteContext();
+  const { authGateState, factoryEmbedRoute } = Route.useRouteContext();
   const primaryEnvironmentAuthenticated = authGateState.status === "authenticated";
   const returningFromWelcomeRef = useRef(pathname === "/welcome");
 
@@ -156,6 +257,14 @@ function RootRouteView() {
       window.cancelAnimationFrame(frame);
     };
   }, [pathname]);
+
+  if (authGateState.status === "factory-embedded") {
+    return (
+      <FactoryEmbeddedFrameRoot route={factoryEmbedRoute}>
+        <Outlet />
+      </FactoryEmbeddedFrameRoot>
+    );
+  }
 
   if (pathname === "/pair" || pathname === "/connect") {
     return (

@@ -1,5 +1,6 @@
 import {
   EnvironmentId,
+  FactoryRegistrationId,
   ORCHESTRATION_PROTOCOL_VERSION,
   type DesktopSshEnvironmentTarget,
 } from "@t3tools/contracts";
@@ -9,6 +10,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 import * as Tracer from "effect/Tracer";
 
 import * as ConnectionResolver from "./resolver.ts";
@@ -25,6 +27,7 @@ import {
 import * as ConnectionCredentialStore from "./credentialStore.ts";
 import {
   BearerConnectionTarget,
+  FactoryEmbeddedConnectionTarget,
   ConnectionTransientError,
   PrimaryConnectionTarget,
   RelayConnectionTarget,
@@ -39,6 +42,7 @@ import {
   makeGitHubRoutingPermissions,
 } from "./githubRoutingPermissions.ts";
 
+const decodeFactoryRegistrationId = Schema.decodeEffect(FactoryRegistrationId);
 const ENVIRONMENT_ID = EnvironmentId.make("environment-1");
 const ENDPOINT = {
   httpBaseUrl: "https://environment.example.test",
@@ -245,6 +249,51 @@ describe("ConnectionResolver", () => {
         httpAuthorization: null,
         target,
       });
+    }),
+  );
+
+  it.effect("keeps duplicate source-local routes isolated by registration and environment", () =>
+    Effect.gen(function* () {
+      const brokerLayer = yield* makeDependencies();
+      const broker = yield* ConnectionResolver.ConnectionResolver.pipe(Effect.provide(brokerLayer));
+      const registrationA = yield* decodeFactoryRegistrationId("registration-a");
+      const registrationB = yield* decodeFactoryRegistrationId("registration-b");
+      const targets = [
+        new FactoryEmbeddedConnectionTarget({
+          environmentId: EnvironmentId.make("source-a"),
+          label: "Embedded source",
+          registrationId: registrationA,
+          origin: "https://factory.test",
+        }),
+        new FactoryEmbeddedConnectionTarget({
+          environmentId: EnvironmentId.make("source-b"),
+          label: "Embedded source",
+          registrationId: registrationB,
+          origin: "https://factory.test",
+        }),
+      ];
+      const prepared = yield* Effect.forEach(targets, (target) =>
+        broker.prepare(catalogEntry(target)),
+      );
+
+      expect(prepared.map((connection) => new URL(connection.socketUrl).pathname)).toEqual([
+        "/factory/env/registration-a/ws",
+        "/factory/env/registration-b/ws",
+      ]);
+      expect(
+        prepared.map((connection) =>
+          new URL(connection.socketUrl).searchParams.get("environmentId"),
+        ),
+      ).toEqual(["source-a", "source-b"]);
+      expect(prepared.map((connection) => new URL(connection.httpBaseUrl).pathname)).toEqual([
+        "/factory/env/registration-a/",
+        "/factory/env/registration-b/",
+      ]);
+      expect(prepared.every((connection) => connection.httpAuthorization === null)).toBe(true);
+      expect(prepared.map((connection) => connection.target._tag)).toEqual([
+        "FactoryEmbeddedConnectionTarget",
+        "FactoryEmbeddedConnectionTarget",
+      ]);
     }),
   );
 

@@ -9,6 +9,9 @@ import {
 export const Route = createFileRoute("/pair")({
   beforeLoad: async ({ context }) => {
     const { authGateState } = context;
+    if (authGateState.status === "factory-embedded") {
+      throw redirect({ to: "/", replace: true });
+    }
     if (authGateState.status === "hosted-pairing") {
       return {
         authGateState,

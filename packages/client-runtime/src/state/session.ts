@@ -51,9 +51,18 @@ export const fetchEnvironmentSessionState = Effect.fn(
 }) {
   return yield* executeAuthenticatedEnvironmentHttpRequest({
     ...input,
+    ...(input.prepared.target._tag === "FactoryEmbeddedConnectionTarget"
+      ? { factoryOriginRequest: true }
+      : {}),
     group: "auth",
     method: "GET",
-    url: (httpBaseUrl) => environmentEndpointUrl(httpBaseUrl, "/api/auth/session"),
+    url: (httpBaseUrl) =>
+      environmentEndpointUrl(
+        input.prepared.target._tag === "FactoryEmbeddedConnectionTarget"
+          ? input.prepared.target.origin
+          : httpBaseUrl,
+        "/api/auth/session",
+      ),
     timeoutMs: input.timeoutMs ?? DEFAULT_SESSION_STATE_TIMEOUT_MS,
     request: ({ client, headers }) => client.session({ headers }),
     // This endpoint returns 200 with authenticated:false for expired credentials.

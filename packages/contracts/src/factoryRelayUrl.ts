@@ -1,3 +1,7 @@
+import * as Schema from "effect/Schema";
+
+import { FactoryRegistrationId } from "./factory.ts";
+
 // eslint-disable-next-line no-control-regex -- URL validation must reject encoded control bytes.
 const controlCharacters = /[\u0000-\u001f]/;
 
@@ -12,6 +16,14 @@ export class SourceHttpUrlError extends Error {
     super("The source HTTP URL is not allowed.");
     this.name = this._tag;
   }
+}
+
+const isFactoryRegistrationId = Schema.is(FactoryRegistrationId);
+
+export function factoryRelayPrefix(registrationId: string): string | null {
+  if (!isFactoryRegistrationId(registrationId) || registrationId === "." || registrationId === "..")
+    return null;
+  return "/factory/env/" + encodeURIComponent(registrationId) + "/";
 }
 
 /** Check before URL parsing: URL normalizes dot segments, including encoded dots. */
@@ -120,23 +132,61 @@ export function resolveFactoryRelayUrl(prefix: string, sourcePath: string): stri
   }
 }
 
+/**
+ * The embedded connection carries its environment id in an internal, credential-free base URL.
+ * Keep the public relay prefix itself query-free and validate this metadata before using it.
+ */
+function embeddedRelayBase(
+  base: string,
+): { readonly prefix: string; readonly environmentId: string } | null {
+  try {
+    const url = new URL(base);
+    const ids = url.searchParams.getAll("environmentId");
+    const match = /^\/factory\/env\/([^/]+)\/$/.exec(url.pathname);
+    if (
+      !match ||
+      ids.length !== 1 ||
+      !ids[0]?.trim() ||
+      [...url.searchParams.keys()].some((key) => key !== "environmentId") ||
+      url.hash ||
+      url.username ||
+      url.password ||
+      !["http:", "https:"].includes(url.protocol)
+    )
+      return null;
+    const registrationId = decodeURIComponent(match[1]!);
+    if (factoryRelayPrefix(registrationId) !== url.pathname) return null;
+    url.search = "";
+    return { prefix: url.toString(), environmentId: ids[0] };
+  } catch {
+    return null;
+  }
+}
+
 /** Ordinary clients keep native URL semantics. Relay callers fail visibly, never fall back to a source. */
 export function resolveSourceHttpUrl(
   base: string,
   path: string,
   options?: SourceHttpUrlMode,
 ): string {
-  if (options?.mode !== "factory-relay") {
+  const inferred = options === undefined ? embeddedRelayBase(base) : null;
+  const relay = options?.mode === "factory-relay" ? embeddedRelayBase(base) : inferred;
+  if (options?.mode !== "factory-relay" && inferred === null) {
     try {
       return new URL(path, base).toString();
     } catch {
       throw new SourceHttpUrlError();
     }
   }
-  const result = resolveFactoryRelayUrl(base, path);
+  const result = resolveFactoryRelayUrl(relay?.prefix ?? base, path);
   if (result === null) throw new SourceHttpUrlError();
-  if (options.environmentId === undefined) return result;
-  if (!options.environmentId.trim() || controlCharacters.test(options.environmentId))
+  const environmentId = options?.environmentId ?? relay?.environmentId;
+  if (environmentId === undefined) return result;
+  if (
+    !environmentId.trim() ||
+    controlCharacters.test(environmentId) ||
+    (relay !== null && relay.environmentId !== environmentId)
+  )
     throw new SourceHttpUrlError();
-  return `${result}${result.includes("?") ? "&" : "?"}environmentId=${encodeURIComponent(options.environmentId)}`;
+  return `${result}${result.includes("?") ? "&" : "?"}environmentId=${encodeURIComponent(environmentId)}`;
 }

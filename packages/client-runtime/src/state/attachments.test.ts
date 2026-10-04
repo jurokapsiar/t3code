@@ -8,6 +8,7 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import { AsyncResult, Atom, AtomRegistry } from "effect/unstable/reactivity";
+import { resolveAssetUrl } from "./assets.ts";
 
 import type { AtomCommand } from "./runtime.ts";
 import {
@@ -127,6 +128,28 @@ describe("runAttachmentUploadCycle", () => {
 });
 
 describe("factory attachment URL mode", () => {
+  it("infers the embedded relay prefix for native composer uploads", async () => {
+    const transferred: string[] = [];
+    const httpBaseUrl = "https://factory.test/factory/env/a/?environmentId=environment-1";
+    const result = await runAttachmentUploadCycle({
+      registry,
+      createUploadUrl: makeCreateUploadUrl("embedded-upload"),
+      remove,
+      environmentId,
+      upload: uploadInput,
+      resolveUploadUrl: (relativeUrl) => resolveAssetUrl(httpBaseUrl, relativeUrl),
+      transport: (url) => {
+        transferred.push(url);
+        return { done: Promise.resolve(), abort: () => {} };
+      },
+    });
+
+    expect(result).toMatchObject({ status: "uploaded", attachmentId: "embedded-upload" });
+    expect(transferred).toEqual([
+      "https://factory.test/factory/env/a/api/attachments/upload/embedded-upload?environmentId=environment-1",
+    ]);
+  });
+
   it("uses the same scoped resolver for upload and rejects absolute source grants visibly", async () => {
     const transferred: string[] = [];
     const inputs = {

@@ -15,6 +15,8 @@ import {
   type PlatformConnectionRegistration,
   PrimaryConnectionRegistration,
   PrimaryConnectionTarget,
+  FactoryEmbeddedConnectionRegistration,
+  FactoryEmbeddedConnectionTarget,
   Wakeups,
 } from "@t3tools/client-runtime/connection";
 import { bootstrapRemoteBearerSession } from "@t3tools/client-runtime/authorization";
@@ -26,6 +28,7 @@ import {
   type DesktopBridge,
   type DesktopEnvironmentBootstrap,
   type DesktopSshEnvironmentTarget,
+  type FactoryFrameTarget,
   PRIMARY_LOCAL_ENVIRONMENT_ID,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
@@ -56,9 +59,29 @@ import {
   type DesktopSecondaryBootstrapsRead,
 } from "./desktopLocal";
 import { connectionStorageLayer } from "./storage";
+import { isFactoryEmbedRequested, subscribeFactoryEmbedTarget } from "../factoryEmbed";
+import { factoryRelayPrefix } from "@t3tools/contracts/factoryRelayUrl";
 import { clientPresentationMetadata } from "./clientMetadata";
 
 let nextObservedRpcRequestId = 0;
+
+function embeddedFactoryRegistrations(
+  target: FactoryFrameTarget | null,
+): ReadonlyArray<PlatformConnectionRegistration> {
+  if (target === null || typeof window === "undefined") return [];
+  const prefix = factoryRelayPrefix(target.registrationId);
+  if (prefix === null || !/^https?:$/.test(window.location.protocol)) return [];
+  return [
+    new FactoryEmbeddedConnectionRegistration({
+      target: new FactoryEmbeddedConnectionTarget({
+        environmentId: target.environmentId,
+        label: "Embedded source",
+        registrationId: target.registrationId,
+        origin: window.location.origin,
+      }),
+    }),
+  ];
+}
 
 function currentNetworkStatus(): "unknown" | "offline" | "online" {
   if (typeof navigator === "undefined") {
@@ -461,6 +484,20 @@ export function secondaryRegistrationsToRetainAfterTopologyRead(
 const platformConnectionSourceLayer = Layer.effect(
   PlatformConnectionSource.PlatformConnectionSource,
   Effect.gen(function* () {
+    if (isFactoryEmbedRequested()) {
+      const registrations = Stream.callback<ReadonlyArray<PlatformConnectionRegistration>>(
+        (queue) =>
+          Effect.acquireRelease(
+            Effect.sync(() =>
+              subscribeFactoryEmbedTarget((target) =>
+                Queue.offerUnsafe(queue, embeddedFactoryRegistrations(target)),
+              ),
+            ),
+            (unsubscribe) => Effect.sync(unsubscribe),
+          ).pipe(Effect.asVoid),
+      );
+      return PlatformConnectionSource.PlatformConnectionSource.of({ registrations });
+    }
     if (isHostedStaticApp() || isLocalEnvironmentDisabled()) {
       return PlatformConnectionSource.PlatformConnectionSource.of({
         registrations: Stream.empty,

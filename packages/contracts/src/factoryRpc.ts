@@ -11,6 +11,7 @@ import {
 } from "./auth.ts";
 import {
   FactoryEndpoint,
+  FactoryEmbeddedRoute,
   FactoryEnvironmentView,
   FactoryError,
   FactoryFavorite,
@@ -23,11 +24,12 @@ import {
   FactoryRemoteTarget,
   FactoryRegistrationId,
 } from "./factory.ts";
-import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { NonNegativeInt, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 export const FactoryRpcMethods = {
   controlAuthorization: "factory.source.controlAuthorization",
   environmentsList: "factory.environments.list",
+  environmentsGetEmbeddedRoute: "factory.environments.getEmbeddedRoute",
   environmentsEnroll: "factory.environments.enroll",
   environmentsUpdate: "factory.environments.update",
   environmentsRemove: "factory.environments.remove",
@@ -57,6 +59,7 @@ export type FactoryRelayScope = typeof FactoryRelayScope.Type;
 export const FactoryRpcMethodScopes = {
   [FactoryRpcMethods.controlAuthorization]: AuthFactoryReadScope,
   [FactoryRpcMethods.environmentsList]: AuthFactoryReadScope,
+  [FactoryRpcMethods.environmentsGetEmbeddedRoute]: AuthFactoryReadScope,
   [FactoryRpcMethods.environmentsEnroll]: AuthFactoryAdminScope,
   [FactoryRpcMethods.environmentsUpdate]: AuthFactoryAdminScope,
   [FactoryRpcMethods.environmentsRemove]: AuthFactoryAdminScope,
@@ -139,6 +142,15 @@ export const FactoryEnvironmentsListRpc = Rpc.make(FactoryRpcMethods.environment
   success: Schema.Array(FactoryEnvironmentView),
   error: FactoryRpcError,
 });
+
+export const FactoryEnvironmentsGetEmbeddedRouteRpc = Rpc.make(
+  FactoryRpcMethods.environmentsGetEmbeddedRoute,
+  {
+    payload: Schema.Struct({ target: FactoryRemoteTarget, threadId: ThreadId }),
+    success: FactoryEmbeddedRoute,
+    error: FactoryRpcError,
+  },
+);
 
 export const FactoryEnvironmentsEnrollRpc = Rpc.make(FactoryRpcMethods.environmentsEnroll, {
   payload: FactoryEnvironmentEnrollInput,
@@ -243,6 +255,7 @@ export const FactoryOverviewSubscribeRpc = Rpc.make(FactoryRpcMethods.overviewSu
 export const FactoryRpcGroup = RpcGroup.make(
   FactoryControlAuthorizationRpc,
   FactoryEnvironmentsListRpc,
+  FactoryEnvironmentsGetEmbeddedRouteRpc,
   FactoryEnvironmentsEnrollRpc,
   FactoryEnvironmentsUpdateRpc,
   FactoryEnvironmentsRemoveRpc,

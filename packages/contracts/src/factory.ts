@@ -134,6 +134,60 @@ export const FactorySourceAccess = Schema.Struct({
 });
 export type FactorySourceAccess = typeof FactorySourceAccess.Type;
 
+export const FactoryFrameTarget = Schema.Struct({
+  registrationId: FactoryRegistrationId,
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+});
+export type FactoryFrameTarget = typeof FactoryFrameTarget.Type;
+
+export const FactoryFrameErrorCode = Schema.Literals([
+  "invalid-route",
+  "invalid-parent",
+  "invalid-message",
+  "target-mismatch",
+  "thread-unavailable",
+  "source-unavailable",
+  "source-stale",
+  "source-authentication",
+  "source-protocol",
+  "connection-failed",
+  "timeout",
+]);
+export type FactoryFrameErrorCode = typeof FactoryFrameErrorCode.Type;
+
+export const FactoryFrameReadyMessage = Schema.Struct({
+  _tag: Schema.Literal("ready"),
+  version: Schema.Literal(1),
+  target: FactoryFrameTarget,
+});
+export const FactoryFrameErrorMessage = Schema.Struct({
+  _tag: Schema.Literal("error"),
+  version: Schema.Literal(1),
+  target: FactoryFrameTarget,
+  code: FactoryFrameErrorCode,
+});
+export const FactoryFrameMessage = Schema.Union([
+  FactoryFrameReadyMessage,
+  FactoryFrameErrorMessage,
+]);
+export type FactoryFrameMessage = typeof FactoryFrameMessage.Type;
+
+export const FactoryFrameInitMessage = Schema.Struct({
+  _tag: Schema.Literal("init"),
+  version: Schema.Literal(1),
+  target: FactoryFrameTarget,
+});
+export type FactoryFrameInitMessage = typeof FactoryFrameInitMessage.Type;
+
+export const FactoryEmbeddedRoute = Schema.Struct({
+  target: FactoryRemoteTarget,
+  threadId: ThreadId,
+  href: TrimmedNonEmptyString.check(Schema.isPattern(/^\/(?!\/)[^\s#]*$/)),
+  sourceAccess: FactorySourceAccess,
+});
+export type FactoryEmbeddedRoute = typeof FactoryEmbeddedRoute.Type;
+
 export const FactoryEnvironmentView = Schema.Struct({
   registrationId: FactoryRegistrationId,
   environmentId: EnvironmentId,
@@ -279,6 +333,12 @@ export const FactoryErrorCode = Schema.Literals([
   "feature-disabled",
   "not-found",
   "conflict",
+  "source-unavailable",
+  "source-stale",
+  "source-protocol",
+  "source-authentication",
+  "target-mismatch",
+  "capability-required",
   "invalid-request",
   "overview-too-large",
   "overview-stream-overflow",

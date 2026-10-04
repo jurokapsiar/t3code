@@ -1,4 +1,5 @@
 import * as HttpRelay from "./HttpRelay.ts";
+import * as EmbeddedRoute from "./EmbeddedRoute.ts";
 import { FactoryError } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -29,6 +30,7 @@ export class FactoryRuntime extends Context.Service<
     readonly getHttpRelay: Effect.Effect<HttpRelay.HttpRelay["Service"], FactoryError>;
     readonly getRelay: Effect.Effect<Relay.Relay["Service"], FactoryError>;
     readonly getRelayPolicy: Effect.Effect<RelayPolicy.RelayPolicy["Service"], FactoryError>;
+    readonly getEmbeddedRoute: Effect.Effect<EmbeddedRoute.EmbeddedRoute["Service"], FactoryError>;
     readonly getEnrollment: Effect.Effect<
       Enrollment.Enrollment["Service"],
       FactoryError | CredentialStore.CredentialStoreError | Enrollment.SourceCredentialExchangeError
@@ -59,6 +61,7 @@ export const layer = ({
           getSourceShell: Effect.fail(disabledError),
           getOverview: Effect.fail(disabledError),
           getRelayPolicy: Effect.fail(disabledError),
+          getEmbeddedRoute: Effect.fail(disabledError),
           getHttpRelay: Effect.fail(disabledError),
           getRelay: Effect.fail(disabledError),
           getEnrollment: Effect.fail(disabledError),
@@ -86,7 +89,7 @@ export const layer = ({
       const overviewLayer = Overview.layer.pipe(Layer.provideMerge(enrollmentLayer));
       const relayPolicyLayer = RelayPolicy.layer.pipe(Layer.provideMerge(overviewLayer));
 
-      const relayLayer = Layer.mergeAll(Relay.layer, HttpRelay.layer).pipe(
+      const relayLayer = Layer.mergeAll(Relay.layer, HttpRelay.layer, EmbeddedRoute.layer).pipe(
         Layer.provideMerge(relayPolicyLayer),
       );
 
@@ -99,6 +102,7 @@ export const layer = ({
           const sourceShell = yield* SourceShell.SourceShell;
           const overview = yield* Overview.Overview;
           const relayPolicy = yield* RelayPolicy.RelayPolicy;
+          const embeddedRoute = yield* EmbeddedRoute.EmbeddedRoute;
           const relay = yield* Relay.Relay;
           const httpRelay = yield* HttpRelay.HttpRelay;
           yield* connections.start;
@@ -119,6 +123,7 @@ export const layer = ({
             getSourceShell: Effect.succeed(sourceShell),
             getOverview: Effect.succeed(overview),
             getRelayPolicy: Effect.succeed(relayPolicy),
+            getEmbeddedRoute: Effect.succeed(embeddedRoute),
             getHttpRelay: Effect.succeed(httpRelay),
             getRelay: Effect.succeed(relay),
             getEnrollment: Effect.succeed(enrollment),

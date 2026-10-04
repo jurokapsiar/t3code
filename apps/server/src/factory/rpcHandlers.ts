@@ -86,6 +86,14 @@ export const makeFactoryRpcHandlers = (
         factoryRuntime.getMetadata.pipe(Effect.flatMap((metadata) => metadata.listEnvironments)),
         { "rpc.aggregate": "factory" },
       ),
+    [FactoryRpcMethods.environmentsGetEmbeddedRoute]: (input) =>
+      observeRpcEffect(
+        FactoryRpcMethods.environmentsGetEmbeddedRoute,
+        factoryRuntime.getEmbeddedRoute.pipe(
+          Effect.flatMap((route) => route.get({ ...input, callerScopes: currentSession.scopes })),
+        ),
+        { "rpc.aggregate": "factory" },
+      ),
     [FactoryRpcMethods.environmentsUpdate]: (input) =>
       observeRpcEffect(
         FactoryRpcMethods.environmentsUpdate,

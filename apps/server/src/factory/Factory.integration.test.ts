@@ -25,6 +25,7 @@ import {
   FactoryEnvironmentView,
   FactoryGroupsCreateRpc,
   FactoryControlAuthorizationRpc,
+  FactoryEnvironmentsGetEmbeddedRouteRpc,
   type FactoryRemoteTarget,
   FactoryRpcMethods,
   FactoryOverviewEvent,
@@ -87,6 +88,7 @@ const date = DateTime.makeUnsafe("2026-10-03T00:00:00.000Z");
 const factoryRpcBoundaryGroup = RpcGroup.make(
   FactoryGroupsCreateRpc,
   FactoryControlAuthorizationRpc,
+  FactoryEnvironmentsGetEmbeddedRouteRpc,
 );
 const decodeShellItem = Schema.decodeEffect(OrchestrationV2ShellStreamItem);
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -521,6 +523,7 @@ it.layer(NodeServices.layer)("factory authenticated RPC boundary", (it) => {
       }
       const metadata = yield* factory.runtime.getMetadata;
       const sourceShell = yield* factory.runtime.getSourceShell;
+      const connections = yield* factory.runtime.getConnections;
       const before = yield* metadata.getSnapshot;
       const sourceStatesBefore = yield* sourceShell.getStates;
       const ticketsBefore = sourceA.stats.tickets + sourceB.stats.tickets;
@@ -530,6 +533,8 @@ it.layer(NodeServices.layer)("factory authenticated RPC boundary", (it) => {
           [FactoryRpcMethods.groupsCreate]: productionHandlers[FactoryRpcMethods.groupsCreate],
           [FactoryRpcMethods.controlAuthorization]:
             productionHandlers[FactoryRpcMethods.controlAuthorization],
+          [FactoryRpcMethods.environmentsGetEmbeddedRoute]:
+            productionHandlers[FactoryRpcMethods.environmentsGetEmbeddedRoute],
         });
       };
       const callGroupsCreate = (scopes: ReadonlyArray<AuthEnvironmentScope>, name: string) =>
@@ -553,6 +558,60 @@ it.layer(NodeServices.layer)("factory authenticated RPC boundary", (it) => {
               Effect.provide(protocolServices),
             );
             return yield* client[FactoryRpcMethods.groupsCreate]({ name });
+          }),
+        );
+
+      const callEmbeddedRoute = (
+        scopes: ReadonlyArray<AuthEnvironmentScope>,
+        target: FactoryRemoteTarget,
+        threadId: ThreadId,
+      ) =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const pairing = yield* serverAuth.issuePairingCredential({ scopes });
+            const cookie = yield* serverAuth.createBrowserSession(pairing.credential, {
+              label: "Embedded route",
+              ipAddress: "127.0.0.1",
+              userAgent: "test",
+              deviceType: "unknown",
+              os: "test",
+              browser: "test",
+            });
+            const identity = Context.get(authServices, ServerEnvironment.ServerEnvironmentIdentity);
+            const authConfig = yield* Effect.provide(ServerConfig.ServerConfig, configLayer);
+            const cookieName = resolveSessionCookieName({
+              mode: authConfig.mode,
+              port: authConfig.port,
+              host: authConfig.host,
+              instanceKey: authConfig.stateDir,
+              environmentId: yield* identity.getEnvironmentId,
+              development: authConfig.devUrl !== undefined,
+            });
+            const endpoint = yield* startFactoryRpcBoundaryServer(serverAuth, handlersForSession);
+            const socket = yield* Socket.makeWebSocket(
+              endpoint.replace("http:", "ws:") + "/ws",
+            ).pipe(
+              Effect.provideService(
+                Socket.WebSocketConstructor,
+                (url) =>
+                  new NodeSocket.NodeWS.WebSocket(url, {
+                    headers: { cookie: cookieName + "=" + cookie.sessionToken },
+                  }),
+              ),
+            );
+            const protocol = yield* RpcClient.makeProtocolSocket({
+              retryTransientErrors: false,
+            }).pipe(
+              Effect.provideService(Socket.Socket, socket),
+              Effect.provide(RpcSerialization.layerJson),
+            );
+            const client = yield* RpcClient.make(factoryRpcBoundaryGroup).pipe(
+              Effect.provideService(RpcClient.Protocol, protocol),
+            );
+            return yield* client[FactoryRpcMethods.environmentsGetEmbeddedRoute]({
+              target,
+              threadId,
+            });
           }),
         );
 
@@ -616,6 +675,50 @@ it.layer(NodeServices.layer)("factory authenticated RPC boundary", (it) => {
         registrationId: environmentB.registrationId,
         environmentId: environmentB.environmentId,
       };
+      const embeddedA = yield* callEmbeddedRoute(
+        ["factory:read"],
+        targetA,
+        ThreadId.make("same-thread"),
+      );
+      const embeddedB = yield* callEmbeddedRoute(
+        ["factory:read"],
+        targetB,
+        ThreadId.make("same-thread"),
+      );
+      expect(embeddedA).toMatchObject({
+        target: targetA,
+        threadId: "same-thread",
+        href: `/rpc-env-a/same-thread?factoryEmbedded=1&factoryRegistrationId=${environmentA.registrationId}`,
+        sourceAccess: {
+          websocketRoute: `/factory/env/${environmentA.registrationId}/ws`,
+          httpPrefix: `/factory/env/${environmentA.registrationId}/`,
+          capabilities: { websocket: true, http: true },
+        },
+      });
+      expect(embeddedB.href).toBe(
+        `/rpc-env-b/same-thread?factoryEmbedded=1&factoryRegistrationId=${environmentB.registrationId}`,
+      );
+      expect(encodeJson(embeddedA)).not.toMatch(
+        /bootstrapCredential|accessToken|sourceCredential|secret/i,
+      );
+      expect(
+        yield* Effect.flip(
+          callEmbeddedRoute(["factory:control"], targetA, ThreadId.make("same-thread")),
+        ),
+      ).toBeInstanceOf(EnvironmentAuthorizationError);
+      const mismatched = yield* Effect.flip(
+        callEmbeddedRoute(
+          ["factory:read"],
+          { ...targetA, environmentId: targetB.environmentId },
+          ThreadId.make("same-thread"),
+        ),
+      );
+      expect(mismatched).toMatchObject({ _tag: "FactoryError", code: "target-mismatch" });
+      const missingThread = yield* Effect.flip(
+        callEmbeddedRoute(["factory:read"], targetA, ThreadId.make("missing-thread")),
+      );
+      expect(missingThread).toMatchObject({ _tag: "FactoryError", code: "not-found" });
+
       expect(yield* callControl(["factory:read", "factory:control"], targetA)).toEqual({
         allowed: true,
       });
@@ -651,6 +754,12 @@ it.layer(NodeServices.layer)("factory authenticated RPC boundary", (it) => {
       expect((yield* metadata.getSnapshot).groups).toHaveLength(before.groups.length + 1);
       expect(yield* sourceShell.getStates).toEqual(sourceStatesBefore);
       expect(sourceA.stats.tickets + sourceB.stats.tickets).toBe(ticketsBefore);
+
+      yield* connections.disable(environmentA.registrationId);
+      const disconnectedRoute = yield* Effect.flip(
+        callEmbeddedRoute(["factory:read"], targetA, ThreadId.make("same-thread")),
+      );
+      expect(disconnectedRoute).toMatchObject({ _tag: "FactoryError", code: "source-unavailable" });
     }),
   );
 });

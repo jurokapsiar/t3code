@@ -45,6 +45,8 @@ import {
   orchestrationProtocolCompatibilityError,
 } from "./compatibility.ts";
 import { fetchRemoteEnvironmentDescriptor } from "../environment/descriptor.ts";
+import { factoryRelayPrefix } from "@t3tools/contracts/factoryRelayUrl";
+import type { FactoryEmbeddedConnectionTarget } from "./model.ts";
 
 export class ConnectionResolver extends Context.Service<
   ConnectionResolver,
@@ -259,10 +261,53 @@ export const make = Effect.gen(function* () {
   const ssh = yield* makeSshBroker();
   const httpClient = yield* HttpClient.HttpClient;
 
+  const prepareFactoryEmbedded = (
+    target: FactoryEmbeddedConnectionTarget,
+  ): Effect.Effect<PreparedConnection, ConnectionAttemptError> =>
+    Effect.try({
+      try: () => {
+        const origin = new URL(target.origin);
+        const prefix = factoryRelayPrefix(target.registrationId);
+        if (
+          prefix === null ||
+          !["http:", "https:"].includes(origin.protocol) ||
+          origin.origin !== target.origin ||
+          origin.username ||
+          origin.password ||
+          origin.search ||
+          origin.hash
+        )
+          throw new Error("Invalid embedded Factory origin.");
+        const httpBaseUrl =
+          origin.origin + prefix + "?environmentId=" + encodeURIComponent(target.environmentId);
+        const socketUrl = new URL(prefix + "ws", origin.origin);
+        socketUrl.protocol = origin.protocol === "https:" ? "wss:" : "ws:";
+        socketUrl.searchParams.set("environmentId", target.environmentId);
+        return {
+          environmentId: target.environmentId,
+          label: target.label,
+          httpBaseUrl,
+          socketUrl: appendOrchestrationProtocol(socketUrl.toString()),
+          httpAuthorization: null,
+          target,
+        } satisfies PreparedConnection;
+      },
+      catch: () =>
+        new ConnectionBlockedError({
+          reason: "configuration",
+          detail: "This embedded source route is not valid.",
+        }),
+    });
+
   const authorize = Effect.fn("clientRuntime.connection.broker.authorize")(function* (
     entry: ConnectionCatalogEntry,
   ) {
     const target: ConnectionTarget = entry.target;
+    if (target._tag === "FactoryEmbeddedConnectionTarget")
+      return yield* new ConnectionBlockedError({
+        reason: "unsupported",
+        detail: "Environment update actions are not available in embedded chat.",
+      });
     yield* Effect.annotateCurrentSpan({
       "connection.environment.id": target.environmentId,
       "connection.target.kind": target._tag,
@@ -297,6 +342,8 @@ export const make = Effect.gen(function* () {
   const prepare = Effect.fn("clientRuntime.connection.broker.prepare")(function* (
     entry: ConnectionCatalogEntry,
   ) {
+    if (entry.target._tag === "FactoryEmbeddedConnectionTarget")
+      return yield* prepareFactoryEmbedded(entry.target);
     const { prepared, descriptor } = yield* authorize(entry);
     const compatibilityError = orchestrationProtocolCompatibilityError(descriptor);
     if (compatibilityError !== null) {
