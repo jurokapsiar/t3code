@@ -11,7 +11,7 @@ import {
   type AuthPairingCredentialResult,
   type AuthSessionState,
   type ExecutionEnvironmentDescriptor,
-  type EnvironmentAuthInvalidError,
+  EnvironmentAuthInvalidError,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import type * as Context from "effect/Context";
@@ -109,6 +109,19 @@ export async function installEnvironmentHttpTest(scenario: EnvironmentHttpTestSc
                   scenario.pairingCredential?.(payload) ??
                     unexpectedEndpoint("auth.pairingCredential")
                 );
+              }),
+            )
+            .handle(
+              "renew",
+              Effect.fn("test.environment.auth.renew")(function* ({ headers }) {
+                const credential = headers.authorization?.startsWith("Bearer ")
+                  ? headers.authorization.slice("Bearer ".length).trim()
+                  : "";
+                return yield* new EnvironmentAuthInvalidError({
+                  code: "auth_invalid",
+                  reason: credential ? "invalid_credential" : "missing_credential",
+                  traceId: "test-trace",
+                });
               }),
             )
             .handle("pairingLinks", () => unexpectedEndpoint("auth.pairingLinks"))
