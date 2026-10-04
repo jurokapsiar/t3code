@@ -197,6 +197,7 @@ const make = Effect.gen(function* () {
       const headers: Record<string, string> = {
         "cache-control": "private, no-store",
         "x-content-type-options": "nosniff",
+        "content-security-policy": "default-src 'none'; sandbox",
       };
       for (const key of [
         "content-type",

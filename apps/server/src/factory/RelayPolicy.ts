@@ -74,7 +74,7 @@ export const relayPolicy = {
   "vcs.listRefs": rpc("vcs.listRefs", "factory:read"),
   "review.getDiffPreview": rpc("review.getDiffPreview", "factory:read"),
   "review.getDiffFileContents": rpc("review.getDiffFileContents", "factory:read"),
-  "terminal.attach": rpc("terminal.attach", "factory:read"),
+  "terminal.attach": rpc("terminal.attach", "factory:control"),
   subscribeTerminalEvents: rpc("subscribeTerminalEvents", "factory:read"),
   subscribeTerminalMetadata: rpc("subscribeTerminalMetadata", "factory:read"),
   "terminal.open": rpc("terminal.open", "factory:control"),

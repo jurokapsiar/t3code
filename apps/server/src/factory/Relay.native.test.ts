@@ -8,7 +8,8 @@ import * as Clock from "effect/Clock";
 import { issueAssetUrl } from "../assets/AssetAccess.ts";
 import { issueAttachmentUploadUrl } from "../assets/AttachmentUpload.ts";
 import { encodeThreadHistoryCursor } from "../orchestration-v2/threadHistoryPaging.ts";
-import { expect, it } from "@effect/vitest";
+import { expect, it, vi } from "@effect/vitest";
+import * as PtyAdapter from "../terminal/PtyAdapter.ts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Context from "effect/Context";
@@ -188,7 +189,11 @@ it.live(
       );
       const browser = yield* memorySocket;
       const consumer = yield* Context.get(relayServices, Relay.Relay)
-        .serve({ socket: browser.socket, target, callerScopes: ["factory:read"] })
+        .serve({
+          socket: browser.socket,
+          target,
+          callerScopes: ["factory:read", "factory:control"],
+        })
         .pipe(Effect.forkScoped);
       const send = (id: number, tag: string, payload: unknown) =>
         Queue.offer(browser.incoming, encode({ _tag: "Request", id, tag, payload, headers: [] }));
@@ -613,6 +618,27 @@ it.live(
       expect(headHttp.status).toBe(200);
       expect(headHttp.headers["content-length"]).toBe("10");
       expect(yield* headHttp.text).toBe("");
+      for (const [fileName, contentType, body] of [
+        ["relay.html", "text/html", "<script>1</script>"],
+        ["relay.svg", "image/svg+xml", "<svg/>"],
+      ] as const) {
+        yield* fs.writeFileString(`${workspace}/${fileName}`, body);
+        const grant = yield* issueAssetUrl({
+          resource: { _tag: "media-file", threadId, path: `${workspace}/${fileName}` },
+        }).pipe(Effect.provide(Context.add(services, Config.ServerConfig, base)));
+        for (const method of ["GET", "HEAD"] as const) {
+          for (const ranged of [false, true]) {
+            const response = yield* sourceHttp(grant.relativeUrl, {
+              method,
+              headers: ranged ? { range: "bytes=0-2" } : {},
+            });
+            expect(response.status).toBe(200);
+            expect(response.headers["content-security-policy"]).toBe("default-src 'none'; sandbox");
+            expect(response.headers["content-type"]).toContain(contentType);
+            expect(yield* response.text).toBe(method === "HEAD" ? "" : body);
+          }
+        }
+      }
       const clock = yield* Clock.Clock;
       const expiredGrant = yield* mint.pipe(
         Effect.provide(Context.add(services, Config.ServerConfig, base)),
@@ -779,6 +805,216 @@ it.live(
       }
       yield* attachedBrowser.writer.write(new Socket.CloseEvent());
       yield* Fiber.interrupt(sourceFiber);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          NodeServices.layer,
+          FetchHttpClient.layer,
+          NodeSocket.layerWebSocketConstructorWS,
+        ),
+      ),
+    ),
+  { timeout: 60_000 },
+);
+
+it.live(
+  "blocks read-only attach before native forwarding and any PTY mutation",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const workspace = yield* fs.makeTempDirectoryScoped({
+        prefix: "t3-attach-boundary-workspace-",
+      });
+      const configServices = yield* Layer.build(
+        Config.layerTest(workspace, { prefix: "t3-attach-boundary-home-" }),
+      );
+      const base = Context.get(configServices, Config.ServerConfig);
+      const source = yield* startProductionServer(base);
+      const manager = Context.get(source.services, TerminalManager.TerminalManager);
+      const adapter = Context.get(source.services, PtyAdapter.PtyAdapter);
+      const writes: ReturnType<typeof vi.spyOn>[] = [];
+      const resizes: ReturnType<typeof vi.spyOn>[] = [];
+      const originalSpawn = adapter.spawn;
+      const creates = vi.spyOn(adapter, "spawn").mockImplementation((input) =>
+        originalSpawn(input).pipe(
+          Effect.tap((process) =>
+            Effect.sync(() => {
+              writes.push(vi.spyOn(process, "write"));
+              resizes.push(vi.spyOn(process, "resize"));
+            }),
+          ),
+        ),
+      );
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          creates.mockRestore();
+          for (const spy of [...writes, ...resizes]) spy.mockRestore();
+        }),
+      );
+      const env = {
+        HOME: base.baseDir,
+        ZDOTDIR: base.baseDir,
+        HISTFILE: `${base.baseDir}/test-history`,
+      };
+      yield* manager.open({ threadId: "existing", terminalId: "default", cwd: workspace, env });
+      yield* manager.open({ threadId: "stopped", terminalId: "default", cwd: workspace, env });
+      yield* manager.close({ threadId: "stopped", terminalId: "default" });
+      creates.mockClear();
+      for (const spy of [...writes, ...resizes]) spy.mockClear();
+      const auth = Context.get(source.services, EnvironmentAuth.EnvironmentAuth);
+      const issued = yield* auth.issueSession({
+        scopes: ["orchestration:read", "terminal:operate"],
+      });
+      const now = yield* DateTime.now;
+      const environmentId = yield* Context.get(
+        source.services,
+        ServerEnvironment.ServerEnvironmentIdentity,
+      ).getEnvironmentId;
+      const target = {
+        registrationId: FactoryRegistrationId.make("attach-boundary"),
+        environmentId,
+      };
+      const environment = FactoryEnvironmentView.make({
+        ...target,
+        endpoint: source.origin,
+        label: "Native",
+        platform: null,
+        enabled: true,
+        state: "online",
+        credentialStorage: "secure-vault",
+        credentialExpiresAt: issued.expiresAt,
+        cleanupPending: false,
+        renewal: "unsupported",
+        lastSeenAt: null,
+        revision: 1,
+      });
+      const credential = {
+        token: issued.token,
+        sourceSessionId: issued.sessionId,
+        scopes: issued.scopes,
+        issuedAt: now,
+        expiresAt: issued.expiresAt,
+      };
+      const transportServices = yield* Layer.build(NodeSource.nodeLayer);
+      const transport = Context.get(transportServices, Connections.SourceTransport);
+      const session = yield* transport.connect({ environment, credential });
+      const configEvent = yield* session.configs.pipe(
+        Stream.filter((event) => event.type === "snapshot"),
+        Stream.runHead,
+      );
+      if (configEvent._tag === "None" || configEvent.value.type !== "snapshot")
+        return yield* Effect.die("Missing source config.");
+      const access: Connections.SourceAccess = {
+        target,
+        connectionId: session,
+        config: configEvent.value.config,
+        sourceScopes: issued.scopes,
+        checkCurrent: Effect.void,
+        closed: Effect.never,
+        shell: Stream.never,
+        acknowledgeShell: () => Effect.void,
+      };
+      const forwarded: string[] = [];
+      const dependencies = Layer.mergeAll(
+        Config.layer({ ...base, factoryEnabled: true }),
+        Layer.mock(SourceShell.SourceShell)({ isSynchronized: () => Effect.succeed(true) }),
+        Layer.mock(Connections.Connections)({
+          resolveTarget: () => Effect.succeed(access),
+          openRelay: () =>
+            transport.connectRelay!({ environment, credential }).pipe(
+              Effect.map((socket) =>
+                Socket.make({
+                  reader: socket.reader,
+                  writer: socket.writer.pipe(
+                    Effect.map((writer) => ({
+                      ...writer,
+                      write: (frame) => {
+                        if (!Socket.isCloseEvent(frame))
+                          forwarded.push(
+                            typeof frame === "string" ? frame : new TextDecoder().decode(frame),
+                          );
+                        return writer.write(frame);
+                      },
+                    })),
+                  ),
+                }),
+              ),
+            ),
+        }),
+      );
+      const relayServices = yield* Layer.build(
+        Relay.layer.pipe(
+          Layer.provideMerge(RelayPolicy.layer.pipe(Layer.provideMerge(dependencies))),
+        ),
+      );
+      const relay = Context.get(relayServices, Relay.Relay);
+      for (const [threadId, fields] of [
+        ["missing", { cwd: workspace }],
+        ["existing", { env: { FACTORY_TEST: "value" } }],
+        ["existing", { cols: 81 }],
+        ["existing", { rows: 25 }],
+        ["stopped", { restartIfNotRunning: true }],
+        ["stopped", { cwd: workspace, env, restartIfNotRunning: true }],
+        ["missing", { cwd: workspace, env }],
+        ["existing", {}],
+      ] as const) {
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const browser = yield* memorySocket;
+            const consumer = yield* relay
+              .serve({ socket: browser.socket, target, callerScopes: ["factory:read"] })
+              .pipe(Effect.forkScoped);
+            yield* Queue.offer(
+              browser.incoming,
+              encode({
+                _tag: "Request",
+                id: 1,
+                tag: "terminal.attach",
+                payload: { threadId, terminalId: "default", ...fields },
+                headers: [],
+              }),
+            );
+            const outcome = yield* Effect.raceFirst(
+              Fiber.join(consumer).pipe(Effect.result),
+              Queue.take(browser.outgoing).pipe(Effect.as("source-replied" as const)),
+            );
+            yield* browser.close;
+            expect(forwarded.filter((frame) => frame.includes('"terminal.attach"'))).toEqual([]);
+            expect(creates).not.toHaveBeenCalled();
+            for (const spy of [...writes, ...resizes]) expect(spy).not.toHaveBeenCalled();
+            expect(outcome).toMatchObject({
+              _tag: "Failure",
+              failure: { _tag: "RelayDenied", reason: "scope-required" },
+            });
+          }),
+        );
+      }
+      const browser = yield* memorySocket;
+      const consumer = yield* relay
+        .serve({
+          socket: browser.socket,
+          target,
+          callerScopes: ["factory:read", "factory:control"],
+        })
+        .pipe(Effect.forkScoped);
+      yield* Queue.offer(
+        browser.incoming,
+        encode({
+          _tag: "Request",
+          id: 2,
+          tag: "terminal.attach",
+          payload: { threadId: "existing", terminalId: "default", cols: 82, rows: 26 },
+          headers: [],
+        }),
+      );
+      const reply = yield* Queue.take(browser.outgoing).pipe(Effect.flatMap(decode));
+      const event = yield* decodeTerminalStream(reply.values?.[0]);
+      expect(event).toMatchObject({ type: "snapshot", snapshot: { status: "running" } });
+      expect(forwarded.filter((frame) => frame.includes('"terminal.attach"'))).toHaveLength(1);
+      expect(resizes[0]).toHaveBeenCalledWith(82, 26);
+      yield* browser.close;
+      yield* Fiber.await(consumer);
+      yield* manager.close({ threadId: "existing", terminalId: "default" });
     }).pipe(
       Effect.provide(
         Layer.mergeAll(

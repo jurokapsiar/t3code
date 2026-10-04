@@ -97,17 +97,39 @@ it("requires terminal authority even for read visualization", () => {
   expect(
     RelayPolicy.authorizeRelayRequest({
       method: "terminal.attach",
-      callerScopes: ["factory:read"],
+      callerScopes: ["factory:control"],
       sourceScopes: ["orchestration:read"],
       synchronized: false,
     }),
   ).toEqual({ allowed: false, reason: "source-scope-required" });
-  expect(authorize("terminal.attach", {}, false)).toEqual({ allowed: true });
+  expect(authorize("terminal.attach", {}, false)).toEqual({
+    allowed: false,
+    reason: "source-stale",
+  });
   expect(authorize("subscribeTerminalEvents", {}, false)).toEqual({ allowed: true });
   expect(authorize("terminal.write", {}, false)).toEqual({
     allowed: false,
     reason: "source-stale",
   });
+});
+
+it.each([
+  {},
+  { cwd: "/workspace" },
+  { env: { FACTORY_TEST: "value" } },
+  { cols: 80 },
+  { rows: 24 },
+  { restartIfNotRunning: true },
+])("denies read-only terminal attach before interpreting its fields: %s", (payload) => {
+  expect(
+    RelayPolicy.authorizeRelayRequest({
+      method: "terminal.attach",
+      payload: { threadId: "thread", terminalId: "existing", ...payload },
+      callerScopes: ["factory:read"],
+      sourceScopes: ["terminal:operate"],
+      synchronized: true,
+    }),
+  ).toEqual({ allowed: false, reason: "scope-required" });
 });
 
 it("only admits explicit methods declared by the actual source RPC group", () => {
@@ -130,6 +152,7 @@ it("only admits explicit methods declared by the actual source RPC group", () =>
 });
 
 it.each([
+  ["terminal.attach", "factory:control"],
   ["projects.readFile", "factory:read"],
   ["review.getDiffPreview", "factory:read"],
   ["orchestration.launchThread", "factory:control"],
@@ -461,7 +484,9 @@ it.effect.each([true, false])(
               yield* Effect.flip(policy.authorize({ ...request, method: "terminal.write" })),
             ).toMatchObject({ reason: "source-unavailable" });
           } else {
-            expect(inspection).toMatchObject({ _tag: "Success", value: { target } });
+            expect(inspection).toMatchObject(
+              state === "stale" ? { _tag: "Failure" } : { _tag: "Success", value: { target } },
+            );
             if (state === "stale") {
               expect(
                 yield* Effect.flip(policy.authorize({ ...request, method: "terminal.write" })),

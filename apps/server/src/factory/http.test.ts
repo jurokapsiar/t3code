@@ -503,6 +503,95 @@ it.layer(
     Layer.provideMerge(NodeServices.layer),
   ),
 )("detail HTTP relay", (it) => {
+  it.effect.each([
+    ["text/html", "file.html", undefined],
+    [
+      "text/html",
+      "file.html",
+      "default-src * 'unsafe-inline'; sandbox allow-scripts allow-same-origin",
+    ],
+    ["image/svg+xml", "file.svg", undefined],
+    [
+      "image/svg+xml",
+      "file.svg",
+      "default-src * 'unsafe-inline'; sandbox allow-scripts allow-same-origin",
+    ],
+  ] as const)(
+    "sandboxes relayed %s regardless of upstream CSP",
+    ([contentType, fileName, upstreamCsp]) =>
+      Effect.gen(function* () {
+        for (const method of ["GET", "HEAD"] as const) {
+          for (const ranged of [false, true]) {
+            const body = contentType === "text/html" ? "<script>1</script>" : "<svg/>";
+            const h = yield* relayHarness({
+              scopes: ["factory:read"],
+              response: new Response(method === "HEAD" ? null : body, {
+                status: ranged ? 206 : 200,
+                headers: {
+                  "content-type": contentType,
+                  "content-length": String(body.length),
+                  "content-disposition": `inline; filename="${fileName}"`,
+                  "accept-ranges": "bytes",
+                  ...(ranged
+                    ? { "content-range": `bytes 0-${body.length - 1}/${body.length}` }
+                    : {}),
+                  ...(upstreamCsp === undefined ? {} : { "content-security-policy": upstreamCsp }),
+                  "set-cookie": "source=secret",
+                },
+              }),
+            });
+            const response = yield* h.request(
+              `/factory/env/a/api/assets/signed/${fileName}?environmentId=env-a`,
+              {
+                method,
+                headers: ranged ? { range: "bytes=0-" } : {},
+              },
+            );
+            expect(response.status).toBe(ranged ? 206 : 200);
+            expect(response.headers.get("content-security-policy")).toBe(
+              "default-src 'none'; sandbox",
+            );
+            expect(response.headers.get("content-type")).toBe(contentType);
+            expect(response.headers.get("content-disposition")).toBe(
+              `inline; filename="${fileName}"`,
+            );
+            expect(response.headers.get("cache-control")).toBe("private, no-store");
+            expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+            expect(response.headers.get("set-cookie")).toBeNull();
+            if (ranged)
+              expect(response.headers.get("content-range")).toBe(
+                `bytes 0-${body.length - 1}/${body.length}`,
+              );
+            if (method === "HEAD")
+              expect(response.headers.get("content-length")).toBe(String(body.length));
+            expect(yield* Effect.promise(() => response.text())).toBe(
+              method === "HEAD" ? "" : body,
+            );
+          }
+        }
+      }),
+  );
+  it.effect.each([
+    ["GET", "api/projects", 200, "application/json", '{"projects":[]}'],
+    ["GET", "api/assets/signed/file.png", 200, "image/png", "image bytes"],
+    ["POST", "api/attachments/upload/grant", 204, "application/json", null],
+  ] as const)(
+    "sandboxes every admitted %s response for %s",
+    ([method, path, status, contentType, body]) =>
+      Effect.gen(function* () {
+        const h = yield* relayHarness({
+          response: new Response(body, { status, headers: { "content-type": contentType } }),
+        });
+        const response = yield* h.request(`/factory/env/a/${path}?environmentId=env-a`, {
+          method,
+          ...(method === "POST" ? { body: "upload" } : {}),
+        });
+        expect(response.status).toBe(status);
+        expect(response.headers.get("content-security-policy")).toBe("default-src 'none'; sandbox");
+        expect(yield* Effect.promise(() => response.text())).toBe(body ?? "");
+      }),
+  );
+
   it.effect("keeps two simultaneous prefixes separate and removes browser and source cookies", () =>
     Effect.gen(function* () {
       const h = yield* relayHarness();
@@ -602,6 +691,10 @@ it.layer(
           { headers: { range: "bytes=1-4" } },
         );
         expect(response.status).toBe(status === 302 ? 502 : status);
+        if (status !== 302)
+          expect(response.headers.get("content-security-policy")).toBe(
+            "default-src 'none'; sandbox",
+          );
         expect(response.headers.get("location")).toBeNull();
         expect(response.headers.get("set-cookie")).toBeNull();
         if (status === 206) {
