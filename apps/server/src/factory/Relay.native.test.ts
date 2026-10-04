@@ -22,20 +22,14 @@ import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
-import * as ApplicationEvents from "../persistence/Services/OrchestrationEventStore.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as Stream from "effect/Stream";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as Socket from "effect/unstable/socket/Socket";
 import * as SessionStore from "../auth/SessionStore.ts";
 import * as FactoryRuntime from "./runtimeLayer.ts";
-import * as EventSink from "../orchestration-v2/EventSink.ts";
-import * as EventStore from "../orchestration-v2/EventStore.ts";
-import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
-import * as CommandReceipts from "../orchestration-v2/CommandReceiptStore.ts";
 import { factoryWebSocketRouteLayer, factorySourceHttpRouteLayer } from "./http.ts";
 import * as HttpServer from "effect/unstable/http/HttpServer";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
@@ -61,7 +55,11 @@ import {
   FactoryRegistrationId,
   ThreadId,
 } from "@t3tools/contracts";
-import * as Server from "../server.ts";
+import {
+  startProductionServer,
+  productionEventSink,
+  productionCommandReceipts,
+} from "./testkit/ProductionServer.ts";
 import * as Config from "../config.ts";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
@@ -120,29 +118,8 @@ it.live(
         Config.layerTest(workspace, { prefix: "t3-relay-native-home-" }),
       );
       const base = Context.get(configServices, Config.ServerConfig);
-      const ready = yield* Deferred.make<Context.Context<Layer.Success<typeof Server.layer>>>();
-      const sourceFiber = yield* Effect.scoped(
-        Effect.gen(function* () {
-          const services = yield* Layer.build(
-            Server.layer.pipe(
-              Layer.provide(
-                Config.layer({
-                  ...base,
-                  host: "127.0.0.1",
-                  noBrowser: true,
-                  startupPresentation: "browser",
-                }),
-              ),
-            ),
-          );
-          yield* Deferred.succeed(ready, services);
-          return yield* Effect.never;
-        }),
-      ).pipe(Effect.forkScoped);
-      const services = yield* Effect.raceFirst(Deferred.await(ready), Fiber.join(sourceFiber));
-      const address = Context.get(services, HttpServer.HttpServer).address;
-      if (typeof address === "string" || !("port" in address))
-        return yield* Effect.die("No source address.");
+      const { services, fiber: sourceFiber, origin } = yield* startProductionServer(base);
+      const address = new URL(origin);
       const auth = Context.get(services, EnvironmentAuth.EnvironmentAuth);
       const issued = yield* auth.issueSession({ scopes: ["orchestration:read"] });
       const transportServices = yield* Layer.build(NodeSource.nodeLayer);
@@ -354,14 +331,7 @@ it.live(
       yield* Deferred.await(committed);
       // Drop the consumer before reading its reply. Recovery belongs to the UI owner.
       yield* routed.writer.write(new Socket.CloseEvent());
-      const receiptServices = yield* Layer.build(
-        CommandReceipts.layer.pipe(
-          Layer.provide(
-            Layer.succeed(SqlClient.SqlClient, Context.get(services, SqlClient.SqlClient)),
-          ),
-        ),
-      );
-      const receipts = Context.get(receiptServices, CommandReceipts.CommandReceiptStoreV2);
+      const receipts = yield* productionCommandReceipts(services);
       const accepted = yield* receipts.getByCommandId(CommandId.make(command.commandId));
       expect(accepted._tag).toBe("Some");
       if (accepted._tag === "None") return yield* Effect.die("No native receipt.");
@@ -385,29 +355,7 @@ it.live(
         sequence: accepted.value.resultSequence,
         event: { type: "thread.created" },
       });
-      const sqlLayer = Layer.succeed(
-        SqlClient.SqlClient,
-        Context.get(services, SqlClient.SqlClient),
-      );
-      const sinkServices = yield* Layer.build(
-        EventSink.layer.pipe(
-          Layer.provide(
-            Layer.mergeAll(
-              EventStore.layerFromOrchestrationEventStore.pipe(
-                Layer.provide(
-                  Layer.succeed(
-                    ApplicationEvents.OrchestrationEventStore,
-                    Context.get(services, ApplicationEvents.OrchestrationEventStore),
-                  ),
-                ),
-              ),
-              ProjectionStore.layer,
-            ),
-          ),
-          Layer.provide(sqlLayer),
-        ),
-      );
-      const sink = Context.get(sinkServices, EventSink.EventSinkV2);
+      const sink = yield* productionEventSink(services);
       const threadId = ThreadId.make(command.threadId);
       const nodeId = NodeId.make("native-question-node");
       const requestId = RuntimeRequestId.make("native-question");

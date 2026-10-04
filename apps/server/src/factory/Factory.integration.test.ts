@@ -1,3 +1,14 @@
+import { vi } from "vite-plus/test";
+import { phase2Gate } from "./testkit/Phase2Gate.ts";
+vi.mock("../provider/builtInDrivers.ts", async () => {
+  const { controlledProviderDriver } = await import("./testkit/ControlledProvider.ts");
+  return {
+    BUILT_IN_DRIVERS: [
+      controlledProviderDriver("codex", true),
+      controlledProviderDriver("cursor", false),
+    ],
+  };
+});
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -909,3 +920,9 @@ it.layer(NodeServices.layer)("factory phase 1 integration", (it) => {
       }),
   );
 });
+
+it.live(
+  "phase2 connects production source/factory services to actual UI owners",
+  () => phase2Gate,
+  { timeout: 90_000 },
+);
