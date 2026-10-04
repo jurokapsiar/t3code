@@ -419,9 +419,10 @@ const relayHarness = Effect.fnUntraced(function* (
     },
     sourceScopes: credential.scopes,
     checkCurrent: Effect.void,
-    shell: Stream.empty,
+    shell: () => Stream.empty,
     closed: options.closed ?? Effect.never,
-    acknowledgeShell: () => Effect.void,
+    checkShellCurrent: Effect.void,
+    shellSynchronized: Effect.void,
   });
   const connections = Layer.mock(Connections.Connections)({
     resolveTarget: (target) =>

@@ -22,7 +22,6 @@ import {
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
@@ -272,7 +271,10 @@ const reduce = (
   item: OrchestrationV2ShellStreamItem,
   firstItemOnConnection: boolean,
 ): SourceChange | undefined => {
-  if (item.kind === "synchronized") return { kind: "synchronized" };
+  if (item.kind === "synchronized")
+    return source.appliedCursor === undefined || source.invalidData
+      ? undefined
+      : { kind: "synchronized" };
 
   if (item.kind === "snapshot") {
     const sequence = item.snapshot.snapshotSequence;
@@ -315,7 +317,8 @@ const reduce = (
     };
   }
 
-  if (item.sequence <= (source.appliedCursor ?? -1)) return { kind: "stale" };
+  if (source.appliedCursor === undefined) return undefined;
+  if (item.sequence <= source.appliedCursor) return { kind: "stale" };
   switch (item.kind) {
     case "project.updated": {
       const project = projectSummary(source.target, item.project);
@@ -492,12 +495,13 @@ const make = Effect.gen(function* () {
     registrationId: FactoryRegistrationId,
     target?: FactoryRemoteTarget,
   ) {
+    const source = sources.get(registrationId);
+    if (source !== undefined) source.connectionId = undefined;
     const consumer = consumers.get(registrationId);
     if (consumer !== undefined) {
       consumers.delete(registrationId);
       yield* Fiber.interrupt(consumer.fiber);
     }
-    const source = sources.get(registrationId);
     if (source !== undefined) {
       sources.delete(registrationId);
       yield* publish({ kind: "removed", target: target ?? source.target });
@@ -537,7 +541,12 @@ const make = Effect.gen(function* () {
     source: SourceProjection,
     item: OrchestrationV2ShellStreamItem,
   ) {
-    if (source.connectionId !== access.connectionId) return;
+    if (
+      sources.get(access.target.registrationId) !== source ||
+      source.connectionId !== access.connectionId
+    )
+      return;
+    yield* access.checkShellCurrent;
     const firstItemOnConnection = source.firstItemOnConnection;
     source.firstItemOnConnection = false;
     const change = reduce(source, item, firstItemOnConnection);
@@ -555,58 +564,23 @@ const make = Effect.gen(function* () {
     }
     if (change.kind === "stale") return;
 
-    const incoming =
-      change.kind === "snapshot" ||
-      change.kind === "project.updated" ||
-      change.kind === "project.removed" ||
-      change.kind === "thread.updated" ||
-      change.kind === "thread.removed" ||
-      change.kind === "ignored"
-        ? change.sequence
-        : undefined;
     const frame = frameForChange(access.target, source, change);
     const synchronizedAt =
-      change.kind === "synchronized" && !source.invalidData ? yield* DateTime.now : undefined;
-    const previous = {
-      projects: new Map(source.projects),
-      threads: new Map(source.threads),
-      appliedCursor: source.appliedCursor,
-      freshness: source.freshness,
-      invalidData: source.invalidData,
+      change.kind === "synchronized" && !source.invalidData && source.appliedCursor !== undefined
+        ? yield* DateTime.now
+        : undefined;
+    yield* access.checkShellCurrent;
+    if (synchronizedAt !== undefined) yield* access.shellSynchronized;
+    applyChange(source, change);
+    if (synchronizedAt !== undefined) source.freshness = fresh(source.target, synchronizedAt);
+    revision++;
+    const update: InternalUpdate = {
+      revision,
+      update:
+        frame === undefined
+          ? { kind: "source", source: stateOf(source) }
+          : { kind: "frame", frame },
     };
-    const update = yield* Effect.gen(function* () {
-      applyChange(source, change);
-      if (change.kind === "synchronized") {
-        source.freshness = source.invalidData
-          ? FactorySourceFreshness.make({
-              target: source.target,
-              state: "blocked",
-              reason: "invalid-data",
-              updatedAt: source.freshness.updatedAt,
-              retryAt: null,
-            })
-          : fresh(source.target, synchronizedAt!);
-      }
-      if (incoming !== undefined) {
-        const acknowledgment = yield* Effect.exit(access.acknowledgeShell(incoming));
-        if (Exit.isFailure(acknowledgment)) {
-          source.projects = previous.projects;
-          source.threads = previous.threads;
-          source.appliedCursor = previous.appliedCursor;
-          source.freshness = previous.freshness;
-          source.invalidData = previous.invalidData;
-          return yield* Effect.failCause(acknowledgment.cause);
-        }
-      }
-      revision++;
-      return {
-        revision,
-        update:
-          frame === undefined
-            ? { kind: "source" as const, source: stateOf(source) }
-            : { kind: "frame" as const, frame },
-      };
-    });
     yield* PubSub.publish(changes, update);
   });
 
@@ -614,7 +588,9 @@ const make = Effect.gen(function* () {
     access: Connections.SourceAccess,
     source: SourceProjection,
   ) {
-    yield* access.shell.pipe(Stream.runForEach((item) => applyItem(access, source, item)));
+    yield* access
+      .shell(source.appliedCursor)
+      .pipe(Stream.runForEach((item) => applyItem(access, source, item)));
   });
 
   const observe = Effect.fnUntraced(function* (state: Connections.SourceState) {
@@ -629,6 +605,7 @@ const make = Effect.gen(function* () {
     const source = stateFor(state.target);
     const currentConsumer = consumers.get(registrationId);
     if (state.phase !== "online") {
+      source.connectionId = undefined;
       if (currentConsumer !== undefined) {
         consumers.delete(registrationId);
         yield* Fiber.interrupt(currentConsumer.fiber);
@@ -665,7 +642,17 @@ const make = Effect.gen(function* () {
     });
     yield* publishSource(source);
     const fiber = yield* consume(access, source).pipe(
-      Effect.catchTag("SourceFailure", () => Effect.void),
+      Effect.catchTag("SourceFailure", (error) =>
+        Effect.gen(function* () {
+          if (sources.get(registrationId) !== source || source.connectionId !== access.connectionId)
+            return;
+          source.connectionId = undefined;
+          yield* setConnectionFreshness(
+            { ...state, phase: "offline", reason: error.reason },
+            source,
+          );
+        }),
+      ),
       Effect.forkIn(scope, { startImmediately: true }),
     );
     consumers.set(registrationId, { connectionId: access.connectionId, fiber });

@@ -19,9 +19,11 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
+import * as Random from "effect/Random";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as Config from "../config.ts";
 import * as Identity from "../environment/ServerEnvironment.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
@@ -197,6 +199,16 @@ const harness = Effect.gen(function* () {
     metadata,
     updates,
     connectionUpdates,
+    persistedState: Context.get(services, SqlClient.SqlClient)<{
+      events: number;
+      projects: number;
+      threads: number;
+    }>`SELECT
+      (SELECT count(*) FROM orchestration_events) +
+      (SELECT count(*) FROM orchestration_v2_events) AS events,
+      (SELECT count(*) FROM projection_projects) AS projects,
+      (SELECT count(*) FROM projection_threads) +
+      (SELECT count(*) FROM orchestration_v2_projection_threads) AS threads`,
     register,
     start,
     nextUpdate,
@@ -237,53 +249,201 @@ it("does not advance the applied cursor when a source update fails", () => {
   expect(SourceShell.nextAppliedCursor({ previous: 10, incoming: 11, applied: false })).toBe(10);
 });
 
-it.effect("maps the authoritative active shell and acknowledges only applied frames", () =>
-  Effect.gen(function* () {
-    const h = yield* harness;
-    const targetA = yield* h.register("a");
-    yield* h.start;
-    const attempt = yield* Queue.take(h.fake.attempts);
-    yield* attempt.ready(sourceConfig("env-a"));
-    yield* Queue.take(attempt.shellCalls);
-    yield* h.nextUpdate((update) => update.kind === "snapshot");
-    expect(yield* h.state("env-a")).toMatchObject({
-      freshness: { state: "synchronizing" },
-      projects: [],
-      threads: [],
-    });
+it.effect(
+  "requests a full snapshot after disable and re-enable before recovering all rows as fresh",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      const targetA = yield* h.register("a");
+      yield* h.start;
+      const first = yield* Queue.take(h.fake.attempts);
+      yield* first.ready(sourceConfig("env-a"));
+      yield* Queue.take(first.shellCalls);
+      yield* first.emitShell(
+        snapshot(
+          10,
+          [project("p", "Retained"), project("q", "Other")],
+          [thread("t", "p"), thread("u", "q")],
+        ),
+      );
+      yield* h.nextFrame("snapshot", "env-a");
+      yield* first.emitShell({ kind: "synchronized" });
+      yield* h.nextFrame("synchronized", "env-a");
+      yield* h.connections.disable(targetA.registrationId);
+      yield* h.nextUpdate((update) => update.kind === "removed");
+      yield* first.closed;
+      expect(yield* h.state("env-a")).toBeUndefined();
+      const disabled = (yield* h.metadata.listEnvironments)[0]!;
+      yield* h.connections.updateEnvironment({
+        registrationId: disabled.registrationId,
+        revision: disabled.revision,
+        enabled: true,
+      });
+      const second = yield* Queue.take(h.fake.attempts);
+      yield* second.ready(sourceConfig("env-a"));
+      const request = yield* Queue.take(second.shellCalls);
+      expect(request).not.toHaveProperty("afterSequence");
+      expect((yield* h.state("env-a"))?.freshness.state).toBe("synchronizing");
+      yield* second.emitShell(
+        snapshot(
+          11,
+          [project("p", "Recovered"), project("q", "Other")],
+          [thread("t", "p"), thread("u", "q")],
+        ),
+      );
+      yield* h.nextFrame("snapshot", "env-a");
+      const recovered = (yield* h.state("env-a"))!;
+      expect(recovered.projects.map((row) => row.key.projectId)).toEqual(["p", "q"]);
+      expect(recovered.threads.map((row) => row.key.threadId)).toEqual(["t", "u"]);
+      expect(recovered.freshness.state).toBe("synchronizing");
+      yield* second.emitShell({ kind: "synchronized" });
+      yield* h.nextFrame("synchronized", "env-a");
+      expect((yield* h.state("env-a"))?.freshness.state).toBe("fresh");
+      expect(yield* h.persistedState).toEqual([{ events: 0, projects: 0, threads: 0 }]);
+    }),
+);
 
-    yield* attempt.emitShell(
-      snapshot(10, [project("p", "Project title")], [thread("t", "p")], [thread("archive", "p")]),
-    );
-    const applied = yield* h.nextFrame("snapshot", "env-a");
-    const source = (yield* h.state("env-a"))!;
+it.effect(
+  "increases shell-failure backoff despite repeated successful configs and resets only after synchronization",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      yield* h.register("a");
+      yield* h.start;
+      const first = yield* Queue.take(h.fake.attempts);
+      yield* first.ready(sourceConfig("env-a"));
+      yield* Queue.take(first.shellCalls);
+      yield* first.failShell("transport");
+      yield* h.nextUpdate(
+        (update) => update.kind === "source" && update.source.freshness.state === "offline",
+      );
+      yield* first.closed;
+      yield* TestClock.adjust("499 millis");
+      expect(h.fake.calls).toHaveLength(1);
+      yield* TestClock.adjust("1 milli");
+      const second = yield* Queue.take(h.fake.attempts);
+      yield* second.ready(sourceConfig("env-a"));
+      yield* Queue.take(second.shellCalls);
+      yield* second.failShell("transport");
+      yield* h.nextUpdate(
+        (update) => update.kind === "source" && update.source.freshness.state === "offline",
+      );
+      yield* second.closed;
+      yield* TestClock.adjust("999 millis");
+      expect(h.fake.calls).toHaveLength(2);
+      yield* TestClock.adjust("1 milli");
+      const third = yield* Queue.take(h.fake.attempts);
+      yield* third.ready(sourceConfig("env-a"));
+      yield* Queue.take(third.shellCalls);
+      yield* third.emitShell(snapshot(7, []));
+      yield* h.nextFrame("snapshot", "env-a");
+      yield* third.failShell("transport");
+      yield* h.nextUpdate(
+        (update) => update.kind === "source" && update.source.freshness.state === "offline",
+      );
+      yield* third.closed;
+      yield* TestClock.adjust("1999 millis");
+      expect(h.fake.calls).toHaveLength(3);
+      yield* TestClock.adjust("1 milli");
+      const synchronized = yield* Queue.take(h.fake.attempts);
+      yield* synchronized.ready(sourceConfig("env-a"));
+      expect(yield* Queue.take(synchronized.shellCalls)).toMatchObject({ afterSequence: 7 });
+      const stale = yield* h.connections.resolveTarget(target("a", "env-a"));
+      yield* synchronized.emitShell({ kind: "synchronized" });
+      yield* h.nextFrame("synchronized", "env-a");
+      yield* synchronized.failShell("transport");
+      yield* h.nextUpdate(
+        (update) => update.kind === "source" && update.source.freshness.state === "offline",
+      );
+      yield* synchronized.closed;
+      expect(yield* Effect.flip(stale.shellSynchronized)).toMatchObject({ reason: "unavailable" });
+      yield* TestClock.adjust("499 millis");
+      expect(h.fake.calls).toHaveLength(4);
+      yield* TestClock.adjust("1 milli");
+      const fourth = yield* Queue.take(h.fake.attempts);
+      expect(h.fake.calls).toHaveLength(5);
+      yield* fourth.ready(sourceConfig("env-a"));
+      expect(yield* Queue.take(fourth.shellCalls)).toMatchObject({ afterSequence: 7 });
+    }).pipe(
+      Effect.provideService(Random.Random, {
+        nextIntUnsafe: () => 0,
+        nextDoubleUnsafe: () => 0,
+      }),
+    ),
+);
 
-    expect(source.target).toEqual(targetA);
-    expect(source.appliedCursor).toBe(10);
-    expect(source.freshness.state).toBe("synchronizing");
-    expect(source.projects).toEqual([
-      {
-        key: { environmentId: "env-a", projectId: "p" },
+it.effect(
+  "does not publish a fresh synchronization milestone without an authoritative baseline",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      yield* h.register("a");
+      yield* h.start;
+      const attempt = yield* Queue.take(h.fake.attempts);
+      yield* attempt.ready(sourceConfig("env-a"));
+      yield* Queue.take(attempt.shellCalls);
+      yield* Queue.takeAll(h.updates);
+      yield* attempt.emitShell({ kind: "synchronized" });
+      const update = yield* Queue.take(h.updates);
+      expect(update).toMatchObject({
+        kind: "source",
+        source: { freshness: { state: "blocked", reason: "invalid-data" } },
+      });
+      expect((yield* h.state("env-a"))?.appliedCursor).toBeUndefined();
+      const access = yield* h.connections.resolveTarget(target("a", "env-a"));
+      expect(yield* h.sourceShell.isSynchronized(access)).toBe(false);
+    }),
+);
+
+it.effect(
+  "maps the authoritative active shell and advances only its applied projection cursor",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      const targetA = yield* h.register("a");
+      yield* h.start;
+      const attempt = yield* Queue.take(h.fake.attempts);
+      yield* attempt.ready(sourceConfig("env-a"));
+      yield* Queue.take(attempt.shellCalls);
+      yield* h.nextUpdate((update) => update.kind === "snapshot");
+      expect(yield* h.state("env-a")).toMatchObject({
+        freshness: { state: "synchronizing" },
+        projects: [],
+        threads: [],
+      });
+
+      yield* attempt.emitShell(
+        snapshot(10, [project("p", "Project title")], [thread("t", "p")], [thread("archive", "p")]),
+      );
+      const applied = yield* h.nextFrame("snapshot", "env-a");
+      const source = (yield* h.state("env-a"))!;
+
+      expect(source.target).toEqual(targetA);
+      expect(source.appliedCursor).toBe(10);
+      expect(source.freshness.state).toBe("synchronizing");
+      expect(source.projects).toEqual([
+        {
+          key: { environmentId: "env-a", projectId: "p" },
+          target: targetA,
+          title: "Project title",
+          workspaceRoot: "/work/p",
+          createdAt: "2026-10-03T00:00:00.000Z",
+          updatedAt: "2026-10-03T00:00:00.000Z",
+        },
+      ]);
+      expect(source.threads).toHaveLength(1);
+      expect(source.threads[0]).toMatchObject({
+        key: { environmentId: "env-a", threadId: "t" },
         target: targetA,
-        title: "Project title",
-        workspaceRoot: "/work/p",
-        createdAt: "2026-10-03T00:00:00.000Z",
-        updatedAt: "2026-10-03T00:00:00.000Z",
-      },
-    ]);
-    expect(source.threads).toHaveLength(1);
-    expect(source.threads[0]).toMatchObject({
-      key: { environmentId: "env-a", threadId: "t" },
-      target: targetA,
-      project: { environmentId: "env-a", projectId: "p" },
-      classification: "active",
-    });
-    expect(applied).not.toHaveProperty("archivedThreads");
+        project: { environmentId: "env-a", projectId: "p" },
+        classification: "active",
+      });
+      expect(applied).not.toHaveProperty("archivedThreads");
 
-    yield* attempt.emitShell({ kind: "synchronized" });
-    yield* h.nextFrame("synchronized", "env-a");
-    expect((yield* h.state("env-a"))?.freshness.state).toBe("fresh");
-  }),
+      yield* attempt.emitShell({ kind: "synchronized" });
+      yield* h.nextFrame("synchronized", "env-a");
+      expect((yield* h.state("env-a"))?.freshness.state).toBe("fresh");
+    }),
 );
 
 it.effect("keeps source IDs independent and does not restart a lease on config refresh", () =>
@@ -315,6 +475,14 @@ it.effect("keeps source IDs independent and does not restart a lease on config r
         (state) => state.target.registrationId === a.input.environment.registrationId,
       )?.phase,
     ).toBe("online");
+
+    const lease = yield* h.connections.resolveTarget(target("a", "env-a"));
+    yield* a.emitConfig({ version: 1, type: "snapshot", config: sourceConfig("env-a") });
+    yield* Queue.take(h.connectionUpdates);
+    yield* lease.checkShellCurrent;
+    yield* a.emitShell({ kind: "synchronized" });
+    yield* h.nextFrame("synchronized", "env-a");
+    expect(yield* h.sourceShell.isSynchronized(lease)).toBe(true);
 
     const states = yield* h.sourceShell.getStates;
     expect(
@@ -437,7 +605,6 @@ it.effect("ignores enrichment from an older cursor after a newer delta", () =>
 
     expect((yield* h.state("env-a"))?.projects[0]?.title).toBe("Current");
     expect((yield* h.state("env-a"))?.appliedCursor).toBe(12);
-    expect((yield* h.connections.getStates)[0]?.cursor).toBe(12);
   }),
 );
 
@@ -464,7 +631,6 @@ it.effect("does not let an older authoritative snapshot rewind an active connect
 
     expect((yield* h.state("env-a"))?.projects[0]?.title).toBe("Current");
     expect((yield* h.state("env-a"))?.appliedCursor).toBe(12);
-    expect((yield* h.connections.getStates)[0]?.cursor).toBe(12);
   }),
 );
 
@@ -489,11 +655,12 @@ it.effect("does not apply enrichment before an authoritative snapshot", () =>
       },
     } as OrchestrationV2ShellStreamItem);
     yield* attempt.emitShell({ kind: "synchronized" });
-    yield* h.nextFrame("synchronized", "env-a");
+    yield* h.nextUpdate(
+      (update) => update.kind === "source" && update.source.freshness.reason === "invalid-data",
+    );
 
     expect((yield* h.state("env-a"))?.projects).toEqual([]);
     expect((yield* h.state("env-a"))?.appliedCursor).toBeUndefined();
-    expect((yield* h.connections.getStates)[0]?.cursor).toBeUndefined();
   }),
 );
 
@@ -528,10 +695,6 @@ it.effect("replaces only the source shell named by an authoritative reset snapsh
     expect(states.find((source) => source.target.environmentId === "env-a")?.projects).toEqual([]);
     expect(states.find((source) => source.target.environmentId === "env-a")?.threads).toEqual([]);
     expect(states.find((source) => source.target.environmentId === "env-a")?.appliedCursor).toBe(1);
-    expect(
-      (yield* h.connections.getStates).find((source) => source.target.environmentId === "env-a")
-        ?.cursor,
-    ).toBe(1);
     expect(
       states.find((source) => source.target.environmentId === "env-b")?.projects[0]?.title,
     ).toBe("B");
@@ -571,8 +734,151 @@ it.effect("accepts a full authoritative baseline from a new connection lease", (
 
     expect((yield* h.state("env-a"))?.projects[0]?.title).toBe("New lease baseline");
     expect((yield* h.state("env-a"))?.appliedCursor).toBe(8);
-    expect((yield* h.connections.getStates)[0]?.cursor).toBe(8);
   }),
+);
+
+it.effect(
+  "replays into an intact projection after endpoint replacement and rejects the previous lease",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      const targetA = yield* h.register("a");
+      yield* h.start;
+      const first = yield* Queue.take(h.fake.attempts);
+      yield* first.ready(sourceConfig("env-a"));
+      yield* Queue.take(first.shellCalls);
+      yield* first.emitShell(
+        snapshot(
+          10,
+          [project("p", "Before"), project("q", "Unchanged")],
+          [thread("t", "p"), thread("u", "q")],
+        ),
+      );
+      yield* h.nextFrame("snapshot", "env-a");
+      yield* first.emitShell({ kind: "synchronized" });
+      yield* h.nextFrame("synchronized", "env-a");
+      const oldAccess = yield* h.connections.resolveTarget(targetA);
+      const current = (yield* h.metadata.listEnvironments)[0]!;
+      yield* h.connections.updateEnvironment({
+        registrationId: current.registrationId,
+        revision: current.revision,
+        endpoint: "https://replacement.example",
+      });
+      yield* first.closed;
+      yield* Queue.take(first.shellCancellations);
+      const second = yield* Queue.take(h.fake.attempts);
+      yield* second.ready(sourceConfig("env-a"));
+      expect(yield* Queue.take(second.shellCalls)).toMatchObject({ afterSequence: 10 });
+      expect(yield* Effect.flip(oldAccess.checkShellCurrent)).toMatchObject({
+        reason: "unavailable",
+      });
+      expect(yield* Effect.flip(oldAccess.shellSynchronized)).toMatchObject({
+        reason: "unavailable",
+      });
+      yield* first.emitShell(snapshot(90, [project("p", "Late old snapshot")]));
+      yield* first.emitShell({ kind: "synchronized" });
+      yield* second.emitShell({
+        kind: "project.updated",
+        sequence: 12,
+        project: project("p", "Replayed"),
+      });
+      yield* h.nextFrame("project.updated", "env-a");
+      const replayed = (yield* h.state("env-a"))!;
+      expect(replayed.appliedCursor).toBe(12);
+      expect(replayed.projects.map((row) => row.title)).toEqual(["Replayed", "Unchanged"]);
+      expect(replayed.threads.map((row) => row.key.threadId)).toEqual(["t", "u"]);
+      expect(replayed.freshness.state).toBe("stale");
+      yield* second.emitShell({ kind: "synchronized" });
+      yield* h.nextFrame("synchronized", "env-a");
+      expect((yield* h.state("env-a"))?.freshness.state).toBe("fresh");
+      expect(yield* h.sourceShell.isSynchronized(oldAccess)).toBe(false);
+      expect(yield* h.persistedState).toEqual([{ events: 0, projects: 0, threads: 0 }]);
+    }),
+);
+
+it.effect(
+  "requests a new baseline after removal and re-registration even when local IDs match",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      const targetA = yield* h.register("a");
+      yield* h.start;
+      const first = yield* Queue.take(h.fake.attempts);
+      yield* first.ready(sourceConfig("env-a"));
+      yield* Queue.take(first.shellCalls);
+      yield* first.emitShell(snapshot(10, [project("p", "Removed")], [thread("t", "p")]));
+      yield* h.nextFrame("snapshot", "env-a");
+      const oldAccess = yield* h.connections.resolveTarget(targetA);
+      const current = (yield* h.metadata.listEnvironments)[0]!;
+      yield* h.metadata.markRemoving({
+        registrationId: current.registrationId,
+        revision: current.revision,
+      });
+      yield* h.nextUpdate((update) => update.kind === "removed");
+      yield* first.closed;
+      yield* h.metadata.clearCredentialReference(current.registrationId);
+      const removing = (yield* h.metadata.listEnvironments)[0]!;
+      yield* h.metadata.removeEnvironment({
+        registrationId: removing.registrationId,
+        revision: removing.revision,
+      });
+      yield* h.register("a", "env-replacement");
+      const replacement = yield* Queue.take(h.fake.attempts);
+      yield* replacement.ready(sourceConfig("env-replacement"));
+      expect(yield* Queue.take(replacement.shellCalls)).not.toHaveProperty("afterSequence");
+      yield* replacement.emitShell(snapshot(1, [project("p", "Replacement")], [thread("t", "p")]));
+      yield* h.nextFrame("snapshot", "env-replacement");
+      yield* replacement.emitShell({ kind: "synchronized" });
+      yield* h.nextFrame("synchronized", "env-replacement");
+      expect(yield* h.state("env-a")).toBeUndefined();
+      expect((yield* h.state("env-replacement"))?.projects[0]?.title).toBe("Replacement");
+      expect(yield* Effect.flip(oldAccess.shellSynchronized)).toMatchObject({
+        reason: "unavailable",
+      });
+    }),
+);
+
+it.effect.each(["authentication", "protocol", "identity"] as const)(
+  "keeps a healthy source fresh while another source blocks on %s",
+  (reason) =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      yield* h.register("a");
+      const targetB = yield* h.register("b");
+      yield* h.start;
+      const attempts = [yield* Queue.take(h.fake.attempts), yield* Queue.take(h.fake.attempts)];
+      const a = attempts.find((attempt) => attempt.input.environment.registrationId === "a")!;
+      const b = attempts.find((attempt) => attempt.input.environment.registrationId === "b")!;
+      yield* b.ready(sourceConfig("env-b"));
+      yield* Queue.take(b.shellCalls);
+      yield* b.emitShell(snapshot(4, [project("same", "Healthy")], [thread("same", "same")]));
+      yield* h.nextFrame("snapshot", "env-b");
+      yield* b.emitShell({ kind: "synchronized" });
+      yield* h.nextFrame("synchronized", "env-b");
+      if (reason === "authentication") yield* a.fail(reason);
+      else
+        yield* a.ready(
+          sourceConfig(
+            reason === "identity" ? "env-b" : "env-a",
+            true,
+            reason === "protocol" ? 99 : undefined,
+          ),
+        );
+      yield* h.nextUpdate(
+        (update) =>
+          update.kind === "source" &&
+          update.source.target.environmentId === "env-a" &&
+          update.source.freshness.state === "blocked",
+      );
+      yield* a.closed;
+      yield* TestClock.adjust("2 minutes");
+      expect(h.fake.calls).toHaveLength(2);
+      const accessB = yield* h.connections.resolveTarget(targetB);
+      expect(yield* h.sourceShell.isSynchronized(accessB)).toBe(true);
+      expect((yield* h.state("env-b"))?.projects[0]?.title).toBe("Healthy");
+      expect(yield* Queue.size(b.shellCalls)).toBe(0);
+      expect(yield* h.persistedState).toEqual([{ events: 0, projects: 0, threads: 0 }]);
+    }),
 );
 
 it.effect("retains the old projection and cursor when a source update cannot be applied", () =>
@@ -594,6 +900,16 @@ it.effect("retains the old projection and cursor when a source update cannot be 
     expect(rejected).toMatchObject({ kind: "source", source: { appliedCursor: 10 } });
     expect((yield* h.state("env-a"))?.projects[0]?.title).toBe("Retained");
     expect((yield* h.state("env-a"))?.threads).toHaveLength(1);
+    yield* first.emitShell({ kind: "synchronized" });
+    const invalidMilestone = yield* h.nextUpdate(
+      (update) =>
+        update.kind === "frame" ||
+        (update.kind === "source" && update.source.freshness.reason === "invalid-data"),
+    );
+    expect(invalidMilestone).toMatchObject({
+      kind: "source",
+      source: { appliedCursor: 10, freshness: { state: "blocked", reason: "invalid-data" } },
+    });
 
     yield* first.fail("transport");
     yield* first.closed;

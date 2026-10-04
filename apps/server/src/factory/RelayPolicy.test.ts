@@ -358,9 +358,10 @@ const policyLayer = (
     checkCurrent: input.expiredLease
       ? Effect.fail(new Connections.SourceFailure({ reason: "authentication" }))
       : Effect.void,
-    shell: Stream.never,
+    shell: () => Stream.never,
     closed: Effect.never,
-    acknowledgeShell: () => Effect.void,
+    checkShellCurrent: Effect.void,
+    shellSynchronized: Effect.void,
   };
   return RelayPolicy.layer.pipe(
     Layer.provide(
@@ -394,9 +395,10 @@ it.effect("reads stale source data but rechecks authoritative freshness after th
       checkCurrent: Effect.sync(() => {
         synchronized = false;
       }),
-      shell: Stream.never,
+      shell: () => Stream.never,
       closed: Effect.never,
-      acknowledgeShell: () => Effect.void,
+      checkShellCurrent: Effect.void,
+      shellSynchronized: Effect.void,
     };
     const service = yield* RelayPolicy.RelayPolicy.pipe(
       Effect.provide(

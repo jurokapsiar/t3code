@@ -89,12 +89,15 @@ export interface SourceAccess {
   /** Grants of the credential used by this connection. Never part of a wire view. */
   readonly sourceScopes: ReadonlyArray<AuthEnvironmentScope>;
   readonly checkCurrent: Effect.Effect<void, SourceFailure>;
-  readonly shell: Stream.Stream<OrchestrationV2ShellStreamItem, SourceFailure>;
+  /** Resume belongs to the retained projection, never the connection owner. */
+  readonly shell: (
+    afterSequence?: typeof NonNegativeInt.Type,
+  ) => Stream.Stream<OrchestrationV2ShellStreamItem, SourceFailure>;
   readonly closed: Effect.Effect<never, SourceFailure>;
-  /** Commit only after the shell consumer has applied this source item. */
-  readonly acknowledgeShell: (
-    sequence: typeof NonNegativeInt.Type,
-  ) => Effect.Effect<void, SourceFailure>;
+  /** Config refresh does not replace the shell lease. */
+  readonly checkShellCurrent: Effect.Effect<void, SourceFailure>;
+  /** Called only after the authoritative projection reaches its completion marker. */
+  readonly shellSynchronized: Effect.Effect<void, SourceFailure>;
 }
 
 export interface SourceState {
@@ -102,7 +105,6 @@ export interface SourceState {
   readonly phase: "connecting" | "online" | "offline" | "blocked" | "disabled";
   readonly reason: SourceFailure["reason"] | undefined;
   readonly config: ServerConfig | null;
-  readonly cursor: typeof NonNegativeInt.Type | undefined;
 }
 
 export class Connections extends Context.Service<
@@ -134,6 +136,7 @@ export const matchesSourceIdentity = (input: {
 
 interface Owner {
   readonly reference: Metadata.EnrollmentReference;
+  failures: number;
   state: SourceState;
   fiber: Fiber.Fiber<void> | undefined;
   session: SourceSession | undefined;
@@ -196,7 +199,6 @@ const make = Effect.gen(function* () {
   });
 
   const supervise = Effect.fnUntraced(function* (owner: Owner) {
-    let failures = 0;
     while (true) {
       const result = yield* Effect.scoped(
         Effect.gen(function* () {
@@ -284,7 +286,6 @@ const make = Effect.gen(function* () {
                   }
                   owner.state = { ...owner.state, config: event.config };
                   owner.session = session;
-                  failures = 0;
                   yield* setState(owner, "online");
                 } else {
                   const current = owner.state.config;
@@ -346,13 +347,13 @@ const make = Effect.gen(function* () {
       ).pipe(Effect.result);
       if (result._tag === "Success") return;
       const reason = result.failure.reason;
-      if (reason === "identity") owner.state = { ...owner.state, cursor: undefined, config: null };
+      if (reason === "identity") owner.state = { ...owner.state, config: null };
       if (reason !== "transport") {
         yield* setState(owner, "blocked", reason);
         return;
       }
-      failures++;
-      const maximum = Math.min(30_000, 1000 * 2 ** Math.min(failures - 1, 10));
+      owner.failures++;
+      const maximum = Math.min(30_000, 1000 * 2 ** Math.min(owner.failures - 1, 10));
       const delay = yield* Random.nextIntBetween(Math.floor(maximum / 2), maximum);
       yield* setState(owner, "offline", reason);
       yield* Effect.sleep(delay);
@@ -385,12 +386,12 @@ const make = Effect.gen(function* () {
         previous?.reference.environment.environmentId === reference.environment.environmentId;
       const owner: Owner = {
         reference,
+        failures: 0,
         state: {
           target: { registrationId: id, environmentId: reference.environment.environmentId },
           phase: "disabled",
           reason: undefined,
           config: unchangedIdentity ? previous.state.config : null,
-          cursor: unchangedIdentity ? previous.state.cursor : undefined,
         },
         fiber: undefined,
         session: undefined,
@@ -488,36 +489,39 @@ const make = Effect.gen(function* () {
         owner.state.phase !== "online"
       )
         return yield* new SourceFailure({ reason: "unavailable" });
-      const checkCurrent = Effect.suspend(() =>
-        owner.session === session &&
-        owners.get(target.registrationId) === owner &&
-        owner.state.phase === "online"
-          ? Effect.void
-          : Effect.fail(new SourceFailure({ reason: "unavailable" })),
-      );
+      const checkCurrent = Effect.gen(function* () {
+        if (
+          owner.session !== session ||
+          owners.get(target.registrationId) !== owner ||
+          owner.state.phase !== "online" ||
+          (yield* Deferred.isDone(ended))
+        )
+          return yield* new SourceFailure({ reason: "unavailable" });
+      });
       const closed = Deferred.await(ended);
-      const shell = Stream.unwrap(
-        checkCurrent.pipe(
-          Effect.as(
-            session
-              .shell({
-                ...(owner.state.cursor === undefined ? {} : { afterSequence: owner.state.cursor }),
-                ...(config.shellResumeCompletionMarker === true
-                  ? { requestCompletionMarker: true }
-                  : {}),
-                ...(config.environment.capabilities.batchedReplay === true
-                  ? { batchedReplay: true }
-                  : {}),
-              })
-              .pipe(
-                Stream.concat(Stream.fail(new SourceFailure({ reason: "transport" }))),
-                Stream.tapError((error) => Deferred.fail(ended, error)),
-              ),
+      const shell = (afterSequence?: typeof NonNegativeInt.Type) =>
+        Stream.unwrap(
+          checkCurrent.pipe(
+            Effect.as(
+              session
+                .shell({
+                  ...(afterSequence === undefined ? {} : { afterSequence }),
+                  ...(config.shellResumeCompletionMarker === true
+                    ? { requestCompletionMarker: true }
+                    : {}),
+                  ...(config.environment.capabilities.batchedReplay === true
+                    ? { batchedReplay: true }
+                    : {}),
+                })
+                .pipe(
+                  Stream.concat(Stream.fail(new SourceFailure({ reason: "transport" }))),
+                  Stream.tapError((error) => Deferred.fail(ended, error)),
+                ),
+            ),
           ),
-        ),
-      ).pipe(
-        Stream.merge(Stream.fromEffect(closed).pipe(Stream.drain), { haltStrategy: "either" }),
-      );
+        ).pipe(
+          Stream.merge(Stream.fromEffect(closed).pipe(Stream.drain), { haltStrategy: "either" }),
+        );
       return {
         connectionId: session,
         target,
@@ -544,14 +548,14 @@ const make = Effect.gen(function* () {
         }),
         shell,
         closed,
-        acknowledgeShell: (sequence) =>
-          checkCurrent.pipe(
-            Effect.andThen(
-              Effect.sync(() => {
-                owner.state = { ...owner.state, cursor: sequence };
-              }),
-            ),
+        checkShellCurrent: checkCurrent,
+        shellSynchronized: checkCurrent.pipe(
+          Effect.andThen(
+            Effect.sync(() => {
+              owner.failures = 0;
+            }),
           ),
+        ),
       } satisfies SourceAccess;
     });
 

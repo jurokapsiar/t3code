@@ -136,8 +136,9 @@ const harness = (
           : Effect.fail(new Connections.SourceFailure({ reason: "authentication" })),
       ),
       closed: Deferred.await(ended),
-      shell: Stream.never,
-      acknowledgeShell: () => Effect.void,
+      shell: () => Stream.never,
+      checkShellCurrent: Effect.void,
+      shellSynchronized: Effect.void,
     };
     const settings = yield* Config.ServerConfig;
     const connections = Layer.mock(Connections.Connections)({
@@ -288,8 +289,9 @@ it.layer(testLayer)("scoped relay", (it) => {
             sourceScopes: ["orchestration:read"],
             checkCurrent: Effect.void,
             closed: Effect.never,
-            shell: Stream.never,
-            acknowledgeShell: () => Effect.void,
+            shell: () => Stream.never,
+            checkShellCurrent: Effect.void,
+            shellSynchronized: Effect.void,
           };
           return { browser, upstream, access };
         });

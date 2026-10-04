@@ -156,8 +156,9 @@ it.layer(
         sourceScopes: ["orchestration:read"],
         checkCurrent: Effect.void,
         closed: Effect.never,
-        shell: Stream.never,
-        acknowledgeShell: () => Effect.void,
+        shell: () => Stream.never,
+        checkShellCurrent: Effect.void,
+        shellSynchronized: Effect.void,
       };
       const auth = Layer.mock(EnvironmentAuth.EnvironmentAuth)({
         authenticateHttpRequest: () =>

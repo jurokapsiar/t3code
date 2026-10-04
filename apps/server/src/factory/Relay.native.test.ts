@@ -168,8 +168,9 @@ it.live(
         sourceScopes: ["orchestration:read", "orchestration:operate", "terminal:operate"],
         checkCurrent: Effect.void,
         closed: Effect.never,
-        shell: Stream.never,
-        acknowledgeShell: () => Effect.void,
+        shell: () => Stream.never,
+        checkShellCurrent: Effect.void,
+        shellSynchronized: Effect.void,
       };
       const connectRelay = transport.connectRelay;
       if (connectRelay === undefined) return yield* Effect.die("No dedicated relay transport.");
@@ -911,8 +912,9 @@ it.live(
         sourceScopes: issued.scopes,
         checkCurrent: Effect.void,
         closed: Effect.never,
-        shell: Stream.never,
-        acknowledgeShell: () => Effect.void,
+        shell: () => Stream.never,
+        checkShellCurrent: Effect.void,
+        shellSynchronized: Effect.void,
       };
       const forwarded: string[] = [];
       const dependencies = Layer.mergeAll(

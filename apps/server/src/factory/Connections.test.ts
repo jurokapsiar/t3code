@@ -228,7 +228,7 @@ it.effect("wakes a blocked registration through its enabled lifecycle", () =>
   }),
 );
 
-it.effect("rejects a mismatched environment target and clears its applied cursor", () =>
+it.effect("rejects a mismatched environment target and invalidates its shell lease", () =>
   Effect.gen(function* () {
     expect(Connections.matchesSourceIdentity({ expected: "env-a", received: "env-b" })).toBe(false);
     const h = yield* harness;
@@ -238,15 +238,15 @@ it.effect("rejects a mismatched environment target and clears its applied cursor
     yield* first.ready(config());
     yield* h.wait("a", "online");
     const source = yield* h.connections.resolveTarget(target());
-    yield* source.acknowledgeShell(NonNegativeInt.make(7));
+    yield* source.checkShellCurrent;
     expect(yield* Effect.flip(h.connections.resolveTarget(target("a", "env-b")))).toMatchObject({
       reason: "identity",
     });
     yield* first.emitConfig({ version: 1, type: "snapshot", config: config("env-b") });
     const blocked = yield* h.wait("a", "blocked");
     yield* first.closed;
-    expect(blocked).toMatchObject({ reason: "identity", cursor: undefined });
-    expect(yield* Effect.flip(source.acknowledgeShell(NonNegativeInt.make(9)))).toMatchObject({
+    expect(blocked).toMatchObject({ reason: "identity", config: null });
+    expect(yield* Effect.flip(source.shellSynchronized)).toMatchObject({
       reason: "unavailable",
     });
   }),
@@ -264,7 +264,7 @@ it.effect("keeps equal local IDs scoped to their source and does not wait for a 
     yield* fast.ready(config("env-b"));
     yield* h.wait("b", "online");
     const access = yield* h.connections.resolveTarget(target("b", "env-b"));
-    const shell = yield* Stream.toQueue(access.shell, { capacity: 64 });
+    const shell = yield* Stream.toQueue(access.shell(), { capacity: 64 });
     expect(yield* Queue.take(fast.shellCalls)).toEqual({
       batchedReplay: true,
       requestCompletionMarker: true,
@@ -282,7 +282,7 @@ it.effect("keeps equal local IDs scoped to their source and does not wait for a 
     yield* slow.ready(config());
     yield* h.wait("a", "online");
     const other = yield* h.connections.resolveTarget(target());
-    const otherShell = yield* Stream.toQueue(other.shell, { capacity: 64 });
+    const otherShell = yield* Stream.toQueue(other.shell(), { capacity: 64 });
     yield* Queue.take(slow.shellCalls);
     yield* slow.emitShell({
       kind: "thread.removed",
@@ -295,7 +295,7 @@ it.effect("keeps equal local IDs scoped to their source and does not wait for a 
   }),
 );
 
-it.effect("replaces endpoints once and resumes only acknowledged cursors", () =>
+it.effect("replaces endpoints once and resumes only the projection-supplied cursor", () =>
   Effect.gen(function* () {
     const h = yield* harness;
     yield* h.register();
@@ -304,7 +304,7 @@ it.effect("replaces endpoints once and resumes only acknowledged cursors", () =>
     yield* first.ready(config());
     yield* h.wait("a", "online");
     const access = yield* h.connections.resolveTarget(target());
-    yield* access.acknowledgeShell(NonNegativeInt.make(8));
+    yield* access.checkShellCurrent;
     const current = (yield* h.metadata.listEnvironments)[0]!;
     yield* h.metadata.updateEnvironment({
       registrationId: current.registrationId,
@@ -317,7 +317,7 @@ it.effect("replaces endpoints once and resumes only acknowledged cursors", () =>
     yield* second.ready(config("env-a", null));
     yield* h.wait("a", "online");
     const next = yield* h.connections.resolveTarget(target());
-    yield* Stream.toQueue(next.shell, { capacity: 64 });
+    yield* Stream.toQueue(next.shell(NonNegativeInt.make(8)), { capacity: 64 });
     expect(next.connectionId).not.toBe(access.connectionId);
     expect(yield* Queue.take(second.shellCalls)).toEqual({
       afterSequence: 8,
@@ -488,7 +488,7 @@ it.effect("keeps source execution and the supervisor alive when a shell consumer
     yield* attempt.ready(config());
     yield* h.wait("a", "online");
     const access = yield* h.connections.resolveTarget(target());
-    const consumer = yield* access.shell.pipe(Stream.runDrain, Effect.forkScoped);
+    const consumer = yield* access.shell().pipe(Stream.runDrain, Effect.forkScoped);
     yield* Queue.take(attempt.shellCalls);
     yield* Fiber.interrupt(consumer);
     expect((yield* h.connections.resolveTarget(target())).config.environment.environmentId).toBe(
@@ -561,7 +561,7 @@ it.effect("blocks missing and expired credentials without an outbound connection
 );
 
 it.effect(
-  "passes bounded snapshot reset reasons and synchronized markers without advancing unapplied cursors",
+  "passes bounded snapshot reset reasons and synchronized markers without owning projection cursors",
   () =>
     Effect.gen(function* () {
       const h = yield* harness;
@@ -571,7 +571,7 @@ it.effect(
       yield* attempt.ready(config());
       yield* h.wait("a", "online");
       const access = yield* h.connections.resolveTarget(target());
-      const shell = yield* Stream.toQueue(access.shell, { capacity: 8 });
+      const shell = yield* Stream.toQueue(access.shell(), { capacity: 8 });
       yield* Queue.take(attempt.shellCalls);
       yield* attempt.emitShell({
         kind: "snapshot",
@@ -588,11 +588,11 @@ it.effect(
         resetReason: "event-limit",
         snapshot: { snapshotSequence: 42 },
       });
-      expect((yield* h.connections.getStates)[0]?.cursor).toBeUndefined();
-      yield* access.acknowledgeShell(NonNegativeInt.make(42));
+      expect((yield* h.connections.getStates)[0]).not.toHaveProperty("cursor");
+      yield* access.shellSynchronized;
       yield* attempt.emitShell({ kind: "synchronized" });
       expect(yield* Queue.take(shell)).toEqual({ kind: "synchronized" });
-      expect((yield* h.connections.getStates)[0]?.cursor).toBe(42);
+      expect((yield* h.connections.getStates)[0]).not.toHaveProperty("cursor");
     }),
 );
 
@@ -606,7 +606,7 @@ it.effect("blocks a shell authorization failure and invalidates its source lease
     yield* h.wait("a", "online");
     yield* attempt.failShell("authentication");
     const source = yield* h.connections.resolveTarget(target());
-    expect(yield* source.shell.pipe(Stream.runDrain, Effect.flip)).toMatchObject({
+    expect(yield* source.shell().pipe(Stream.runDrain, Effect.flip)).toMatchObject({
       reason: "authentication",
     });
     expect((yield* h.wait("a", "blocked")).reason).toBe("authentication");
@@ -661,7 +661,7 @@ it.effect(
       yield* attempt.ready({ ...legacy, environment, shellResumeCompletionMarker: false });
       yield* h.wait("a", "online");
       const access = yield* h.connections.resolveTarget(target());
-      yield* Stream.toQueue(access.shell, { capacity: 8 });
+      yield* Stream.toQueue(access.shell(), { capacity: 8 });
       expect(yield* Queue.take(attempt.shellCalls)).toEqual({});
     }),
 );
