@@ -68,9 +68,15 @@ by default. It does not store the one-time credential in Factory metadata.
 
 Source sessions expire after 30 days. A source that advertises session renewal
 can issue a replacement for a valid bearer session with the same or narrower
-scopes. Renewal does not revoke the old session. Save the replacement before
-revoking the old session. An expired or revoked session cannot be renewed. A
-source without renewal support needs fresh enrollment after its session expires.
+scopes. A renewal keeps the session's original issue time, and the source will
+not extend that renewal lineage beyond 90 days. Issuing a replacement does not
+revoke the old session by itself. Factory stores the replacement first, then
+releases only its predecessor. If release cannot be confirmed, Factory keeps a
+protected retry proof and retries on restart or the next renewal. A pending
+release does not block renewal or re-enrollment. If the renewal response is
+lost, retrying with the old session reconciles its unreleased replacement before
+issuing another. An expired or revoked session cannot be renewed. A source
+without renewal support needs fresh enrollment after its session expires.
 Restarting the Factory server reconnects enabled sources when their stored
 credentials are still valid; a restart does not extend an expired source session.
 Keep the vault available to the server account: unlock the login Keychain on macOS,
