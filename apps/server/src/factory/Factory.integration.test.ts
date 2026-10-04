@@ -921,7 +921,7 @@ it.layer(NodeServices.layer)("factory phase 1 integration", (it) => {
   );
 });
 
-it.live(
+it.live.skipIf(process.env.T3_FACTORY_UI_CHECKOUT === undefined)(
   "phase2 connects production source/factory services to actual UI owners",
   () => phase2Gate,
   { timeout: 90_000 },

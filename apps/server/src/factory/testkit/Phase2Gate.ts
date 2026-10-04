@@ -1,5 +1,4 @@
 // @effect-diagnostics nodeBuiltinImport:off preferSchemaOverJson:off - Node child pipe is the browserless UI test boundary, not a production transport.
-import * as NodePath from "node:path";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeReadline from "node:readline";
 import * as NodeStream from "node:stream";
@@ -60,6 +59,11 @@ class GateFailure extends Schema.TaggedError<GateFailure>()("GateFailure", {
 }) {}
 
 export const phase2Gate = Effect.gen(function* () {
+  const uiCheckout = process.env.T3_FACTORY_UI_CHECKOUT;
+  if (!uiCheckout)
+    return yield* new GateFailure({
+      detail: "Set T3_FACTORY_UI_CHECKOUT to run the cross-repository production gate.",
+    });
   const fs = yield* FileSystem.FileSystem;
   const workspace = yield* fs.makeTempDirectoryScoped({ prefix: "t3-phase2-workspace-" });
   yield* fs.makeDirectory(`${workspace}/nested`);
@@ -475,7 +479,7 @@ export const phase2Gate = Effect.gen(function* () {
       process.execPath,
       ["--import", "tsx", "src/factory/testkit/runProductionGate.ts"],
       {
-        cwd: process.env.T3_FACTORY_UI_CHECKOUT ?? NodePath.resolve(process.cwd(), "../t3factory"),
+        cwd: uiCheckout,
         env: {
           ...process.env,
           T3_FACTORY_GATE_INPUT: JSON.stringify({
