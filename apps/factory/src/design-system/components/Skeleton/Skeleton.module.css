@@ -1,0 +1,29 @@
+@layer components {
+  .skeleton {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+  .item {
+    min-height: var(--space-3);
+    border-radius: var(--radius-sm);
+    background: var(--surface-muted);
+    animation: shimmer 1.6s var(--ease-standard) infinite alternate;
+  }
+  @keyframes shimmer {
+    to {
+      opacity: 0.45;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .item {
+      animation: none;
+    }
+  }
+  @media (forced-colors: active) {
+    .item {
+      border: 1px solid GrayText;
+      background: Canvas;
+    }
+  }
+}

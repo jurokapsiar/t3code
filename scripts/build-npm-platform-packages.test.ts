@@ -57,6 +57,7 @@ const makeFakeArchives = Effect.fn("test.makeFakeArchives")(function* () {
     const contentDir = path.join(stage, stem);
     for (const dir of [
       "client",
+      "factory",
       "resource-monitor",
       "node_modules/node-pty",
       "node_modules/@ff-labs/fff-node",
@@ -72,6 +73,7 @@ const makeFakeArchives = Effect.fn("test.makeFakeArchives")(function* () {
       '{ "name": "@ff-labs/fff-node", "version": "0.9.4" }\n',
     );
     yield* fs.writeFileString(path.join(contentDir, "client/index.html"), "<html></html>\n");
+    yield* fs.writeFileString(path.join(contentDir, "factory/index.html"), "Factory application\n");
     yield* fs.writeFileString(
       path.join(contentDir, "t3"),
       `#!/bin/sh\necho "stub ${key} $*"\nexit 7\n`,
@@ -135,6 +137,7 @@ it.layer(NodeServices.layer)("build-npm-platform-packages", (it) => {
         "t3",
         "t3.exe",
         "client",
+        "factory",
         "resource-monitor",
         "node_modules",
       ]);
@@ -149,6 +152,10 @@ it.layer(NodeServices.layer)("build-npm-platform-packages", (it) => {
       assert.deepStrictEqual(linuxManifest.bundleDependencies, ["@ff-labs/fff-node", "node-pty"]);
       // Archive contents sit at the package root, not under the archive stem.
       assert.isTrue(yield* fs.exists(path.join(linuxDir, "client/index.html")));
+      assert.equal(
+        yield* fs.readFileString(path.join(linuxDir, "factory/index.html")),
+        "Factory application\n",
+      );
       // A root README, or npm would display a bundled dependency's.
       assert.include(
         yield* fs.readFileString(path.join(linuxDir, "README.md")),
@@ -196,6 +203,7 @@ it.layer(NodeServices.layer)("build-npm-platform-packages", (it) => {
       const lines = listing.stdout.split("\n");
       assert.isTrue(lines.some((line) => line.endsWith(" package/node_modules/node-pty/")));
       assert.isTrue(lines.some((line) => line.endsWith(" package/package.json")));
+      assert.isTrue(lines.some((line) => line.endsWith(" package/factory/index.html")));
       assert.isTrue(
         lines.some((line) => /^-rwxr-xr-x .* package\/t3$/.test(line)),
         listing.stdout,

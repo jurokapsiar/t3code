@@ -1,0 +1,5 @@
+/* Cascade layer order: later layers win regardless of selector specificity. */
+@layer reset, tokens, base, components, app, utilities;
+
+@import "./design-system/tokens.css";
+@import "./design-system/base.css";

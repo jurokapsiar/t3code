@@ -19,11 +19,68 @@ import {
 import * as NetService from "@t3tools/shared/Net";
 import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
 import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
+import { HostProcessExecutablePath, HostProcessIsExecutable } from "@t3tools/shared/hostProcess";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { deriveServerPaths } from "../config.ts";
 import { resolveServerConfig } from "./config.ts";
 
 it.layer(NodeServices.layer)("factory config", (it) => {
+  it.effect(
+    "discovers the installed UI only when enabled and never replaces an explicit override",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-factory-installed-" });
+        const bundledUi = path.join(root, "factory");
+        yield* fs.makeDirectory(bundledUi);
+        yield* fs.writeFileString(path.join(bundledUi, "index.html"), "Bundled Factory");
+        const flags = {
+          mode: Option.some("web" as const),
+          port: Option.some(0),
+          host: Option.none<string>(),
+          baseDir: Option.some(path.join(root, "home")),
+          cwd: Option.none<string>(),
+          devUrl: Option.some(new URL("http://localhost:5173")),
+          noBrowser: Option.none<boolean>(),
+          bootstrapFd: Option.none<number>(),
+          autoBootstrapProjectFromCwd: Option.none<boolean>(),
+          logWebSocketEvents: Option.none<boolean>(),
+          tailscaleServeEnabled: Option.none<boolean>(),
+          tailscaleServePort: Option.none<number>(),
+        };
+        const resolve = (
+          factoryEnabled: boolean,
+          factoryUiDir: Option.Option<string>,
+          env: Record<string, string> = {},
+        ) =>
+          resolveServerConfig(
+            { ...flags, factoryEnabled: Option.some(factoryEnabled), factoryUiDir },
+            Option.none(),
+          ).pipe(
+            Effect.provide(
+              Layer.mergeAll(
+                ConfigProvider.layer(ConfigProvider.fromEnv({ env })),
+                NetService.layer,
+              ),
+            ),
+            Effect.provideService(HostProcessIsExecutable, true),
+            Effect.provideService(HostProcessExecutablePath, path.join(root, "t3")),
+          );
+        expect((yield* resolve(true, Option.none())).factoryUiDir).toBe(bundledUi);
+        expect((yield* resolve(false, Option.none())).factoryUiDir).toBeUndefined();
+        const missing = path.join(root, "missing-explicit-build");
+        expect((yield* resolve(true, Option.some(missing))).factoryUiDir).toBe(missing);
+        expect(
+          (yield* resolve(true, Option.none(), { T3CODE_FACTORY_UI_DIR: missing })).factoryUiDir,
+        ).toBe(missing);
+        expect(
+          (yield* resolve(true, Option.some(bundledUi), { T3CODE_FACTORY_UI_DIR: missing }))
+            .factoryUiDir,
+        ).toBe(bundledUi);
+      }),
+  );
+
   it.effect("is opt-in and lets the CLI flag override the environment", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

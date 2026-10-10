@@ -1,0 +1,243 @@
+/*
+ * Design tokens.
+ * Token names follow the Fluent UI headless storybook demo styles; values are
+ * re-themed to the CAP theme (@fluentui-contrib/react-cap-theme), which builds on
+ * Fluent v9 webLightTheme / webDarkTheme plus CAP radii and stroke tokens.
+ */
+@layer tokens {
+  :root {
+    color-scheme: light;
+
+    /* surface (colorNeutralBackground*) */
+    --bg: #fafafa;
+    --bg-soft: #f5f5f5;
+    --bg-elev: #ffffff;
+    --bg-elev-2: #fafafa;
+    --surface-muted: #f5f5f5;
+    --surface-hover: #ebebeb;
+    --surface-sunken: #d6d6d6;
+    --code-bg: #f5f5f5;
+
+    /* line (CAP colorNeutralStroke4 + Fluent strokes) */
+    --border: #ebebeb;
+    --border-hover: #e0e0e0;
+    --border-pressed: #d6d6d6;
+    --border-strong: #d1d1d1;
+    --border-stronger: #616161;
+    --border-alpha: rgba(0, 0, 0, 0.05);
+
+    /* ink (colorNeutralForeground*) */
+    --text: #242424;
+    --text-muted: #424242;
+    --text-soft: #616161;
+    --text-faint: #707070;
+    --text-disabled: #bdbdbd;
+    --text-on-accent: #ffffff;
+
+    /* accent / brand (colorBrand*) */
+    --accent: #0f6cbd;
+    --accent-strong: #115ea3;
+    --accent-pressed: #0c3b5e;
+    --accent-soft: #ebf3fc;
+    --accent-border: #b4d6fa;
+    --accent-fg: #0f6cbd;
+    --accent-contrast: #ffffff;
+    --brand: #0f6cbd;
+    --brand-strong: #115ea3;
+    --brand-soft: #ebf3fc;
+
+    /* status */
+    --success: #0e700e;
+    --success-strong: #107c10;
+    --success-soft: #f1faf1;
+    --success-border: #9fd89f;
+    --warning: #bc4b09;
+    --warning-strong: #f7630c;
+    --warning-soft: #fff9f5;
+    --warning-border: #fdcfb4;
+    --danger: #b10e1c;
+    --danger-strong: #c50f1f;
+    --danger-soft: #fdf3f4;
+    --danger-border: #eeacb2;
+    --info: #0f6cbd;
+    --info-soft: #ebf3fc;
+    --info-border: #b4d6fa;
+    --neutral-dot: #707070;
+
+    --focus-ring: #000000;
+    --overlay: rgba(0, 0, 0, 0.4);
+    --inverted-bg: #292929;
+    --inverted-fg: #ffffff;
+
+    /* terminal (always dark) */
+    --terminal-bg: #141414;
+    --terminal-fg: #d6d6d6;
+
+    /* diff */
+    --diff-add-bg: rgba(16, 124, 16, 0.1);
+    --diff-add-fg: #0e700e;
+    --diff-del-bg: rgba(197, 15, 31, 0.08);
+    --diff-del-fg: #b10e1c;
+
+    /* elevation (Fluent shadow ramp) */
+    --shadow-1: 0 0 2px rgba(0, 0, 0, 0.12), 0 1px 2px rgba(0, 0, 0, 0.14);
+    --shadow-2: 0 0 2px rgba(0, 0, 0, 0.12), 0 2px 4px rgba(0, 0, 0, 0.14);
+    --shadow-3: 0 0 2px rgba(0, 0, 0, 0.12), 0 4px 8px rgba(0, 0, 0, 0.14);
+    --shadow-4: 0 0 2px rgba(0, 0, 0, 0.12), 0 8px 16px rgba(0, 0, 0, 0.14);
+    --shadow-5: 0 0 8px rgba(0, 0, 0, 0.12), 0 14px 28px rgba(0, 0, 0, 0.14);
+    --shadow-6: 0 0 8px rgba(0, 0, 0, 0.12), 0 32px 64px rgba(0, 0, 0, 0.14);
+    --shadow-menu: 0 3px 12px 0 rgba(0, 0, 0, 0.18);
+    --shadow-sm: var(--shadow-1);
+    --shadow-md: var(--shadow-3);
+    --shadow-lg: var(--shadow-5);
+
+    /* radius — CAP: controls 12px (2XLarge), menus 12px, surfaces 24px (4XLarge) */
+    --radius-xs: 2px;
+    --radius-sm: 4px;
+    --radius-md: 6px;
+    --radius-lg: 8px;
+    --radius-xl: 12px;
+    --radius-2xl: 16px;
+    --radius-3xl: 24px;
+    --radius-pill: 9999px;
+    --radius-control: var(--radius-xl);
+    --radius-control-sm: var(--radius-lg);
+    --radius-surface: var(--radius-3xl);
+    --radius-popover: var(--radius-xl);
+
+    /* stroke widths */
+    --stroke-thin: 1px;
+    --stroke-thick: 2px;
+    --stroke-thicker: 3px;
+
+    /* spacing */
+    --space-0-5: 2px;
+    --space-1: 4px;
+    --space-1-5: 6px;
+    --space-2: 8px;
+    --space-2-5: 10px;
+    --space-3: 12px;
+    --space-4: 16px;
+    --space-5: 20px;
+    --space-6: 24px;
+    --space-8: 32px;
+    --space-10: 40px;
+    --space-12: 48px;
+    --space-16: 64px;
+
+    /* control heights (CAP: 28 / 36 / 44) */
+    --control-sm: 28px;
+    --control-md: 36px;
+    --control-lg: 44px;
+
+    /* typography (Fluent type ramp) */
+    --font-sans:
+      "Segoe UI", "Segoe UI Web (West European)", -apple-system, BlinkMacSystemFont, Roboto,
+      "Helvetica Neue", sans-serif;
+    --font-mono: "JetBrains Mono", Consolas, "Courier New", ui-monospace, monospace;
+    --font-display: var(--font-sans);
+    --font-size-100: 10px;
+    --font-size-200: 12px;
+    --font-size-300: 14px;
+    --font-size-400: 16px;
+    --font-size-500: 20px;
+    --font-size-600: 24px;
+    --font-size-700: 28px;
+    --line-height-100: 14px;
+    --line-height-200: 16px;
+    --line-height-300: 20px;
+    --line-height-400: 22px;
+    --line-height-500: 28px;
+    --line-height-600: 32px;
+    --font-weight-regular: 400;
+    --font-weight-medium: 500;
+    --font-weight-semibold: 600;
+    --font-weight-bold: 700;
+    --tracking-display: -0.02em;
+    --tracking-heading: -0.01em;
+    --tracking-tight: 0;
+
+    /* motion (Fluent durations / curves) */
+    --ease-standard: cubic-bezier(0.33, 0, 0.67, 1);
+    --ease-emphasized: cubic-bezier(0.1, 0.9, 0.2, 1);
+    --duration-fast: 100ms;
+    --duration-medium: 200ms;
+    --duration-slow: 300ms;
+  }
+
+  [data-theme="dark"] {
+    color-scheme: dark;
+
+    --bg: #1f1f1f;
+    --bg-soft: #141414;
+    --bg-elev: #292929;
+    --bg-elev-2: #2e2e2e;
+    --surface-muted: #333333;
+    --surface-hover: #3d3d3d;
+    --surface-sunken: #0a0a0a;
+    --code-bg: #141414;
+
+    --border: #3d3d3d;
+    --border-hover: #474747;
+    --border-pressed: #525252;
+    --border-strong: #666666;
+    --border-stronger: #adadad;
+    --border-alpha: rgba(255, 255, 255, 0.1);
+
+    --text: #ffffff;
+    --text-muted: #d6d6d6;
+    --text-soft: #adadad;
+    --text-faint: #999999;
+    --text-disabled: #5c5c5c;
+    --text-on-accent: #ffffff;
+
+    --accent: #115ea3;
+    --accent-strong: #0f6cbd;
+    --accent-pressed: #0c3b5e;
+    --accent-soft: #082338;
+    --accent-border: #0e4775;
+    --accent-fg: #479ef5;
+    --accent-contrast: #ffffff;
+    --brand: #479ef5;
+    --brand-strong: #62abf5;
+    --brand-soft: #082338;
+
+    --success: #54b054;
+    --success-strong: #107c10;
+    --success-soft: #052505;
+    --success-border: #107c10;
+    --warning: #faa06b;
+    --warning-strong: #f7630c;
+    --warning-soft: #4a1e04;
+    --warning-border: #f7630c;
+    --danger: #dc626d;
+    --danger-strong: #c50f1f;
+    --danger-soft: #3b0509;
+    --danger-border: #c50f1f;
+    --info: #479ef5;
+    --info-soft: #082338;
+    --info-border: #0e4775;
+    --neutral-dot: #999999;
+
+    --focus-ring: #ffffff;
+    --overlay: rgba(0, 0, 0, 0.5);
+    --inverted-bg: #ffffff;
+    --inverted-fg: #242424;
+
+    --terminal-bg: #0a0a0a;
+    --terminal-fg: #d6d6d6;
+
+    --diff-add-bg: rgba(84, 176, 84, 0.14);
+    --diff-add-fg: #9fd89f;
+    --diff-del-bg: rgba(220, 98, 109, 0.14);
+    --diff-del-fg: #eeacb2;
+
+    --shadow-1: 0 0 2px rgba(0, 0, 0, 0.24), 0 1px 2px rgba(0, 0, 0, 0.28);
+    --shadow-2: 0 0 2px rgba(0, 0, 0, 0.24), 0 2px 4px rgba(0, 0, 0, 0.28);
+    --shadow-3: 0 0 2px rgba(0, 0, 0, 0.24), 0 4px 8px rgba(0, 0, 0, 0.28);
+    --shadow-4: 0 0 2px rgba(0, 0, 0, 0.24), 0 8px 16px rgba(0, 0, 0, 0.28);
+    --shadow-5: 0 0 8px rgba(0, 0, 0, 0.24), 0 14px 28px rgba(0, 0, 0, 0.28);
+    --shadow-6: 0 0 8px rgba(0, 0, 0, 0.24), 0 32px 64px rgba(0, 0, 0, 0.28);
+    --shadow-menu: 0 3px 12px 0 rgba(0, 0, 0, 0.48);
+  }
+}

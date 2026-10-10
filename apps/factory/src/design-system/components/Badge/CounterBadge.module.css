@@ -1,0 +1,32 @@
+@layer components {
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: var(--space-6);
+    min-height: var(--space-6);
+    padding-inline: var(--space-1);
+    border: 1px solid var(--bg-elev);
+    border-radius: var(--radius-pill);
+    color: var(--accent-contrast);
+    background: var(--accent);
+    font: 600 var(--font-size-100)/var(--line-height-100) var(--font-sans);
+    font-variant-numeric: tabular-nums;
+  }
+  .badge[data-dot] {
+    width: var(--space-2);
+    min-width: var(--space-2);
+    min-height: var(--space-2);
+    padding: 0;
+    border: 0;
+  }
+  .badge[data-hidden] {
+    display: none;
+  }
+  @media (forced-colors: active) {
+    .badge {
+      border-color: Canvas;
+      outline: 1px solid ButtonText;
+    }
+  }
+}

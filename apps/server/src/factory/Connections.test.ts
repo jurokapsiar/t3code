@@ -228,6 +228,38 @@ it.effect("keeps source grants internal and invalidates an issued lease at crede
   }),
 );
 
+it.effect(
+  "keeps an issued lease current across partial config updates but not a new snapshot",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      yield* h.register();
+      yield* h.connections.start;
+      const first = yield* Queue.take(h.fake.attempts);
+      yield* first.ready(config());
+      yield* h.wait("a", "online");
+      const access = yield* h.connections.resolveTarget(target());
+      const nextConfig = (previous: unknown) =>
+        Stream.fromQueue(h.states).pipe(
+          Stream.flatMap((snapshot) => Stream.fromIterable(snapshot)),
+          Stream.filter(
+            (state) => state.target.registrationId === "a" && state.config !== previous,
+          ),
+          Stream.runHead,
+          Effect.map((state) => Option.getOrThrow(state).config),
+        );
+
+      // Sources publish provider/settings refreshes while relays stay open.
+      yield* first.emitConfig({ version: 1, type: "providerStatuses", payload: { providers: [] } });
+      const refreshed = yield* nextConfig(access.config);
+      yield* access.checkCurrent;
+
+      yield* first.emitConfig({ version: 1, type: "snapshot", config: config() });
+      yield* nextConfig(refreshed);
+      expect(yield* Effect.flip(access.checkCurrent)).toMatchObject({ reason: "unavailable" });
+    }),
+);
+
 it.effect("wakes a blocked registration through its enabled lifecycle", () =>
   Effect.gen(function* () {
     const h = yield* harness;

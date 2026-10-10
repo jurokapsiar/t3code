@@ -20,6 +20,7 @@ import { sweepStalePendingAttachments } from "./attachmentStore.ts";
 import { FactoryCredentialStorage } from "@t3tools/contracts";
 import { DEFAULT_SIGNAL_EXPORT, type SignalExport } from "@t3tools/shared/observability";
 import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
+import { HostProcessExecutablePath, HostProcessIsExecutable } from "@t3tools/shared/hostProcess";
 
 export const DEFAULT_PORT = 3773;
 
@@ -252,10 +253,13 @@ const makeTest = Effect.fn("ServerConfig.makeTest")(function* (
 export const layerTest = (cwd: string, baseDirOrPrefix: string | { readonly prefix: string }) =>
   Layer.effect(ServerConfig, makeTest(cwd, baseDirOrPrefix));
 
-export const resolveStaticDir = Effect.fn(function* () {
-  const { join, resolve } = yield* Path.Path;
+const resolveBuiltUiDir = Effect.fn(function* (app: "web" | "factory", moduleDir: string) {
+  const { dirname, join, resolve } = yield* Path.Path;
   const { exists } = yield* FileSystem.FileSystem;
-  const bundledClient = resolve(join(import.meta.dirname, "client"));
+  const executable = yield* HostProcessIsExecutable;
+  // SEA's module metadata belongs to the embedded bundle, not the installation.
+  const runtimeDir = executable ? dirname(yield* HostProcessExecutablePath) : moduleDir;
+  const bundledClient = resolve(join(runtimeDir, app === "web" ? "client" : "factory"));
   const bundledStat = yield* exists(join(bundledClient, "index.html")).pipe(
     Effect.orElseSucceed(() => false),
   );
@@ -263,7 +267,9 @@ export const resolveStaticDir = Effect.fn(function* () {
     return bundledClient;
   }
 
-  const monorepoClient = resolve(join(import.meta.dirname, "../../web/dist"));
+  if (executable) return undefined;
+
+  const monorepoClient = resolve(join(moduleDir, `../../${app}/dist`));
   const monorepoStat = yield* exists(join(monorepoClient, "index.html")).pipe(
     Effect.orElseSucceed(() => false),
   );
@@ -272,3 +278,9 @@ export const resolveStaticDir = Effect.fn(function* () {
   }
   return undefined;
 });
+
+export const resolveStaticDir = (moduleDir = import.meta.dirname) =>
+  resolveBuiltUiDir("web", moduleDir);
+
+export const resolveFactoryUiDir = (moduleDir = import.meta.dirname) =>
+  resolveBuiltUiDir("factory", moduleDir);

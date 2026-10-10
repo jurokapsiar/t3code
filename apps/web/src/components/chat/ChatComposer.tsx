@@ -1130,6 +1130,7 @@ import { useMediaQuery } from "../../hooks/useMediaQuery";
 import { usePanelAnimationSettings } from "../../panelAnimations";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { serverEnvironment } from "../../state/server";
+import { isFactoryEmbedRequested } from "../../factoryFrameCapture";
 import type { ReviewCommentContext } from "../../reviewCommentContext";
 
 const WORKSPACE_SNAPSHOT_RETRY_COOLDOWN_MS = 10_000;
@@ -2193,7 +2194,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     hadWorkspaceSnapshotRef.current = hasWorkspaceSnapshot;
   }, [gitCwd, selectedProviderStatus]);
   useEffect(() => {
-    if (!gitCwd || !selectedProviderEntry) return;
+    // Refreshing providers runs source-side probes; the Factory relay does not admit it.
+    if (!gitCwd || !selectedProviderEntry || isFactoryEmbedRequested()) return;
     const key = `${environmentId}:${selectedProviderEntry.instanceId}:${gitCwd}`;
     const hasWorkspaceSnapshot = selectedProviderStatus?.workspaceSnapshots?.some(
       (snapshot) => snapshot.cwd === gitCwd,

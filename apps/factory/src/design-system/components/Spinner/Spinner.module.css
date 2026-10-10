@@ -1,0 +1,48 @@
+@layer components {
+  .spinner {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    color: var(--text-muted);
+    font-size: var(--font-size-300);
+  }
+  .spinner [data-slot="spinner"],
+  .spinner > span {
+    display: inline-flex;
+    width: 20px;
+    height: 20px;
+    border: 2px solid var(--border-strong);
+    border-top-color: var(--accent);
+    border-radius: var(--radius-pill);
+    animation: spin 800ms linear infinite;
+  }
+  .spinner[data-size="small"] [data-slot="spinner"],
+  .spinner[data-size="small"] > span {
+    width: 14px;
+    height: 14px;
+    border-width: 2px;
+  }
+  .spinner[data-size="medium"] [data-slot="spinner"],
+  .spinner[data-size="medium"] > span {
+    width: 20px;
+    height: 20px;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .spinner [data-slot="spinner"],
+    .spinner > span {
+      animation: none;
+    }
+  }
+  @media (forced-colors: active) {
+    .spinner [data-slot="spinner"],
+    .spinner > span {
+      border-color: CanvasText;
+      border-top-color: Highlight;
+    }
+  }
+}

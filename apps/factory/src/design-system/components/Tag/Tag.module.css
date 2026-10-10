@@ -1,0 +1,61 @@
+@layer components {
+  .tag {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1-5);
+    width: max-content;
+    max-width: 100%;
+    min-height: var(--control-sm);
+    padding-inline: var(--space-2-5);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-control-sm);
+    color: var(--text-muted);
+    background: var(--surface-muted);
+    font: 600 var(--font-size-200)/var(--line-height-200) var(--font-sans);
+    white-space: nowrap;
+    cursor: default;
+  }
+  .tag[data-appearance="brand"] {
+    color: var(--accent-fg);
+    border-color: var(--accent-border);
+    background: var(--accent-soft);
+  }
+  .tag[data-selected] {
+    color: var(--accent-fg);
+    border-color: var(--accent-border);
+    background: var(--accent-soft);
+  }
+  .tag[data-dismissible] {
+    cursor: pointer;
+  }
+  .tag[data-dismissible]:hover:not([data-disabled]) {
+    background: var(--surface-hover);
+  }
+  .tag:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+  }
+  .tag[data-disabled] {
+    color: var(--text-disabled);
+    cursor: not-allowed;
+  }
+  .tag svg {
+    width: 14px;
+    height: 14px;
+    flex: none;
+  }
+  .group {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+  }
+  @media (forced-colors: active) {
+    .tag {
+      border-color: ButtonText;
+    }
+    .tag:focus-visible {
+      outline-color: Highlight;
+    }
+  }
+}

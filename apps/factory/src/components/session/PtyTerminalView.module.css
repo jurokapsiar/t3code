@@ -1,0 +1,41 @@
+@layer app {
+  .terminal {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    padding: var(--space-3);
+    color: var(--terminal-fg);
+    background: var(--terminal-bg);
+  }
+  .toolbar,
+  .terminalTitle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+  }
+  .terminalTitle h3 {
+    margin: 0;
+    font-size: var(--font-size-300);
+  }
+  .terminalMeta {
+    color: var(--text-soft);
+    font-size: var(--font-size-200);
+  }
+  .output {
+    min-height: 12rem;
+    max-height: 100%;
+    overflow: auto;
+    margin: var(--space-2) 0;
+    padding: var(--space-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-control-sm);
+    color: var(--terminal-fg);
+    background: var(--terminal-bg);
+    font-family: var(--font-mono);
+    font-size: var(--font-size-200);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+}

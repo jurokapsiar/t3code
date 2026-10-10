@@ -344,6 +344,18 @@ it.layer(testLayer)("scoped relay", (it) => {
       expect(h.opens).toBe(1);
     }),
   );
+  it.effect("forwards the native connection probe without closing the relay", () =>
+    Effect.gen(function* () {
+      const h = yield* harness();
+      const probe = request(9, "server.probe");
+      yield* Queue.offer(h.browser.incoming, probe);
+      expect(yield* Queue.take(h.upstream.outgoing)).toBe(probe);
+      const result = '{"_tag":"Exit","requestId":9,"exit":{"_tag":"Success","value":{}}}';
+      yield* Queue.offer(h.upstream.incoming, result);
+      expect(yield* Queue.take(h.browser.outgoing)).toBe(result);
+      expect(h.fiber.pollUnsafe()).toBeUndefined();
+    }),
+  );
   it.effect.each([{ version: 1 }, { identity: "replacement" }])(
     "rejects initial source protocol or identity mismatch %j",
     (options) =>

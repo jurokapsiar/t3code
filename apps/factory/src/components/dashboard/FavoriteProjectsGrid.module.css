@@ -1,0 +1,180 @@
+@layer app {
+  .section {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: var(--space-3);
+    margin-block-end: var(--space-6);
+  }
+
+  .sectionHeader,
+  .sectionTitleGroup {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .sectionHeader {
+    justify-content: space-between;
+  }
+
+  .sectionTitleGroup {
+    flex-wrap: wrap;
+  }
+
+  .sectionIcon,
+  .folderIcon {
+    flex: 0 0 auto;
+    color: var(--warning);
+  }
+
+  .sectionTitle {
+    margin: 0;
+    color: var(--text-soft);
+    font-size: var(--font-size-300);
+    font-weight: var(--font-weight-semibold);
+  }
+
+  .sectionDescription {
+    margin: 0;
+    color: var(--text-soft);
+    font-size: var(--font-size-200);
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+    gap: var(--space-4);
+    min-width: 0;
+  }
+
+  .projectCard {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .cardHeader {
+    min-width: 0;
+  }
+
+  .cardHeading {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .projectName {
+    min-width: 0;
+    overflow: hidden;
+    margin: 0;
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: var(--font-size-400);
+    font-weight: var(--font-weight-semibold);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .unpinButton {
+    color: var(--warning);
+  }
+
+  .cardContent {
+    display: flex;
+    min-width: 0;
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .meta {
+    display: flex;
+    min-width: 0;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .projectPath {
+    display: block;
+    overflow: hidden;
+    color: var(--text-soft);
+    font-family: var(--font-mono);
+    font-size: var(--font-size-200);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .cardFooter {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    padding-block-start: var(--space-2);
+    border-top: 1px solid var(--border);
+  }
+
+  .statusBadge {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .emptyCard {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: var(--space-1);
+    padding: var(--space-6);
+    text-align: center;
+  }
+
+  .emptyIcon {
+    margin-block-end: var(--space-1);
+    color: var(--text-faint);
+  }
+
+  .emptyTitle,
+  .emptyDescription {
+    margin: 0;
+  }
+
+  .emptyTitle {
+    color: var(--text);
+    font-size: var(--font-size-300);
+    font-weight: var(--font-weight-semibold);
+  }
+
+  .emptyDescription {
+    color: var(--text-soft);
+    font-size: var(--font-size-200);
+  }
+
+  @media (max-width: 767px) {
+    .sectionHeader {
+      align-items: flex-start;
+      flex-direction: column;
+      gap: var(--space-1);
+    }
+
+    .sectionDescription {
+      display: none;
+    }
+  }
+}
+
+@layer app {
+  .cardActions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-0-5);
+  }
+}

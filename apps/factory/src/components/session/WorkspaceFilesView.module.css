@@ -1,0 +1,133 @@
+@layer app {
+  .view {
+    container: workspace-files / inline-size;
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    color: var(--text);
+    background: var(--bg);
+  }
+  .workspaceHeader {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+  }
+  .workspacePath {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-mono);
+    font-size: var(--font-size-200);
+    color: var(--text-soft);
+  }
+  .workspaceContent {
+    display: grid;
+    flex: 1;
+    grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
+    min-width: 0;
+    min-height: 0;
+  }
+  .fileNavigation {
+    min-width: 0;
+    min-height: 0;
+    overflow: auto;
+  }
+  .fileTable {
+    table-layout: fixed;
+  }
+  .fileRow:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: -2px;
+  }
+  .fileName {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+  }
+  .toggleSpace {
+    flex: 0 0 calc(var(--control-sm) + var(--space-1));
+  }
+  .entryAction {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+  }
+  .pathAction {
+    max-width: 100%;
+    min-width: 0;
+  }
+  .pathText {
+    display: block;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .emptyFiles {
+    margin: 0;
+    padding-block: var(--space-2);
+    color: var(--text-soft);
+  }
+  .emptyPreview {
+    margin: 0;
+    padding: var(--space-4);
+    color: var(--text-soft);
+  }
+  .preview {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    overflow: auto;
+    padding: var(--space-4);
+  }
+  .previewHeader {
+    margin-block-end: var(--space-3);
+  }
+  .previewHeader h2 {
+    margin: 0;
+    overflow-wrap: anywhere;
+    font-family: var(--font-mono);
+    font-size: var(--font-size-300);
+    font-weight: var(--font-weight-semibold);
+  }
+  .byteSize {
+    color: var(--text-soft);
+    font-family: var(--font-sans);
+    font-size: var(--font-size-200);
+    font-weight: var(--font-weight-regular);
+    white-space: nowrap;
+  }
+  .previewBody {
+    flex: 1;
+    min-width: 0;
+    overflow: auto;
+  }
+  .fileContent {
+    width: max-content;
+    min-width: 100%;
+    margin: 0;
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: var(--font-size-200);
+    line-height: var(--line-height-300);
+    white-space: pre;
+  }
+
+  @container workspace-files (max-width: 719px) {
+    .workspaceContent {
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: minmax(160px, 40%) minmax(0, 1fr);
+    }
+    .preview {
+      padding: var(--space-3);
+    }
+  }
+}

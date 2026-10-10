@@ -36,12 +36,16 @@ Factory mode is opt-in. Start a server with `t3 serve --factory`, or set
 `T3CODE_FACTORY_ENABLED=true`. The CLI flag takes precedence over the setting.
 Without either, the server keeps its normal single-environment behavior.
 
-To serve a built Factory UI, add `--factory-ui-dir /path/to/t3factory/dist`,
-or set `T3CODE_FACTORY_UI_DIR`. Build that UI with `/factory/` as its asset base.
+Factory is bundled with the server. No separate frontend checkout or build is
+needed for an installed distribution. From a source checkout, run
+`vp run build:factory` once, then `node apps/server/dist/bin.mjs serve --factory`.
+For a custom UI build, override the bundled directory with
+`--factory-ui-dir /path/to/custom/dist` or `T3CODE_FACTORY_UI_DIR`;
+the custom UI must use `/factory/` as its asset base.
 Open `/factory` on the server's browser-reachable address. T3 Code stays at `/`,
 and browser authorization uses the existing `/pair` page and `/api/auth` routes.
 The server reserves `/factory/bootstrap` and `/factory/env` for its own routes.
-A missing or invalid configured build stops startup. Without a UI directory,
+A missing or invalid explicitly configured build stops startup. Without bundled or configured assets,
 Factory UI requests return an explicit error; they do not show T3 Code instead.
 When Factory mode is off, the UI directory is not opened. Pair your browser with
 the host at `/pair`, then open Factory and enroll each source with its one-time

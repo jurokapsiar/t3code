@@ -1,0 +1,82 @@
+@layer app {
+  .form {
+    display: flex;
+    min-height: 0;
+    max-height: calc(min(88dvh, 900px) - 2px);
+    overflow: hidden;
+    flex-direction: column;
+  }
+
+  .dialogHeader {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+  }
+
+  .dialogBody {
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .dialogActions {
+    flex: 0 0 auto;
+  }
+
+  .titleContent {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .titleContent svg {
+    color: var(--accent-fg);
+  }
+
+  .fields {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+
+  .hostFields {
+    display: grid;
+    grid-template-columns: minmax(90px, 1fr) minmax(0, 2fr) minmax(90px, 1fr);
+    gap: var(--space-3);
+  }
+
+  .helpText {
+    margin: 0;
+    color: var(--text-soft);
+    font-size: var(--font-size-200);
+    line-height: var(--line-height-300);
+  }
+
+  .sourceSummary {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-control-sm);
+    background: var(--surface-muted);
+  }
+
+  .sourceSummary p {
+    margin: 0;
+  }
+
+  .sourceSummary code {
+    overflow-wrap: anywhere;
+    color: var(--text-soft);
+    font-size: var(--font-size-100);
+  }
+
+  @media (max-width: 520px) {
+    .hostFields {
+      grid-template-columns: 1fr;
+    }
+  }
+}

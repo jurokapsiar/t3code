@@ -8,21 +8,16 @@ import {
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
+import { takeFactoryFrameMessages } from "./factoryFrameCapture";
+
+export { isFactoryEmbedRequested } from "./factoryFrameCapture";
+
 const isFrameInit = Schema.is(FactoryFrameInitMessage);
 const isFrameMessage = Schema.is(FactoryFrameMessage);
 const isFrameTarget = Schema.is(FactoryFrameTargetSchema);
 
 export interface FactoryEmbedRoute {
   readonly target: FactoryFrameTarget;
-}
-
-export function isFactoryEmbedRequested(href?: string): boolean {
-  try {
-    const url = new URL(href ?? window.location.href);
-    return url.searchParams.has("factoryEmbedded") || url.searchParams.has("factoryRegistrationId");
-  } catch {
-    return false;
-  }
 }
 
 export class FactoryEmbedError extends Error {
@@ -110,10 +105,12 @@ export function validateFactoryFrameInit(input: {
   return input.data;
 }
 
+/** `earlyMessages` replays parent messages captured before the app chunk loaded. */
 export function waitForFactoryFrameInit(
   routeTarget: FactoryFrameTarget,
   host: Window = window,
   timeoutMs = 10_000,
+  earlyMessages: readonly MessageEvent<unknown>[] = takeFactoryFrameMessages(),
 ): Promise<typeof FactoryFrameInitMessage.Type> {
   if (host.parent === host) return Promise.reject(new FactoryEmbedError("invalid-parent"));
   return new Promise((resolve, reject) => {
@@ -151,6 +148,7 @@ export function waitForFactoryFrameInit(
       resolve(event.data);
     };
     host.addEventListener("message", onMessage);
+    for (const event of earlyMessages) onMessage(event);
   });
 }
 

@@ -1,0 +1,48 @@
+@layer components {
+  .progress {
+    position: relative;
+    width: 100%;
+    height: 4px;
+    overflow: hidden;
+    border-radius: var(--radius-pill);
+    background: var(--surface-sunken);
+  }
+  .fill {
+    height: 100%;
+    border-radius: inherit;
+    background: var(--accent);
+    transition: width var(--duration-medium) var(--ease-standard);
+  }
+  .progress[data-indeterminate] .fill {
+    position: absolute;
+    inset-block: 0;
+    width: 35%;
+    animation: progress 1.4s var(--ease-emphasized) infinite;
+  }
+  @keyframes progress {
+    from {
+      transform: translateX(-100%);
+    }
+    to {
+      transform: translateX(300%);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .progress[data-indeterminate] .fill {
+      animation: none;
+      width: 35%;
+      transform: translateX(90%);
+    }
+    .fill {
+      transition: none;
+    }
+  }
+  @media (forced-colors: active) {
+    .progress {
+      border: 1px solid CanvasText;
+    }
+    .fill {
+      background: Highlight;
+    }
+  }
+}

@@ -19,6 +19,7 @@ import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 
+import { isFactoryEmbedRequested } from "../factoryFrameCapture";
 import { randomUUID } from "./utils";
 
 const CLIENT_ID_STORAGE_KEY = "t3.backgroundActivity.clientId";
@@ -173,7 +174,13 @@ export const backgroundActivityObserverLayer = Layer.succeed(
 
 export const backgroundActivityReporterLayer = Layer.effectDiscard(
   Effect.gen(function* () {
-    if (typeof window === "undefined" || typeof document === "undefined") {
+    // Presence is environment-wide; an embedded Factory chat only has a
+    // thread-scoped relay, which rejects it and closes the chat.
+    if (
+      typeof window === "undefined" ||
+      typeof document === "undefined" ||
+      isFactoryEmbedRequested()
+    ) {
       return;
     }
 

@@ -113,7 +113,22 @@ Windows investigation while that suite is not a required gate.
 
 ### Factory contracts artifact
 
-Build the public factory contracts package from the repository root:
+Factory's UI is the `apps/factory` workspace and uses shared workspace contracts.
+Build the server and both browser UIs together from the repository root:
+
+```sh
+vp run build:factory
+node apps/server/dist/bin.mjs serve --factory --base-dir "$PWD/.t3/factory-dev"
+```
+
+The built server automatically serves its bundled Factory at `/factory/`.
+`vp run dev:factory` starts the Factory Vite server; set `FACTORY_UPSTREAM`
+to your isolated Factory backend's origin. `vp run dev:factory:mock` runs
+the simulated-data playground without a backend. See
+[Factory development](../../apps/factory/docs/development.md) for pairing and focused checks.
+
+The artifact packer is only for external consumers, not the in-repo Factory UI.
+Build that public package from the repository root:
 
 ```sh
 node scripts/pack-factory-contracts.ts --output-dir /absolute/path

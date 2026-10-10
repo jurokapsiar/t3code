@@ -1,0 +1,27 @@
+@layer components {
+  .surface {
+    position: fixed;
+    inset: auto;
+    margin: 0;
+    min-width: 220px;
+    max-width: min(400px, calc(100vw - 16px));
+    padding: var(--space-4);
+    overflow: visible;
+    border: 1px solid var(--border-alpha);
+    border-radius: var(--radius-popover);
+    background: var(--bg-elev);
+    color: var(--text);
+    box-shadow: var(--shadow-menu);
+  }
+  .surface::backdrop {
+    background: transparent;
+  }
+  .surface[data-open] {
+    display: block;
+  }
+  @media (forced-colors: active) {
+    .surface {
+      border-color: CanvasText;
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "T3 Factory",
+  "description": "Multi-instance session orchestrator, diff inspector, and project control plane for t3 code serve.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,41 @@
+{
+  "name": "@t3tools/factory",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vp dev --port=3000 --host=0.0.0.0",
+    "dev:mock": "vp dev --mode mock --port=3000 --host=127.0.0.1",
+    "build": "vp build",
+    "preview": "vp preview",
+    "typecheck": "tsc --noEmit",
+    "test": "node ../../node_modules/vite-plus/bin/vp test run",
+    "test:bundle": "tsx scripts/check-initial-bundle.ts"
+  },
+  "dependencies": {
+    "@fluentui/react-headless-components-preview": "0.3.1",
+    "@t3tools/contracts": "workspace:*",
+    "@tanstack/react-query": "^5.103.2",
+    "@tanstack/react-table": "^9.2.4",
+    "effect": "catalog:",
+    "lucide-react": "^0.546.0",
+    "react": "19.2.6",
+    "react-dom": "19.2.6",
+    "zod": "^4.6.5",
+    "zustand": "^5.0.15"
+  },
+  "devDependencies": {
+    "@effect/vitest": "catalog:",
+    "@tanstack/table-core": "9.2.4",
+    "@types/node": "catalog:",
+    "@types/react": "~19.3.0",
+    "@types/react-dom": "~19.2.3",
+    "@types/ws": "8.18.1",
+    "@vitejs/plugin-react": "^6.1.1",
+    "tsx": "^4.21.0",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vite-plus": "catalog:",
+    "ws": "8.18.3"
+  }
+}

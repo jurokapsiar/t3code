@@ -1,0 +1,83 @@
+@layer components {
+  .table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    color: var(--text);
+    background: var(--bg-elev);
+    font-size: var(--font-size-200);
+    line-height: var(--line-height-200);
+    text-align: start;
+  }
+  .headerCell {
+    position: sticky;
+    z-index: 1;
+    top: 0;
+    height: calc(var(--control-md) + var(--space-1));
+    padding: 0 var(--space-3);
+    border-bottom: 1px solid var(--border);
+    color: var(--text-soft);
+    background: var(--bg-elev);
+    font-size: var(--font-size-100);
+    font-weight: var(--font-weight-semibold);
+    letter-spacing: 0.04em;
+    text-align: start;
+    text-transform: uppercase;
+  }
+  .cell {
+    height: calc(var(--control-md) + var(--space-1));
+    padding: 0 var(--space-3);
+    border-bottom: 1px solid var(--border);
+    vertical-align: middle;
+  }
+  .row:hover > .cell {
+    background: var(--surface-muted);
+  }
+  .row[data-kind="group"] > .cell {
+    color: var(--text);
+    font-weight: var(--font-weight-semibold);
+    background: var(--bg-soft);
+  }
+  .row[data-selected="true"] > .cell,
+  .row[data-selected=""] > .cell {
+    background: var(--accent-soft);
+  }
+  .row[data-selected="true"] > .cell:first-child,
+  .row[data-selected=""] > .cell:first-child {
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
+  .row > .cell:first-child {
+    padding-inline-start: calc(var(--space-3) + var(--level, 0px));
+  }
+  .row:last-child > .cell {
+    border-bottom-color: transparent;
+  }
+  .treeToggle {
+    width: var(--control-sm);
+    min-width: var(--control-sm);
+    height: var(--control-sm);
+    padding: 0;
+    margin-inline-end: var(--space-1);
+  }
+  .treeToggle svg {
+    transition: transform var(--duration-fast) var(--ease-standard);
+  }
+  .treeToggle[aria-expanded="true"] svg {
+    transform: rotate(90deg);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .treeToggle svg {
+      transition: none;
+    }
+  }
+  @media (forced-colors: active) {
+    .headerCell,
+    .cell {
+      border-color: CanvasText;
+    }
+    .row[data-selected="true"] > .cell:first-child,
+    .row[data-selected=""] > .cell:first-child {
+      box-shadow: inset 3px 0 0 Highlight;
+    }
+  }
+}

@@ -1,0 +1,107 @@
+@layer components {
+  .card {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    padding: var(--space-4);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-surface);
+    background: var(--bg-elev);
+    box-shadow: var(--shadow-2);
+    transition:
+      transform var(--duration-fast) var(--ease-standard),
+      box-shadow var(--duration-fast) var(--ease-standard),
+      border-color var(--duration-fast) var(--ease-standard);
+  }
+  .card[data-appearance="outline"] {
+    background: transparent;
+    box-shadow: none;
+  }
+  .card[data-appearance="subtle"] {
+    background: var(--bg-soft);
+    box-shadow: none;
+    border-color: transparent;
+  }
+  .card[data-tone="warning"] {
+    border-color: var(--warning-border);
+    background: var(--warning-soft);
+  }
+  .card[data-tone="brand"] {
+    border-color: var(--accent-border);
+    background: var(--accent-soft);
+  }
+  .card[data-selected] {
+    border-color: var(--accent);
+    box-shadow:
+      inset 3px 0 0 var(--accent),
+      var(--shadow-2);
+  }
+  .card[data-interactive]:not([aria-disabled="true"]) {
+    cursor: pointer;
+  }
+  .card[data-interactive]:not([aria-disabled="true"]):hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-3);
+  }
+  .card:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+  }
+  .card[aria-disabled="true"] {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+  .header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    min-width: 0;
+  }
+  .header > * {
+    min-width: 0;
+  }
+  .heading {
+    flex: 1;
+    color: var(--text);
+    font-size: var(--font-size-300);
+    font-weight: var(--font-weight-semibold);
+  }
+  .description {
+    color: var(--text-muted);
+    font-size: var(--font-size-200);
+  }
+  .action {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-inline-start: auto;
+  }
+  .footer {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding-top: var(--space-2);
+  }
+  .footer > :last-child {
+    margin-inline-start: auto;
+  }
+  .preview {
+    overflow: hidden;
+    border-radius: var(--radius-control);
+    background: var(--surface-muted);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .card {
+      transition: none;
+    }
+  }
+  @media (forced-colors: active) {
+    .card {
+      border-color: CanvasText;
+    }
+    .card[data-selected] {
+      outline: 2px solid Highlight;
+    }
+  }
+}

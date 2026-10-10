@@ -53,6 +53,7 @@ const rpc = (
 /** Static opt-in list. New source RPCs do not gain relay access automatically. */
 export const relayPolicy = {
   "server.getConfig": rpc("server.getConfig", "factory:read"),
+  "server.probe": rpc("server.probe", "factory:read"),
   subscribeServerConfig: rpc("subscribeServerConfig", "factory:read"),
   "server.getSettings": rpc("server.getSettings", "factory:read"),
   "server.updateSettings": rpc("server.updateSettings", "factory:admin"),

@@ -570,7 +570,8 @@ const make = Effect.gen(function* () {
             current === undefined ||
             !isEnabled(current) ||
             current.endpoint !== reference.endpoint ||
-            owner.state.config !== config
+            // Grants depend on the snapshot's environment; partial updates keep that object.
+            owner.state.config?.environment !== config.environment
           )
             return yield* new SourceFailure({ reason: "unavailable" });
           yield* checkCurrent;

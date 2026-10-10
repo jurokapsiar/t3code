@@ -1,0 +1,32 @@
+@layer components {
+  .link {
+    color: var(--accent-fg);
+    text-decoration: underline;
+    text-decoration-color: var(--accent-border);
+    text-underline-offset: 3px;
+    border-radius: var(--radius-xs);
+    cursor: pointer;
+    transition:
+      color var(--duration-fast) var(--ease-standard),
+      text-decoration-color var(--duration-fast) var(--ease-standard);
+  }
+  .link:hover:not([data-disabled]) {
+    color: var(--accent-strong);
+    text-decoration-color: currentColor;
+  }
+  .link:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+  }
+  .link[data-disabled],
+  .link[data-disabled-focusable] {
+    color: var(--text-disabled);
+    cursor: not-allowed;
+    text-decoration-color: var(--text-disabled);
+  }
+  @media (forced-colors: active) {
+    .link:focus-visible {
+      outline-color: Highlight;
+    }
+  }
+}

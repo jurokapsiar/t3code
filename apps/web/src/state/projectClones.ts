@@ -4,6 +4,7 @@ import type { EnvironmentId, ProjectCloneSnapshot, ScopedProjectRef } from "@t3t
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
 
+import { isFactoryEmbedRequested } from "../factoryFrameCapture";
 import { environmentServerConfigsAtom } from "./server";
 import { sourceControlEnvironment } from "./sourceControl";
 
@@ -13,14 +14,27 @@ const EMPTY_CLONE_ATOM = Atom.make<ProjectCloneSnapshot | null>(null).pipe(
 );
 
 /**
+ * Clone tracking is environment-wide, so an embedded Factory chat, whose relay
+ * only admits thread-scoped reads, must not open it.
+ */
+export function shouldTrackProjectClones(input: {
+  readonly projectCloneTracking: boolean | undefined;
+  readonly factoryEmbedded: boolean;
+}): boolean {
+  return input.projectCloneTracking === true && !input.factoryEmbedded;
+}
+
+/**
  * Latest clone list an environment has streamed; empty until the subscription
  * delivers, and never subscribed on servers that predate clone tracking.
  */
 export const environmentProjectClonesAtom = Atom.family((environmentId: EnvironmentId) =>
   Atom.make((get): ReadonlyArray<ProjectCloneSnapshot> => {
-    const supported =
-      get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
-        .projectCloneTracking === true;
+    const supported = shouldTrackProjectClones({
+      projectCloneTracking: get(environmentServerConfigsAtom).get(environmentId)?.environment
+        .capabilities.projectCloneTracking,
+      factoryEmbedded: typeof window !== "undefined" && isFactoryEmbedRequested(),
+    });
     if (!supported) return EMPTY_CLONES;
     const result = get(sourceControlEnvironment.projectClones({ environmentId, input: {} }));
     return Option.getOrElse(AsyncResult.value(result), () => EMPTY_CLONES);

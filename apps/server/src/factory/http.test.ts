@@ -217,14 +217,24 @@ it.layer(
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;
       const fs = yield* FileSystem.FileSystem;
-      const factoryUiDir = yield* fs.makeTempDirectoryScoped({ prefix: "empty-factory-ui-" });
-      const result = yield* HttpRouter.toHttpEffect(factoryHttpRouteLayer).pipe(
-        Effect.provide(ServerConfig.layer({ ...config, factoryEnabled: true, factoryUiDir })),
-        Effect.result,
-      );
-      expect(Result.isFailure(result)).toBe(true);
-      if (Result.isFailure(result))
-        expect(result.failure).toMatchObject({ _tag: "FactoryUiError" });
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "invalid-factory-ui-" });
+      yield* fs.makeDirectory(`${root}/empty-index`);
+      yield* fs.writeFileString(`${root}/empty-index/index.html`, "");
+      yield* fs.writeFileString(`${root}/not-a-directory`, "Factory");
+      for (const factoryUiDir of [
+        root,
+        `${root}/missing`,
+        `${root}/not-a-directory`,
+        `${root}/empty-index`,
+      ]) {
+        const result = yield* HttpRouter.toHttpEffect(factoryHttpRouteLayer).pipe(
+          Effect.provide(ServerConfig.layer({ ...config, factoryEnabled: true, factoryUiDir })),
+          Effect.result,
+        );
+        expect(Result.isFailure(result)).toBe(true);
+        if (Result.isFailure(result))
+          expect(result.failure).toMatchObject({ _tag: "FactoryUiError" });
+      }
     }),
   );
 

@@ -432,7 +432,9 @@ export const resolveServerConfig = (
     const rawFactoryUiDir = Option.getOrUndefined(normalizedFlags.factoryUiDir) ?? env.factoryUiDir;
     const factoryUiDir =
       rawFactoryUiDir === undefined
-        ? undefined
+        ? factoryEnabled
+          ? yield* ServerConfig.resolveFactoryUiDir()
+          : undefined
         : path.resolve(yield* expandHomePath(rawFactoryUiDir));
     const staticDir = devUrl ? undefined : yield* ServerConfig.resolveStaticDir();
     const host = Option.getOrElse(

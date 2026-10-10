@@ -11,6 +11,7 @@ import {
   validateFactoryFrameInit,
   waitForFactoryFrameInit,
 } from "./factoryEmbed";
+import { captureFactoryFrameMessages } from "./factoryFrameCapture";
 
 const target = Schema.decodeSync(FactoryFrameTarget)({
   registrationId: "registration-a",
@@ -126,6 +127,77 @@ describe("factory embedded routes", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("accepts a parent init delivered before the app started waiting", async () => {
+    vi.useFakeTimers();
+    try {
+      const frame = fakeFrameWindow();
+      const capture = captureFactoryFrameMessages(frame.host);
+      const initEvent = () =>
+        Object.assign(new Event("message"), {
+          origin: "https://factory.test",
+          source: frame.parent,
+          data: { _tag: "init", version: 1, target },
+        }) as MessageEvent;
+      frame.events.dispatchEvent(
+        Object.assign(new Event("message"), { source: {}, data: "unrelated" }),
+      );
+      frame.events.dispatchEvent(initEvent());
+
+      // React StrictMode starts, cancels, and restarts the wait for one document load.
+      const first = waitForFactoryFrameInit(target, frame.host, 100, capture.take());
+      const second = waitForFactoryFrameInit(target, frame.host, 100, capture.take());
+      await expect(first).resolves.toMatchObject({ target, version: 1 });
+      await expect(second).resolves.toMatchObject({ target, version: 1 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retains only the first parent message before the app starts waiting", () => {
+    const frame = fakeFrameWindow();
+    const capture = captureFactoryFrameMessages(frame.host);
+    const parentEvent = (data: unknown) =>
+      Object.assign(new Event("message"), {
+        origin: "https://factory.test",
+        source: frame.parent,
+        data,
+      }) as MessageEvent;
+    frame.events.dispatchEvent(Object.assign(new Event("message"), { source: {}, data: "x" }));
+    const first = parentEvent({ _tag: "init", version: 1, target });
+    frame.events.dispatchEvent(first);
+    for (let index = 0; index < 1_000; index++) frame.events.dispatchEvent(parentEvent(index));
+    expect(capture.take()).toEqual([first]);
+    expect(capture.take()).toEqual([first]);
+  });
+
+  it("applies the parent, origin, and target guards to early init messages", async () => {
+    const frame = fakeFrameWindow();
+    const capture = captureFactoryFrameMessages(frame.host);
+    frame.events.dispatchEvent(
+      Object.assign(new Event("message"), {
+        origin: "https://factory.test",
+        source: frame.parent,
+        data: { _tag: "init", version: 1, target: { ...target, threadId: "thread-b" } },
+      }),
+    );
+    await expect(
+      waitForFactoryFrameInit(target, frame.host, 100, capture.take()),
+    ).rejects.toMatchObject({ code: "target-mismatch" });
+
+    const foreign = fakeFrameWindow();
+    const foreignCapture = captureFactoryFrameMessages(foreign.host);
+    foreign.events.dispatchEvent(
+      Object.assign(new Event("message"), {
+        origin: "https://other.test",
+        source: foreign.parent,
+        data: { _tag: "init", version: 1, target },
+      }),
+    );
+    await expect(
+      waitForFactoryFrameInit(target, foreign.host, 100, foreignCapture.take()),
+    ).rejects.toMatchObject({ code: "invalid-parent" });
   });
 
   it("waits for the matching live connection and thread before ready", () => {

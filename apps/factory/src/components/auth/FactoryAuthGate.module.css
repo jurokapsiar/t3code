@@ -1,0 +1,22 @@
+@layer app {
+  .gate {
+    display: grid;
+    place-items: center;
+    min-height: 100dvh;
+    padding: var(--space-6);
+  }
+
+  .description {
+    color: var(--text-soft);
+    font-size: var(--font-size-300);
+    max-width: 48ch;
+    margin-block: var(--space-4);
+  }
+
+  .actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-4);
+  }
+}

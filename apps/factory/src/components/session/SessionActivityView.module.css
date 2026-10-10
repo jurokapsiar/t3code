@@ -1,0 +1,47 @@
+@layer app {
+  .view {
+    display: grid;
+    align-content: start;
+    gap: var(--space-5);
+    padding: var(--space-4);
+    color: var(--text);
+  }
+  .view section {
+    min-width: 0;
+  }
+  .view h3 {
+    margin: 0 0 var(--space-2);
+    font-size: var(--font-size-300);
+  }
+  .view p {
+    color: var(--text-soft);
+  }
+  .items {
+    display: grid;
+    gap: var(--space-2);
+    margin: var(--space-3) 0;
+    padding: 0;
+    list-style: none;
+  }
+  .item {
+    min-width: 0;
+    padding: var(--space-3);
+  }
+  .item header {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-2);
+    color: var(--text-soft);
+    font-size: var(--font-size-200);
+  }
+  .item pre,
+  .event {
+    max-height: 22rem;
+    overflow: auto;
+    margin: var(--space-2) 0 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-family: var(--font-mono);
+    font-size: var(--font-size-200);
+  }
+}

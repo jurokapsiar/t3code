@@ -4,6 +4,7 @@ import * as NodeReadline from "node:readline";
 import * as NodeStream from "node:stream";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
+import * as NodeModule from "node:module";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import * as Context from "effect/Context";
@@ -107,11 +108,7 @@ class GateFailure extends Schema.TaggedError<GateFailure>()("GateFailure", {
 }) {}
 
 export const phase2Gate = Effect.gen(function* () {
-  const uiCheckout = process.env.T3_FACTORY_UI_CHECKOUT;
-  if (!uiCheckout)
-    return yield* new GateFailure({
-      detail: "Set T3_FACTORY_UI_CHECKOUT to run the cross-repository production gate.",
-    });
+  const uiCheckout = NodeURL.fileURLToPath(new URL("../../../../factory/", import.meta.url));
   const fs = yield* FileSystem.FileSystem;
   const workspace = yield* fs.makeTempDirectoryScoped({ prefix: "t3-phase2-workspace-" });
   yield* fs.makeDirectory(`${workspace}/nested`);
@@ -363,7 +360,9 @@ export const phase2Gate = Effect.gen(function* () {
     string,
     { readonly href: string; readonly init: FactoryFrameInitMessageType }
   >();
-  const nativeFrameCli = NodePath.join(uiCheckout, "node_modules", ".bin", "tsx");
+  const tsxLoader = NodeURL.pathToFileURL(
+    NodeModule.createRequire(NodePath.join(uiCheckout, "package.json")).resolve("tsx/esm"),
+  ).href;
   const nativeFrameExchange = (input: {
     readonly href: string;
     readonly init: FactoryFrameInitMessageType;
@@ -375,12 +374,16 @@ export const phase2Gate = Effect.gen(function* () {
     readonly failureCode?: FactoryFrameErrorCodeType;
   }) =>
     Effect.sync(() => {
-      const stdout = NodeChildProcess.execFileSync(nativeFrameCli, [nativeFrameHelperPath], {
-        cwd: uiCheckout,
-        input: JSON.stringify({ origin: factory.origin, ...input }),
-        encoding: "utf8",
-        timeout: 30_000,
-      });
+      const stdout = NodeChildProcess.execFileSync(
+        process.execPath,
+        ["--import", tsxLoader, nativeFrameHelperPath],
+        {
+          cwd: uiCheckout,
+          input: JSON.stringify({ origin: factory.origin, ...input }),
+          encoding: "utf8",
+          timeout: 30_000,
+        },
+      );
       return decodeNativeFrameReply(JSON.parse(stdout));
     });
   const bootstrapFrame = (
@@ -745,7 +748,7 @@ export const phase2Gate = Effect.gen(function* () {
     const cancellation = new AbortController();
     const child = NodeChildProcess.spawn(
       process.execPath,
-      ["--import", "tsx", "src/factory/testkit/runProductionGate.ts"],
+      ["--import", tsxLoader, "src/factory/testkit/runProductionGate.ts"],
       {
         cwd: uiCheckout,
         env: {

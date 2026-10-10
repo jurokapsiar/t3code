@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Packages the server single-executable into a self-contained per-platform
- * archive: the `t3` binary, the web client, the resource monitor, and a
+ * archive: the `t3` binary, the web and Factory clients, the resource monitor, and a
  * production install of the native packages the bundle keeps external. The
  * archive is the unit every runtime installer downloads, so nothing in it may
  * require Node, npm, or a compiler on the machine that unpacks it.
@@ -11,6 +11,7 @@
  *
  *   t3 | t3.exe          the single-executable
  *   client/              web app served by the server
+ *   factory/             opt-in Factory app served at /factory
  *   resource-monitor/    per-platform Rust helper, same paths as the npm package
  *   node_modules/        runtime externals (node-pty, msgpackr-extract, fff)
  */
@@ -42,6 +43,7 @@ import {
 } from "./build-desktop-artifact.ts";
 import { selectCliRuntimeExternalDependencies } from "./lib/cli-external-packages.ts";
 import { resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
+import { stageServerUiAssets } from "./lib/server-ui-assets.ts";
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
 const BuildArch = Schema.Literals(["arm64", "x64"]);
@@ -269,19 +271,6 @@ const removeNestedBinDirectories = (
     }
   });
 
-/** Copies the web client without its sourcemaps, which nothing serves. */
-const stageWebClient = Effect.fn("stageWebClient")(function* (source: string, target: string) {
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  yield* fs.copy(source, target);
-  const maps = (yield* fs.readDirectory(target, { recursive: true })).filter((entry) =>
-    entry.endsWith(".map"),
-  );
-  for (const entry of maps) {
-    yield* fs.remove(path.join(target, entry), { force: true });
-  }
-});
-
 const MacSigningConfig = Config.all({
   identity: Config.String("T3CODE_CLI_MAC_SIGN_IDENTITY").pipe(Config.option),
   appleApiKey: Config.String("APPLE_API_KEY").pipe(Config.option),
@@ -486,6 +475,7 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
       ? path.join(serverDir, "dist-exe", executableName)
       : targetExecutable;
   const webClient = path.join(serverDir, "dist/client");
+  const factoryClient = path.join(serverDir, "dist/factory");
   const resourceMonitorDir = Option.getOrElse(input.resourceMonitorDir, () =>
     path.join(serverDir, "dist/resource-monitor"),
   );
@@ -495,6 +485,10 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
     `Run \`node apps/server/scripts/cli.ts build-exe --target ${targetKey}\` first.`,
   );
   yield* requireInput(path.join(webClient, "index.html"), "Run `vp run --filter t3 build` first.");
+  yield* requireInput(
+    path.join(factoryClient, "index.html"),
+    "Run `vp run --filter t3 build` first.",
+  );
   yield* requireInput(
     resourceMonitorDir,
     "Build the resource monitor or pass --resource-monitor-dir.",
@@ -507,7 +501,12 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
 
   yield* Effect.log(`[cli-archive] Staging ${stem}...`);
   yield* fs.copyFile(builtExecutable, path.join(contentDir, executableName));
-  yield* stageWebClient(webClient, path.join(contentDir, "client"));
+  yield* stageServerUiAssets({
+    webDist: webClient,
+    factoryDist: factoryClient,
+    targetDir: contentDir,
+    stripSourceMaps: true,
+  });
   yield* fs.copy(resourceMonitorDir, path.join(contentDir, "resource-monitor"));
   yield* stageRuntimeExternals({
     repoRoot,

@@ -1,0 +1,33 @@
+@layer app {
+  .form {
+    display: flex;
+    min-height: 0;
+    max-height: calc(min(88dvh, 900px) - 2px);
+    flex-direction: column;
+  }
+  .body {
+    display: flex;
+    min-height: 0;
+    flex-direction: column;
+    gap: var(--space-4);
+    overflow-y: auto;
+  }
+  .guidance,
+  .empty {
+    margin: 0;
+    color: var(--text-soft);
+    font-size: var(--font-size-200);
+  }
+  .projects {
+    display: flex;
+    max-height: 34dvh;
+    min-height: 0;
+    flex-direction: column;
+    gap: var(--space-3);
+    overflow-y: auto;
+  }
+  .actions {
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+  }
+}

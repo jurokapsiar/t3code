@@ -1,0 +1,102 @@
+@layer app {
+  .view {
+    min-width: 0;
+    padding: var(--space-4);
+    color: var(--text);
+  }
+  .intro h2 {
+    margin: 0;
+    font-size: var(--font-size-400);
+  }
+  .intro p,
+  .empty {
+    color: var(--text-soft);
+  }
+  .timeline {
+    display: grid;
+    gap: var(--space-3);
+    margin: var(--space-4) 0;
+    padding: 0;
+    list-style: none;
+  }
+  .checkpointCard {
+    min-width: 0;
+    padding: var(--space-4);
+  }
+  .cardHeader,
+  .cardHeader > div {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+  }
+  .cardHeader h3 {
+    margin: 0;
+    font-size: var(--font-size-300);
+  }
+  .cardHeader time {
+    color: var(--text-soft);
+    font-size: var(--font-size-200);
+  }
+  .refs {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+    gap: var(--space-2);
+    margin: var(--space-3) 0;
+  }
+  .refs dt {
+    color: var(--text-soft);
+    font-size: var(--font-size-200);
+  }
+  .refs dd {
+    margin: var(--space-1) 0 0;
+    overflow-wrap: anywhere;
+  }
+  .refs code,
+  .files code {
+    font-family: var(--font-mono);
+    font-size: var(--font-size-200);
+  }
+  .files h4 {
+    margin: var(--space-3) 0 var(--space-2);
+  }
+  .files ul {
+    display: grid;
+    gap: var(--space-1);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .files li {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    min-width: 0;
+  }
+  .files li code {
+    overflow-wrap: anywhere;
+  }
+  .files li span {
+    color: var(--text-soft);
+    font-size: var(--font-size-200);
+  }
+}
+
+@layer app {
+  .rollbackAction {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    padding: 0 var(--space-3) var(--space-3);
+  }
+  .rollbackAction p,
+  .rollbackReason {
+    margin: 0;
+    color: var(--text-soft);
+    font-size: var(--font-size-200);
+  }
+  .rollbackReason {
+    padding: 0 var(--space-3) var(--space-3);
+  }
+}

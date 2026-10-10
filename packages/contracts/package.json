@@ -15,6 +15,22 @@
       "types": "./src/settings.ts",
       "import": "./src/settings.ts"
     },
+    "./factory": {
+      "types": "./src/factory.ts",
+      "import": "./src/factory.ts"
+    },
+    "./factoryRpc": {
+      "types": "./src/factoryRpc.ts",
+      "import": "./src/factoryRpc.ts"
+    },
+    "./rpc": {
+      "types": "./src/rpc.ts",
+      "import": "./src/rpc.ts"
+    },
+    "./environmentHttp": {
+      "types": "./src/environmentHttp.ts",
+      "import": "./src/environmentHttp.ts"
+    },
     "./factoryRelayUrl": {
       "types": "./src/factoryRelayUrl.ts",
       "import": "./src/factoryRelayUrl.ts"

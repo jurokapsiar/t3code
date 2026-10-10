@@ -1,0 +1,79 @@
+@layer components {
+  .surface {
+    position: fixed;
+    inset: 0;
+    margin: auto;
+    width: min(calc(100vw - 32px), 560px);
+    max-height: min(88vh, 900px);
+    overflow: auto;
+    padding: 0;
+    border: 1px solid var(--border-alpha);
+    border-radius: var(--radius-surface);
+    background: var(--bg-elev);
+    color: var(--text);
+    box-shadow: var(--shadow-6);
+  }
+
+  .surface[data-size="small"] {
+    width: min(calc(100vw - 32px), 400px);
+  }
+  .surface[data-size="medium"] {
+    width: min(calc(100vw - 32px), 560px);
+  }
+  .surface[data-size="large"] {
+    width: min(calc(100vw - 32px), 760px);
+  }
+
+  .surface::backdrop {
+    background: var(--overlay);
+    backdrop-filter: blur(2px);
+  }
+
+  .header {
+    padding: var(--space-6) var(--space-6) 0;
+  }
+  .title {
+    margin: 0;
+    color: var(--text);
+    font-size: var(--font-size-500);
+    font-weight: var(--font-weight-semibold);
+    line-height: var(--line-height-500);
+  }
+  .body {
+    padding: var(--space-4) var(--space-6);
+    color: var(--text-muted);
+  }
+  .actions {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-4) var(--space-6) var(--space-6);
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .surface {
+      animation: dialog-enter var(--duration-medium) var(--ease-emphasized);
+    }
+    @keyframes dialog-enter {
+      from {
+        opacity: 0;
+        transform: translateY(var(--space-2)) scale(0.98);
+      }
+      to {
+        opacity: 1;
+        transform: none;
+      }
+    }
+  }
+
+  @media (forced-colors: active) {
+    .surface {
+      border: 1px solid CanvasText;
+    }
+    .surface::backdrop {
+      background: Canvas;
+      opacity: 0.8;
+    }
+  }
+}

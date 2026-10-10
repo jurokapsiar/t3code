@@ -1,0 +1,58 @@
+@layer components {
+  .bar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: var(--space-3);
+    width: 100%;
+    padding: var(--space-3) var(--space-4);
+    border: 1px solid var(--info-border);
+    border-radius: var(--radius-control);
+    background: var(--info-soft);
+    color: var(--text);
+  }
+  .bar[data-intent="info"] {
+    border-color: var(--info-border);
+    background: var(--info-soft);
+  }
+  .bar[data-intent="success"] {
+    border-color: var(--success-border);
+    background: var(--success-soft);
+  }
+  .bar[data-intent="warning"] {
+    border-color: var(--warning-border);
+    background: var(--warning-soft);
+  }
+  .bar[data-intent="error"] {
+    border-color: var(--danger-border);
+    background: var(--danger-soft);
+  }
+  .body {
+    min-width: 0;
+    color: var(--text);
+  }
+  .title {
+    margin-inline-end: var(--space-1);
+    font-weight: var(--font-weight-semibold);
+  }
+  .actions {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--space-2);
+  }
+  .bar[data-layout="multiline"] {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+  }
+  @media (max-width: 480px) {
+    .bar {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+  @media (forced-colors: active) {
+    .bar {
+      border-color: CanvasText;
+    }
+  }
+}

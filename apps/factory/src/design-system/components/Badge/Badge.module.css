@@ -1,0 +1,146 @@
+@layer components {
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1-5);
+    min-height: var(--control-sm);
+    padding-inline: var(--space-2);
+    border: 1px solid transparent;
+    border-radius: var(--radius-pill);
+    color: var(--text-muted);
+    background: var(--surface-muted);
+    font: 600 var(--font-size-200)/var(--line-height-200) var(--font-sans);
+    white-space: nowrap;
+  }
+  .badge svg {
+    width: 14px;
+    height: 14px;
+    flex: none;
+  }
+  .badge[data-appearance="filled"] {
+    color: var(--bg-elev);
+    background: var(--text-muted);
+  }
+  .badge[data-appearance="outline"] {
+    border-color: var(--border-strong);
+    background: transparent;
+  }
+  .badge[data-appearance="ghost"] {
+    background: transparent;
+  }
+  .badge[data-color="brand"][data-appearance="tint"] {
+    color: var(--accent-fg);
+    background: var(--accent-soft);
+  }
+  .badge[data-color="brand"][data-appearance="ghost"] {
+    color: var(--accent-fg);
+  }
+  .badge[data-color="brand"][data-appearance="outline"] {
+    color: var(--accent-fg);
+    border-color: var(--accent-border);
+  }
+  .badge[data-color="brand"][data-appearance="filled"] {
+    color: var(--accent-contrast);
+    background: var(--accent);
+  }
+  .badge[data-color="success"][data-appearance="tint"] {
+    color: var(--success);
+    background: var(--success-soft);
+  }
+  .badge[data-color="success"][data-appearance="ghost"] {
+    color: var(--success);
+  }
+  .badge[data-color="success"][data-appearance="outline"] {
+    color: var(--success);
+    border-color: var(--success-border);
+  }
+  .badge[data-color="success"][data-appearance="filled"] {
+    color: var(--bg-elev);
+    background: var(--success);
+  }
+  .badge[data-color="warning"][data-appearance="tint"] {
+    color: var(--warning);
+    background: var(--warning-soft);
+  }
+  .badge[data-color="warning"][data-appearance="ghost"] {
+    color: var(--warning);
+  }
+  .badge[data-color="warning"][data-appearance="outline"] {
+    color: var(--warning);
+    border-color: var(--warning-border);
+  }
+  .badge[data-color="warning"][data-appearance="filled"] {
+    color: var(--bg-elev);
+    background: var(--warning);
+  }
+  .badge[data-color="danger"][data-appearance="tint"] {
+    color: var(--danger);
+    background: var(--danger-soft);
+  }
+  .badge[data-color="danger"][data-appearance="ghost"] {
+    color: var(--danger);
+  }
+  .badge[data-color="danger"][data-appearance="outline"] {
+    color: var(--danger);
+    border-color: var(--danger-border);
+  }
+  .badge[data-color="danger"][data-appearance="filled"] {
+    color: var(--bg-elev);
+    background: var(--danger);
+  }
+  .badge[data-color="info"][data-appearance="tint"] {
+    color: var(--info);
+    background: var(--info-soft);
+  }
+  .badge[data-color="info"][data-appearance="ghost"] {
+    color: var(--info);
+  }
+  .badge[data-color="info"][data-appearance="outline"] {
+    color: var(--info);
+    border-color: var(--info-border);
+  }
+  .badge[data-color="info"][data-appearance="filled"] {
+    color: var(--bg-elev);
+    background: var(--info);
+  }
+  .badge[data-appearance="ghost"][data-color="neutral"] {
+    color: var(--text-soft);
+  }
+  .badge[data-size="small"] {
+    min-height: 20px;
+    padding-inline: var(--space-1-5);
+    font-size: var(--font-size-100);
+    line-height: var(--line-height-100);
+  }
+  .badge[data-mono] {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+  .badge[data-dot]::before {
+    content: "";
+    width: 7px;
+    height: 7px;
+    flex: none;
+    border-radius: var(--radius-pill);
+    background: currentColor;
+  }
+  .badge[data-pulse]::before {
+    animation: pulse var(--duration-slow) var(--ease-standard) infinite alternate;
+  }
+  @keyframes pulse {
+    to {
+      opacity: 0.4;
+      transform: scale(0.75);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .badge[data-pulse]::before {
+      animation: none;
+    }
+  }
+  @media (forced-colors: active) {
+    .badge[data-appearance="outline"] {
+      border-color: currentColor;
+    }
+  }
+}

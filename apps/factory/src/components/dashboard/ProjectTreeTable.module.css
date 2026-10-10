@@ -1,0 +1,507 @@
+@layer app {
+  .surface {
+    width: 100%;
+    min-width: 0;
+    container-type: inline-size;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-surface);
+    background: var(--bg-elev);
+    box-shadow: var(--shadow-1);
+  }
+
+  .controls {
+    display: flex;
+    align-items: stretch;
+    flex-direction: column;
+    gap: var(--space-3);
+    padding: var(--space-3);
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-soft);
+  }
+
+  .filters {
+    display: flex;
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: auto;
+    flex: 0 1 auto;
+    flex-wrap: nowrap;
+  }
+
+  .filterTab {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: var(--space-1-5);
+    white-space: nowrap;
+  }
+
+  .filterLabel {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1-5);
+  }
+
+  .filterCount,
+  .waitingCount {
+    min-width: 1.5em;
+    color: inherit;
+    font-family: var(--font-mono);
+    font-size: var(--font-size-100);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .waitingCount {
+    color: var(--warning);
+  }
+
+  .actionRow {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .actionRow > :first-child {
+    flex: 0 0 auto;
+  }
+  .groupFilterIcon[data-active] {
+    color: var(--accent-fg);
+  }
+
+  .searchActions {
+    display: grid;
+    grid-template-areas: "row";
+    grid-template-columns: minmax(0, 1fr);
+    min-width: 0;
+    min-height: var(--control-sm);
+    align-items: center;
+    overflow: hidden;
+    flex: 1 1 auto;
+  }
+
+  .searchBox {
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+
+  .searchPane {
+    display: flex;
+    min-width: 0;
+    flex: 1 1 auto;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--space-1);
+    transform: translateX(100%);
+    opacity: 0;
+    visibility: hidden;
+  }
+
+  .searchClose {
+    flex: 0 0 auto;
+  }
+
+  .treeActions {
+    justify-self: end;
+  }
+
+  .searchPane,
+  .treeActions {
+    grid-area: row;
+    transition:
+      transform var(--duration-medium) var(--ease-emphasized),
+      opacity var(--duration-medium) var(--ease-standard),
+      visibility 0s linear var(--duration-medium);
+  }
+
+  .searchActions[data-search-open] .searchPane {
+    transform: none;
+    opacity: 1;
+    visibility: visible;
+    transition-delay: 0s;
+  }
+
+  .searchActions[data-search-open] .treeActions {
+    transform: translateX(-100%);
+    opacity: 0;
+    visibility: hidden;
+  }
+
+  .searchActions:not([data-search-open]) .treeActions {
+    transition-delay: 0s;
+  }
+  .tableScroller {
+    min-width: 0;
+    overflow-x: auto;
+  }
+  .table {
+    width: 100%;
+    table-layout: fixed;
+  }
+  .headerRow th {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .subjectColumn {
+    width: 34%;
+    overflow: hidden;
+  }
+  .statusColumn {
+    width: 10%;
+  }
+  .providerColumn {
+    width: 8%;
+  }
+  .turnsColumn,
+  .changesColumn,
+  .hostColumn {
+    width: 10%;
+  }
+  .actionsColumn {
+    width: 18%;
+    text-align: end;
+  }
+
+  .projectRow,
+  .sessionRow {
+    cursor: pointer;
+  }
+  .projectRow > td,
+  .sessionRow > td {
+    height: 56px;
+    padding-block: var(--space-1);
+    vertical-align: middle;
+  }
+
+  .projectRow:focus-visible > td,
+  .sessionRow:focus-visible > td {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: -2px;
+  }
+
+  .projectSubject,
+  .sessionSubject {
+    display: flex;
+    width: 100%;
+    min-width: 0;
+    flex-direction: column;
+    gap: var(--space-0-5);
+  }
+
+  .subjectHeading,
+  .subjectMeta {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: var(--space-1);
+    overflow: hidden;
+    white-space: nowrap;
+  }
+
+  .subjectHeading > button,
+  .subjectHeading > svg {
+    flex: 0 0 auto;
+  }
+  .toggleSpacer {
+    width: var(--control-sm);
+    flex: 0 0 var(--control-sm);
+    height: var(--control-sm);
+    margin-inline-end: var(--space-1);
+  }
+
+  .favoriteButton {
+    color: var(--text-faint);
+  }
+  .favoriteButton[aria-pressed="true"] {
+    color: var(--warning);
+  }
+  .projectIcon {
+    color: var(--brand);
+  }
+  .projectName,
+  .sessionTitle {
+    display: block;
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text);
+    font-weight: var(--font-weight-semibold);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    line-height: var(--line-height-200);
+  }
+
+  .projectName {
+    flex: 0 1 auto;
+    font-family: var(--font-mono);
+  }
+  .sessionCount {
+    flex: 0 0 auto;
+  }
+  .subjectMeta {
+    padding-inline-start: calc(var(--control-sm) + var(--space-1));
+  }
+  .branchBadge {
+    min-width: 0;
+    flex: 0 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .projectTag {
+    flex: 0 0 auto;
+  }
+  .projectPath,
+  .worktreePath {
+    display: block;
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text-soft);
+    font-family: var(--font-mono);
+    font-size: var(--font-size-100);
+    line-height: var(--line-height-100);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .projectPath {
+    flex: 1 1 auto;
+  }
+  .stateBadge {
+    white-space: nowrap;
+  }
+  .providerDetails,
+  .metrics {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: var(--space-0-5);
+    font-family: var(--font-mono);
+    font-size: var(--font-size-100);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .mutedText {
+    color: var(--text-soft);
+    font-weight: var(--font-weight-regular);
+  }
+  .diffStats {
+    display: flex;
+    gap: var(--space-1-5);
+    font-weight: var(--font-weight-semibold);
+  }
+  .additions {
+    color: var(--success);
+  }
+  .deletions {
+    color: var(--danger);
+  }
+  .hostValue {
+    display: flex;
+    align-items: center;
+    overflow: hidden;
+    color: var(--text-soft);
+    font-family: var(--font-mono);
+    font-size: var(--font-size-100);
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .hostValue svg {
+    flex: 0 0 auto;
+    margin-inline-end: var(--space-1);
+  }
+  .hostText {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .rowActions {
+    justify-content: flex-end;
+    flex-wrap: nowrap;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+    opacity: 0.6;
+  }
+
+  .projectRow:hover .rowActions,
+  .sessionRow:hover .rowActions,
+  .projectRow:focus-within .rowActions,
+  .sessionRow:focus-within .rowActions {
+    opacity: 1;
+  }
+  .overflowActions {
+    display: none;
+  }
+  .emptyCell {
+    height: 180px;
+    color: var(--text-soft);
+    text-align: center;
+  }
+  .emptyCell svg,
+  .emptyCell strong,
+  .emptyCell span {
+    display: block;
+    margin: var(--space-1) auto;
+  }
+  .emptyCell svg {
+    color: var(--text-faint);
+  }
+  .emptyCell strong {
+    color: var(--text);
+  }
+
+  @container (max-width: 900px) {
+    .providerColumn,
+    .turnsColumn,
+    .hostColumn {
+      display: none;
+    }
+    .subjectColumn {
+      width: 48%;
+    }
+    .statusColumn {
+      width: 14%;
+    }
+    .changesColumn {
+      width: 14%;
+    }
+    .actionsColumn {
+      width: 24%;
+    }
+  }
+
+  @container (max-width: 600px) {
+    .changesColumn {
+      display: none;
+    }
+    .subjectColumn {
+      width: auto;
+    }
+    .statusColumn {
+      width: 72px;
+    }
+    .actionsColumn {
+      width: 48px;
+      padding-inline: var(--space-2);
+    }
+    .rowActions {
+      display: none;
+    }
+    .actionsColumn .columnLabel {
+      display: none;
+    }
+    .overflowActions {
+      display: flex;
+      justify-content: flex-end;
+    }
+    .projectTag,
+    .projectPath,
+    .stateCount {
+      display: none;
+    }
+    .subjectMeta {
+      padding-inline-start: 0;
+    }
+    .branchBadge {
+      max-width: 100%;
+    }
+    .subjectHeading {
+      gap: var(--space-0-5);
+    }
+    .statusColumn {
+      padding-inline: var(--space-1);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .searchPane,
+    .treeActions {
+      transition: none;
+    }
+  }
+}
+
+@layer app {
+  .filterRow {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: var(--space-3);
+  }
+  .statusStack {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-1);
+  }
+  .rowIdentity {
+    display: none;
+  }
+  .sessionSubject {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: var(--space-0-5);
+  }
+  .sourceColumn {
+    width: 18%;
+  }
+  .updatedColumn {
+    width: 18%;
+  }
+  .statusColumn {
+    width: 24%;
+  }
+  .subjectColumn {
+    width: 34%;
+  }
+  .actionsColumn {
+    width: 24%;
+  }
+
+  @container (max-width: 900px) {
+    .sourceColumn,
+    .updatedColumn {
+      display: none;
+    }
+    .subjectColumn {
+      width: 58%;
+    }
+    .statusColumn {
+      width: 24%;
+    }
+    .actionsColumn {
+      width: 18%;
+    }
+  }
+
+  @container (max-width: 600px) {
+    .subjectColumn {
+      width: auto;
+    }
+    .statusColumn {
+      width: 100px;
+    }
+    .actionsColumn {
+      width: 48px;
+    }
+    .rowActions {
+      display: none;
+    }
+    .overflowActions {
+      display: flex;
+      justify-content: flex-end;
+    }
+    .statusStack > :last-child {
+      display: none;
+    }
+    .projectPath {
+      display: none;
+    }
+  }
+}

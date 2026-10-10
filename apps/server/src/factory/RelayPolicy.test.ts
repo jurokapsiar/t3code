@@ -132,6 +132,21 @@ it.each([
   ).toEqual({ allowed: false, reason: "scope-required" });
 });
 
+it("admits the native client's connection health probe as a read", () => {
+  // The shared client probes a live session on wakeup when the source advertises
+  // connectionProbe. Rejecting it closes the embedded chat's relay.
+  expect(authorize("server.probe", {}, false)).toEqual({ allowed: true });
+  expect(
+    RelayPolicy.authorizeRelayRequest({
+      method: "server.probe",
+      payload: {},
+      callerScopes: ["factory:read"],
+      sourceScopes: [],
+      synchronized: true,
+    }),
+  ).toEqual({ allowed: false, reason: "source-scope-required" });
+});
+
 it("only admits explicit methods declared by the actual source RPC group", () => {
   for (const [method, policy] of Object.entries(RelayPolicy.relayPolicy)) {
     expect(WsRpcGroup.requests.has(method)).toBe(true);

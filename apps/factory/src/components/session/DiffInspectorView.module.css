@@ -1,0 +1,78 @@
+@layer app {
+  .view {
+    container: diff-inspector / inline-size;
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    color: var(--text);
+    background: var(--bg);
+  }
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    border-bottom: 1px solid var(--border);
+  }
+  .modeNavigation {
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: auto;
+  }
+  .refresh {
+    margin-inline-start: auto;
+  }
+  .diffPane {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    overflow: auto;
+    padding: var(--space-4);
+    background: var(--code-bg);
+  }
+  .diffPane pre {
+    overflow: auto;
+    margin: var(--space-2) 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-family: var(--font-mono);
+    font-size: var(--font-size-200);
+  }
+  .diffSection {
+    margin-block-end: var(--space-4);
+  }
+  .diffSection header {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+  .diffSection h3 {
+    margin: 0;
+  }
+  .diffPane label {
+    display: block;
+    margin-block-end: var(--space-1);
+    color: var(--text-soft);
+  }
+  .emptyDiff {
+    padding: var(--space-4);
+    color: var(--text-soft);
+    text-align: center;
+  }
+
+  @container diff-inspector (max-width: 600px) {
+    .modeNavigation {
+      flex-basis: 100%;
+    }
+    .refresh {
+      margin-inline-start: 0;
+    }
+  }
+}

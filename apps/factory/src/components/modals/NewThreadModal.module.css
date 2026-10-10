@@ -1,0 +1,65 @@
+@layer app {
+  .form {
+    display: flex;
+    min-height: 0;
+    max-height: calc(min(88dvh, 900px) - 2px);
+    overflow: hidden;
+    flex-direction: column;
+  }
+
+  .dialogHeader {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+  }
+
+  .dialogBody {
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .dialogActions {
+    flex: 0 0 auto;
+  }
+
+  .projectPath {
+    margin: 0;
+    overflow-wrap: anywhere;
+    color: var(--text-soft);
+  }
+
+  .projectPath code {
+    font-family: var(--font-mono);
+    font-size: var(--font-size-200);
+  }
+
+  .titleContent {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .titleContent svg {
+    color: var(--accent-fg);
+  }
+
+  .fields {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+
+  .choiceGrid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-4);
+  }
+
+  @media (max-width: 560px) {
+    .choiceGrid {
+      grid-template-columns: 1fr;
+    }
+  }
+}
